@@ -259,6 +259,43 @@ trap "rm -rf $STAGE" EXIT
 
 cp -R "$VST3_BUNDLE" "$STAGE/"
 
+# --- licences ------------------------------------------------------------
+#
+# TWO OF THESE ARE MANDATORY, not courtesies, and both bind the BINARY:
+#
+#   FreeType (FTL section 2) - a binary distribution must carry a disclaimer, in the distribution
+#   documentation, saying the software is based in part on the work of the FreeType Team. FreeType
+#   is statically linked into the plug-in, so it ships whether or not anyone remembers it.
+#
+#   VST3 SDK (MIT) - the copyright and permission notice must be included in all copies.
+#
+# Copied rather than transcribed, so they cannot drift from the versions actually compiled in. The
+# release ABORTS if one is missing: shipping a binary without a notice its licence requires is worse
+# than a build that stops and says why, and a missing file here is silent in every other respect.
+LICENCE_DIR="$STAGE/Licences"
+mkdir -p "$LICENCE_DIR"
+
+FTL="SynthLib/ThirdParty/freetype/docs/FTL.TXT"
+SDK_LICENCE="${VST3_SDK:-$HOME/Documents/vst3sdk}/LICENSE.txt"
+
+# A function rather than a list of "source:destination" strings: these paths carry dots, spaces and
+# brackets, and splitting them on a separator turned "FTL.TXT:FreeType (FTL).txt" into one mangled
+# filename that then failed the exists check for the wrong reason.
+stage_licence() {
+    if [[ ! -f $1 ]]; then
+        echo "error: licence file missing: $1" >&2
+        echo "       the .dmg must carry it - see THIRD_PARTY.md for which are mandatory." >&2
+        exit 1
+    fi
+    cp "$1" "$LICENCE_DIR/$2"
+}
+
+stage_licence "LICENSE"      "GenBridge (GPLv3).txt"
+stage_licence "$FTL"         "FreeType (FTL).txt"
+stage_licence "$SDK_LICENCE" "VST3 SDK (Steinberg, MIT).txt"
+
+echo "==> staged licences: GPLv3, FreeType FTL, Steinberg MIT"
+
 # NO SYMLINK TO THE VST3 FOLDER, deliberately: it lives under the user's own home
 # directory, so a symlink baked into a .dmg would point at the machine that built
 # it. The Read Me First covers it with a Terminal line and a Finder route instead.
@@ -333,6 +370,26 @@ REQUIREMENTS
 
 macOS 11.5 or later, Apple Silicon or Intel.
 A VST3 host. The plug-in does not work on its own.
+
+LICENCES
+
+GenBridge is free software under the GNU General Public License version 3.
+The full text is in the "Licences" folder in this disk image.
+
+You are entitled to the complete source code for this version. It is at:
+
+    https://github.com/chrispurusha/GenBridge
+
+tagged $VERSION.
+
+Portions of this software are based in part on the work of the FreeType Team
+(https://freetype.org). GenBridge uses FreeType under the FreeType Project
+License; see "Licences/FreeType (FTL).txt".
+
+Portions are copyright (c) 2025 Steinberg Media Technologies GmbH, used under
+the MIT licence; see "Licences/VST3 SDK (Steinberg, MIT).txt". VST is a
+trademark of Steinberg Media Technologies GmbH, registered in Europe and other
+countries.
 EOF
 
 # --- package -------------------------------------------------------------
@@ -356,6 +413,7 @@ echo
 echo "done: $DMG ($(du -h "$DMG" | cut -f1))"
 echo "architectures: $ARCHS"
 echo "contents: $VST3_NAME - registers GenBridge (effect) + GenBridge Instrument"
+echo "licences: GPLv3 + FreeType FTL + Steinberg MIT, in Licences/"
 echo "signature: ad-hoc, NOT notarized - users must clear quarantine"
 echo "your installed copy in ~/Library/Audio/Plug-Ins/VST3 was NOT touched"
 
