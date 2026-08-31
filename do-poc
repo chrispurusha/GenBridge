@@ -1,0 +1,52 @@
+#!/bin/zsh
+# Build the GenBridge proof of concept.
+#
+# A script rather than an Xcode project, for the same reason G2-Edit's do-vst3 is one: this is a
+# handful of C files and two system frameworks, and a build system would only be in the way. When
+# the plug-in wrapper arrives it can bring an Xcode project with it if it needs one.
+
+set -e
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+OUT="${GENBRIDGE_OUT:-$HERE/build}"
+BIN="$OUT/genbridge"
+
+SOURCES=(
+    "$HERE/poc/genbridge.c"
+    "$HERE/poc/device.c"
+    "$HERE/poc/ring.c"
+    "$HERE/poc/resampler.c"
+    "$HERE/poc/drift.c"
+)
+
+# Matching the sibling projects: every one of them targets 11.5, so anything shared later links
+# without the "object file was built for newer macOS version" warnings.
+DEPLOYMENT_TARGET=11.5
+
+mkdir -p "$OUT"
+
+print "building genbridge (arm64 + x86_64)"
+
+for ARCH in arm64 x86_64; do
+    clang \
+        -arch "$ARCH" \
+        -mmacosx-version-min=$DEPLOYMENT_TARGET \
+        -std=c11 \
+        -O2 \
+        -Wall -Wextra -Werror \
+        -I"$HERE/poc" \
+        -framework CoreAudio \
+        -framework CoreFoundation \
+        -o "$OUT/genbridge-$ARCH" \
+        "${SOURCES[@]}"
+done
+
+lipo -create -output "$BIN" "$OUT/genbridge-arm64" "$OUT/genbridge-x86_64"
+rm -f "$OUT/genbridge-arm64" "$OUT/genbridge-x86_64"
+
+# Ad-hoc, like the sibling projects - there is no paid Apple Developer membership behind these.
+# A command line tool needs no entitlements, so this is only about having a stable code identity.
+codesign --force --sign - "$BIN" 2>/dev/null || true
+
+print "built $BIN"
+lipo -info "$BIN"
