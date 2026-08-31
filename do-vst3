@@ -90,7 +90,17 @@ INCLUDES=(-I"$HERE/poc" -I"$HERE/vst3" -I"$HERE/SynthLib/src" -I"$SDK"
 # the GLFW calls out of renderBackendGL.c's gl_present(). The name is G2-specific for historical
 # reasons and would be better as something neutral, but renaming it is a SynthLib change that would
 # ripple through all four projects - worth doing, not worth doing today.
-PLUGIN_DEFS="-DG2_VST3_BUILD=1"
+# THE VERSION THE BUNDLE AND THE HOST BOTH REPORT. The default is for an ordinary developer build;
+# do-release overrides it so a released .dmg does not ship a plug-in calling itself 0.1.0 for ever.
+# It reaches the code as a define rather than being edited into gbVst3.cpp, so there is one place to
+# change it and no way for the Info.plist and the class info to disagree - and the class info is
+# what a host puts in front of the user.
+GENBRIDGE_VERSION="${GENBRIDGE_VERSION:-0.1.0}"
+
+# AN ARRAY, not a string. These are expanded unquoted at four compile sites, and the version define
+# has to carry its own quotes through to clang (-DGB_VERSION_STRING="\"1.2.3\"") so the macro is a C
+# string literal. In a string that survives exactly until the first word split.
+PLUGIN_DEFS=(-DG2_VST3_BUILD=1 -DGB_VERSION_STRING="\"$GENBRIDGE_VERSION\"")
 
 FREETYPE_LIB="$HERE/SynthLib/ThirdParty/freetype/build/libfreetype.a"
 
@@ -114,7 +124,7 @@ for ARCH in arm64 x86_64; do
     for SRC in "${C_SOURCES[@]}"; do
         OBJ="$WORK/$(basename ${SRC%.c})-$ARCH.o"
         clang -c -arch "$ARCH" -mmacosx-version-min=$DEPLOYMENT_TARGET \
-            -std=gnu11 -O2 -Wall -Wextra $PLUGIN_DEFS \
+            -std=gnu11 -O2 -Wall -Wextra "${PLUGIN_DEFS[@]}" \
             "${INCLUDES[@]}" -o "$OBJ" "$SRC"
         OBJS+=("$OBJ")
     done
@@ -122,7 +132,7 @@ for ARCH in arm64 x86_64; do
     for SRC in "${OBJC_SOURCES[@]}"; do
         OBJ="$WORK/$(basename ${SRC%.m})-$ARCH.o"
         clang -c -arch "$ARCH" -mmacosx-version-min=$DEPLOYMENT_TARGET \
-            -fobjc-arc -std=gnu11 -O2 -Wall -Wextra $PLUGIN_DEFS \
+            -fobjc-arc -std=gnu11 -O2 -Wall -Wextra "${PLUGIN_DEFS[@]}" \
             "${INCLUDES[@]}" -o "$OBJ" "$SRC"
         OBJS+=("$OBJ")
     done
@@ -130,7 +140,7 @@ for ARCH in arm64 x86_64; do
     for SRC in "${OBJCPP_SOURCES[@]}"; do
         OBJ="$WORK/$(basename ${SRC%.mm})-$ARCH.o"
         clang++ -c -arch "$ARCH" -mmacosx-version-min=$DEPLOYMENT_TARGET \
-            -fobjc-arc -std=gnu++17 -O2 -Wall -Wextra $PLUGIN_DEFS \
+            -fobjc-arc -std=gnu++17 -O2 -Wall -Wextra "${PLUGIN_DEFS[@]}" \
             "${INCLUDES[@]}" -o "$OBJ" "$SRC"
         OBJS+=("$OBJ")
     done
@@ -138,7 +148,7 @@ for ARCH in arm64 x86_64; do
     for SRC in "${CPP_SOURCES[@]}"; do
         OBJ="$WORK/$(basename ${SRC%.cpp})-$ARCH.o"
         clang++ -c -arch "$ARCH" -mmacosx-version-min=$DEPLOYMENT_TARGET \
-            -std=gnu++17 -O2 -Wall -Wextra $PLUGIN_DEFS \
+            -std=gnu++17 -O2 -Wall -Wextra "${PLUGIN_DEFS[@]}" \
             "${INCLUDES[@]}" -o "$OBJ" "$SRC"
         OBJS+=("$OBJ")
     done
@@ -163,8 +173,8 @@ cat > "$OUT/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>GenBridge</string>
     <key>CFBundlePackageType</key><string>BNDL</string>
     <key>CFBundleSignature</key><string>????</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
-    <key>CFBundleVersion</key><string>0.1.0</string>
+    <key>CFBundleShortVersionString</key><string>$GENBRIDGE_VERSION</string>
+    <key>CFBundleVersion</key><string>$GENBRIDGE_VERSION</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>LSMinimumSystemVersion</key><string>11.5</string>
 </dict>

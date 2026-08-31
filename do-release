@@ -1,0 +1,368 @@
+#!/bin/zsh
+
+# Builds a universal (arm64 + x86_64) GenBridge.vst3 and packages it as a .dmg
+# ready to attach to a GitHub release.
+#
+# Versions are semver: V<major>.<minor>.<patch>-beta.<n>. The .dmg is normally
+# built BEFORE the tag exists, so name the part you are bumping and the next
+# version is worked out from the newest existing tag:
+#
+#   ./do-release beta      V0.1.0-beta.6 -> V0.1.0-beta.7   (the usual one)
+#   ./do-release patch     V0.1.0-beta.6 -> V0.1.1-beta.1
+#   ./do-release minor     V0.1.0-beta.6 -> V0.2.0-beta.1
+#   ./do-release major     V0.1.0-beta.6 -> V1.0.0-beta.1
+#   ./do-release final     V0.1.0-beta.6 -> V0.1.0           (drops -beta.n)
+#
+#   ./do-release 0.9.0-rc1 an explicit version, used as given
+#   ./do-release           reuse the newest tag as-is (rebuild an old release)
+#   ./do-release beta ~/tmp any of the above, into a different directory
+#
+# Under semver, 0.x.y means the interface is still unstable - so bumping to 1.0.0
+# is a deliberate statement that it has settled, not just "the next big one".
+#
+# This script never creates or pushes the tag - it prints the git command for you
+# to run once you are happy with the .dmg.
+#
+# The .dmg lands on the Desktop by default - outside the repo, so it is easy to
+# drag onto a GitHub release and can never be committed by accident.
+#
+# WHAT IS DIFFERENT FROM G2-Edit's do-release, which this is modelled on:
+#
+#   - There is no application. GenBridge is a plug-in and nothing else, so the
+#     .dmg holds one bundle and there is no /Applications symlink to drag onto.
+#   - There is therefore no Xcode project and no xcodebuild. do-vst3 is the whole
+#     build, which also means no separate "skip the plug-in" switch: skipping it
+#     would leave an empty disk image.
+#   - The version reaches the bundle through $GENBRIDGE_VERSION rather than
+#     MARKETING_VERSION, and is checked afterwards in BOTH the Info.plist and the
+#     compiled-in class info, because a host shows the user the latter.
+#
+# The plug-in is ad-hoc signed only. There is no paid Apple Developer membership
+# behind this project, so the .dmg is NOT notarized and a host may refuse to load
+# the plug-in until the quarantine flag is cleared. Instructions for that are
+# written into the .dmg as "Read Me First.txt" so they travel with the download.
+
+set -e
+
+ARG_BUMP="$1"
+
+# Resolve a relative output path against the caller's directory, not the
+# project directory we are about to switch to.
+DIST="${2:-$HOME/Desktop}"
+DIST="${DIST:a}"
+
+cd ${0:a:h}
+
+VST3_NAME="GenBridge.vst3"
+VOL_NAME="GenBridge"
+DERIVED="build/release-tmp"
+
+# --- version -------------------------------------------------------------
+
+# Git tags are the source of truth. The 0.1.0 default baked into do-vst3 is a
+# developer-build fallback and is deliberately ignored here.
+#
+# --sort=-v:refname orders by version rather than alphabetically, so beta.10 is
+# correctly newer than beta.9. --abbrev=0 on describe would give the tag nearest
+# HEAD, which is not the same thing once branches are involved.
+LATEST=$(git tag --list --sort=-v:refname 'V*' 2>/dev/null | head -1)
+NEW_TAG=""
+
+case "$ARG_BUMP" in
+    major|minor|patch|beta|final)
+        if [[ -z $LATEST ]]; then
+            echo "error: no existing V* tag to bump from." >&2
+            echo "       give an explicit version instead: ./do-release 0.1.0-beta.1" >&2
+            exit 1
+        fi
+
+        # V<major>.<minor>.<patch>[-beta.<n>]
+        if [[ ! $LATEST =~ '^[Vv]([0-9]+)\.([0-9]+)\.([0-9]+)(-beta\.([0-9]+))?$' ]]; then
+            echo "error: newest tag '$LATEST' is not V<n>.<n>.<n>[-beta.<n>]," >&2
+            echo "       so it cannot be bumped. Give an explicit version instead." >&2
+            exit 1
+        fi
+
+        MAJOR=$match[1]
+        MINOR=$match[2]
+        PATCH=$match[3]
+        BETA=$match[5]
+
+        case "$ARG_BUMP" in
+            major) (( MAJOR++ )); MINOR=0; PATCH=0; BETA=1 ;;
+            minor) (( MINOR++ ));          PATCH=0; BETA=1 ;;
+            patch) (( PATCH++ ));                   BETA=1 ;;
+            beta)
+                if [[ -z $BETA ]]; then
+                    echo "error: '$LATEST' has no -beta.n to bump." >&2
+                    echo "       use 'patch' to start a new beta series." >&2
+                    exit 1
+                fi
+                (( BETA++ ))
+                ;;
+            final) BETA="" ;;
+        esac
+
+        if [[ -n $BETA ]]; then
+            NEW_TAG="V$MAJOR.$MINOR.$PATCH-beta.$BETA"
+        else
+            NEW_TAG="V$MAJOR.$MINOR.$PATCH"
+        fi
+
+        if git rev-parse -q --verify "refs/tags/$NEW_TAG" >/dev/null; then
+            echo "error: tag $NEW_TAG already exists." >&2
+            exit 1
+        fi
+
+        VERSION="$NEW_TAG"
+        echo "==> version $VERSION ($ARG_BUMP bump from $LATEST)"
+        ;;
+
+    "")
+        if [[ -z $LATEST ]]; then
+            echo "error: no git tag found and no version given." >&2
+            echo "       try: ./do-release beta" >&2
+            exit 1
+        fi
+
+        VERSION="$LATEST"
+        echo "==> version $VERSION (reusing newest tag)"
+
+        # Only meaningful when reusing an existing tag. When bumping, HEAD being
+        # ahead of the previous tag is the whole point.
+        if [[ -n $(git rev-list "$LATEST"..HEAD 2>/dev/null) ]]; then
+            echo "    WARNING: HEAD is ahead of $LATEST - this .dmg contains code" >&2
+            echo "             that is not in that tag. Did you mean ./do-release beta?" >&2
+        fi
+        ;;
+
+    *)
+        # An explicit version. Require it to start like one, so a mistyped keyword
+        # ("bета", "pacth") is caught here instead of producing GenBridge-pacth.dmg.
+        if [[ ! $ARG_BUMP =~ '^[Vv]?[0-9]+\.' ]]; then
+            echo "error: '$ARG_BUMP' is not a bump keyword or a version number." >&2
+            echo "       keywords: major minor patch beta final" >&2
+            echo "       or give a version: ./do-release 0.9.0-rc1" >&2
+            exit 1
+        fi
+
+        VERSION="$ARG_BUMP"
+        echo "==> version $VERSION (specified)"
+        ;;
+esac
+
+if [[ -n $(git status --porcelain 2>/dev/null) ]]; then
+    echo "    WARNING: working tree has uncommitted changes" >&2
+fi
+
+# Strip a leading V/v for filenames and the volume title: tags read "V0.1.0",
+# but "GenBridge-0.1.0.dmg" is the conventional artifact name.
+VERSION_CLEAN="${VERSION#[Vv]}"
+
+# --- build ---------------------------------------------------------------
+
+echo "==> clean build, universal"
+
+# Always build from scratch, so a release can never pick up something left behind
+# by an earlier build.
+rm -rf $DERIVED
+
+# BUILT INSIDE THE RELEASE'S OWN TREE, and NOT installed. do-vst3 normally drops
+# the bundle straight into ~/Library/Audio/Plug-Ins/VST3, which is right for a
+# developer build and wrong here: cutting a release would silently replace the
+# copy you have been testing with, at a version you have not checked yet.
+# GENBRIDGE_NO_INSTALL keeps the two apart.
+if ! GENBRIDGE_VERSION="$VERSION_CLEAN" \
+     GENBRIDGE_NO_INSTALL=1 \
+     GENBRIDGE_VST3_OUT="$PWD/$DERIVED/$VST3_NAME" \
+     ./do-vst3 >/dev/null; then
+    echo "error: the VST3 build failed - run ./do-vst3 on its own for the reason" >&2
+    echo "       (needs the VST3 SDK; set VST3_SDK if it is not in ~/Documents/vst3sdk)" >&2
+    exit 1
+fi
+
+VST3_BUNDLE="$DERIVED/$VST3_NAME"
+
+if [[ ! -d $VST3_BUNDLE ]]; then
+    echo "error: do-vst3 reported success but $VST3_BUNDLE is not there" >&2
+    exit 1
+fi
+
+# --- verify --------------------------------------------------------------
+
+VST3_BINARY="$VST3_BUNDLE/Contents/MacOS/GenBridge"
+ARCHS=$(lipo -archs "$VST3_BINARY" 2>/dev/null || echo "")
+
+echo "==> built $ARCHS"
+
+# A single-architecture plug-in would load for half the users and be invisible to
+# the other half.
+if [[ $ARCHS != *arm64* || $ARCHS != *x86_64* ]]; then
+    echo "error: expected a universal binary, got '$ARCHS'" >&2
+    exit 1
+fi
+
+# BOTH PLACES THE VERSION LIVES. The Info.plist is what Finder shows; the string
+# compiled into the class info is what the HOST shows, and it is the one a user
+# quotes in a bug report. They come from the same variable, so a mismatch here
+# means the define did not reach the compiler - silently, and only visible inside
+# a DAW days later.
+PLIST_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+                    "$VST3_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "")
+
+if [[ $PLIST_VERSION != $VERSION_CLEAN ]]; then
+    echo "error: Info.plist says '$PLIST_VERSION', expected '$VERSION_CLEAN'" >&2
+    exit 1
+fi
+
+if ! strings -a "$VST3_BINARY" | grep -qx -- "$VERSION_CLEAN"; then
+    echo "error: '$VERSION_CLEAN' is not in the binary - the version define did" >&2
+    echo "       not reach the compiler, so the host would report the wrong one." >&2
+    exit 1
+fi
+
+echo "==> bundle version $PLIST_VERSION, in the plist and the class info"
+
+# BOTH VARIANTS, CHECKED RATHER THAN ASSUMED. One bundle registers four classes - the effect and the
+# instrument, each with its controller - so there is nothing extra to build here, but there is
+# something to lose: an edit to the factory table that dropped the instrument would still produce a
+# .dmg that looks entirely normal, and the first anyone would know is a user saying the instrument is
+# not in their list. The subcategory is what is checked rather than just the name, because it is the
+# string that decides whether a host files it as an instrument at all.
+for want in "GenBridge Instrument" "Instrument|Synth|OnlyRT" "Fx|NoOfflineProcess|OnlyRT|Tools"; do
+    if ! strings -a "$VST3_BINARY" | grep -qxF -- "$want"; then
+        echo "error: '$want' is not in the binary - the bundle is missing a factory class." >&2
+        echo "       a GenBridge release must expose both the effect and the instrument." >&2
+        exit 1
+    fi
+done
+
+echo "==> registers both variants: GenBridge (effect) and GenBridge Instrument"
+
+# --- sign ----------------------------------------------------------------
+
+# Ad-hoc signature. Not a substitute for notarization, but it keeps the bundle
+# internally consistent so a host will load it once quarantine is cleared.
+# do-vst3 signs already; re-signing after the version check costs nothing and
+# means the thing that ships is the thing that was verified.
+echo "==> ad-hoc signing"
+xattr -cr "$VST3_BUNDLE"
+codesign --force --sign - "$VST3_BUNDLE"
+codesign --verify --strict "$VST3_BUNDLE"
+
+# --- stage ---------------------------------------------------------------
+
+echo "==> staging disk image contents"
+
+STAGE=$(mktemp -d)
+trap "rm -rf $STAGE" EXIT
+
+cp -R "$VST3_BUNDLE" "$STAGE/"
+
+# NO SYMLINK TO THE VST3 FOLDER, deliberately: it lives under the user's own home
+# directory, so a symlink baked into a .dmg would point at the machine that built
+# it. The Read Me First covers it with a Terminal line and a Finder route instead.
+
+cat > "$STAGE/Read Me First.txt" <<EOF
+$VOL_NAME $VERSION_CLEAN
+========================
+
+WHAT IS IN HERE
+
+  $VST3_NAME     one plug-in, which appears in your host as TWO devices:
+
+      GenBridge              an audio effect - captures a device into a track
+      GenBridge Instrument   an instrument - captures, and sends MIDI out
+
+  There is only one file to install. Both devices come from it.
+
+GenBridge captures audio from an audio device your DAW is NOT using - a synth's
+own USB output, a second interface - and plays it into a track, staying in sync
+with your project as it goes. The instrument version also sends MIDI out, so a
+hardware synth can be played from a MIDI clip and recorded back in one device.
+
+STEP 1 - INSTALL
+
+Copy "$VST3_NAME" into your VST3 folder. In Terminal
+(Applications > Utilities > Terminal), copy and paste these lines, including
+the quotes, pressing Return after each:
+
+    mkdir -p ~/Library/Audio/Plug-Ins/VST3
+    cp -R "/Volumes/${${VOL_NAME}[1,15]} $VERSION_CLEAN/$VST3_NAME" ~/Library/Audio/Plug-Ins/VST3/
+
+Or in Finder: choose Go > Go to Folder, enter
+
+    ~/Library/Audio/Plug-Ins/VST3
+
+and drag "$VST3_NAME" from this window into it.
+
+STEP 2 - UNLOCK
+
+This plug-in is not notarized by Apple, so macOS blocks it and your host will
+refuse to load it, usually with no useful explanation. Paste this line into
+Terminal and press Return:
+
+    xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/"$VST3_NAME"
+
+It prints nothing if it worked.
+
+You only need to do this once, and again after each update.
+
+STEP 3 - RESCAN
+
+Rescan plug-ins in your host - most do it at startup, so quitting and reopening
+is usually enough. Two devices appear, both by Chris Purusha:
+
+    GenBridge              an audio effect
+    GenBridge Instrument   an instrument
+
+If only one of them appears, your host has cached an older scan - force a
+rescan in its plug-in preferences.
+
+BOUNCING AND FREEZING
+
+The audio comes off real hardware in real time, so it cannot be rendered faster
+than real time. The plug-in declares this to the host (VST3's "OnlyRT"), but not
+every host acts on it - Ableton Live reads the flag and ignores it, and an
+offline bounce of a GenBridge track comes out silent.
+
+The panel says "host is rendering offline" when this happens, so it is not a
+mystery. Record the track onto an audio track in real time and export that.
+
+REQUIREMENTS
+
+macOS 11.5 or later, Apple Silicon or Intel.
+A VST3 host. The plug-in does not work on its own.
+EOF
+
+# --- package -------------------------------------------------------------
+
+mkdir -p $DIST
+DMG="$DIST/$VOL_NAME-$VERSION_CLEAN.dmg"
+rm -f "$DMG"
+
+echo "==> creating $DMG"
+
+# Volume names are capped at 27 characters on HFS+.
+hdiutil create \
+    -volname "${${VOL_NAME}[1,15]} $VERSION_CLEAN" \
+    -srcfolder "$STAGE" \
+    -fs HFS+ \
+    -format UDZO \
+    -ov \
+    "$DMG" >/dev/null
+
+echo
+echo "done: $DMG ($(du -h "$DMG" | cut -f1))"
+echo "architectures: $ARCHS"
+echo "contents: $VST3_NAME - registers GenBridge (effect) + GenBridge Instrument"
+echo "signature: ad-hoc, NOT notarized - users must clear quarantine"
+echo "your installed copy in ~/Library/Audio/Plug-Ins/VST3 was NOT touched"
+
+if [[ -n $NEW_TAG ]]; then
+    echo
+    echo "$NEW_TAG does not exist yet. Once you are happy with the .dmg:"
+    echo
+    echo "    git tag -a $NEW_TAG -m \"$NEW_TAG\""
+    echo "    git push origin $NEW_TAG"
+fi

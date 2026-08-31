@@ -76,6 +76,13 @@ using namespace Steinberg::Vst;
 
 #define GB_VENDOR         "Chris Purusha"
 #define GB_PLUGIN_NAME    "GenBridge"
+
+// Set by do-vst3 from $GENBRIDGE_VERSION, which do-release drives from the git tag. The fallback is
+// for anyone compiling these sources by hand; it is deliberately the same string the plist defaults
+// to, so the two cannot disagree in a developer build either.
+#ifndef GB_VERSION_STRING
+#define GB_VERSION_STRING "0.1.0"
+#endif
 #define GB_CHANNELS       (2)
 // THE SETPOINT IS DERIVED, NOT CHOSEN. A fixed default in milliseconds is the wrong shape for this
 // number: the floor below which the ring cannot go depends on the host's block size, the device's
@@ -3306,7 +3313,7 @@ public:
         memset(info, 0, sizeof(PClassInfo2));
         info->cardinality = PClassInfo::kManyInstances;
         strncpy(info->vendor, GB_VENDOR, PClassInfo2::kVendorSize - 1);
-        strncpy(info->version, "0.1.0", PClassInfo2::kVersionSize - 1);
+        strncpy(info->version, GB_VERSION_STRING, PClassInfo2::kVersionSize - 1);
         strncpy(info->sdkVersion, kVstVersionString, PClassInfo2::kVersionSize - 1);
         memcpy(info->cid, e->cid->toTUID(), sizeof(TUID));
         strncpy(info->category, e->category, PClassInfo::kCategorySize - 1);
