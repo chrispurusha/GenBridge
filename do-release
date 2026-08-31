@@ -168,7 +168,7 @@ echo "==> clean build, universal"
 rm -rf $DERIVED
 
 # BUILT INSIDE THE RELEASE'S OWN TREE, and NOT installed. do-vst3 normally drops
-# the bundle straight into ~/Library/Audio/Plug-Ins/VST3, which is right for a
+# the bundle straight into /Library/Audio/Plug-Ins/VST3, which is right for a
 # developer build and wrong here: cutting a release would silently replace the
 # copy you have been testing with, at a version you have not checked yet.
 # GENBRIDGE_NO_INSTALL keeps the two apart.
@@ -321,17 +321,28 @@ hardware synth can be played from a MIDI clip and recorded back in one device.
 STEP 1 - INSTALL
 
 Copy "$VST3_NAME" into your VST3 folder. In Terminal
-(Applications > Utilities > Terminal), copy and paste these lines, including
-the quotes, pressing Return after each:
+(Applications > Utilities > Terminal), copy and paste this line, including the
+quotes, and press Return:
 
-    mkdir -p ~/Library/Audio/Plug-Ins/VST3
-    cp -R "/Volumes/${${VOL_NAME}[1,15]} $VERSION_CLEAN/$VST3_NAME" ~/Library/Audio/Plug-Ins/VST3/
+    cp -R "/Volumes/${${VOL_NAME}[1,15]} $VERSION_CLEAN/$VST3_NAME" /Library/Audio/Plug-Ins/VST3/
 
 Or in Finder: choose Go > Go to Folder, enter
 
-    ~/Library/Audio/Plug-Ins/VST3
+    /Library/Audio/Plug-Ins/VST3
 
 and drag "$VST3_NAME" from this window into it.
+
+That is the system-wide plug-in folder, which is where installers put things and
+where hosts look first. On an administrator account it is writable without any
+special step. If Terminal says "Permission denied", or the folder does not exist
+at all, put sudo in front and it will ask for your password:
+
+    sudo mkdir -p /Library/Audio/Plug-Ins/VST3
+    sudo cp -R "/Volumes/${${VOL_NAME}[1,15]} $VERSION_CLEAN/$VST3_NAME" /Library/Audio/Plug-Ins/VST3/
+
+There is a second, per-user folder at ~/Library/Audio/Plug-Ins/VST3 which also
+works. Use one or the other - a copy in both means your host may list GenBridge
+twice and load whichever it finds first.
 
 STEP 2 - UNLOCK
 
@@ -339,7 +350,9 @@ This plug-in is not notarized by Apple, so macOS blocks it and your host will
 refuse to load it, usually with no useful explanation. Paste this line into
 Terminal and press Return:
 
-    xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/"$VST3_NAME"
+    xattr -dr com.apple.quarantine /Library/Audio/Plug-Ins/VST3/"$VST3_NAME"
+
+(prefix that with sudo too, if the copy above needed it)
 
 It prints nothing if it worked.
 
@@ -415,7 +428,7 @@ echo "architectures: $ARCHS"
 echo "contents: $VST3_NAME - registers GenBridge (effect) + GenBridge Instrument"
 echo "licences: GPLv3 + FreeType FTL + Steinberg MIT, in Licences/"
 echo "signature: ad-hoc, NOT notarized - users must clear quarantine"
-echo "your installed copy in ~/Library/Audio/Plug-Ins/VST3 was NOT touched"
+echo "your installed copy in /Library/Audio/Plug-Ins/VST3 was NOT touched"
 
 if [[ -n $NEW_TAG ]]; then
     echo

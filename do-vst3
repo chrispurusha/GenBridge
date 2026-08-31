@@ -191,14 +191,21 @@ print ""
 print "Built: $OUT"
 print "Architectures: $(lipo -archs "$BIN")"
 
-# Install straight into the user's VST3 folder. A plug-in that is not where a host looks for it has
-# not really been built, and the alternative is remembering a copy command after every single build.
+# Install straight into the VST3 folder. A plug-in that is not where a host looks for it has not
+# really been built, and the alternative is remembering a copy command after every single build.
+#
+# THE SYSTEM-WIDE FOLDER, matching what the .dmg tells users. /Library/Audio/Plug-Ins/VST3 is
+# root:admin and group-writable, so an administrator account writes to it without sudo, and it is
+# where every commercial installer puts its plug-ins. Developing against the per-user folder while
+# shipping instructions for the system one is how you end up debugging a difference that is really
+# just two copies.
 #
 # REPLACED, not copied over. cp -R onto an existing bundle merges: a file dropped from the build
 # survives in the installed copy and can go on being loaded long after it left the source tree.
 #
-# Set GENBRIDGE_NO_INSTALL=1 to build without touching the installed copy.
-INSTALL_DIR="${GENBRIDGE_VST3_INSTALL:-$HOME/Library/Audio/Plug-Ins/VST3}"
+# Set GENBRIDGE_NO_INSTALL=1 to build without touching the installed copy, or
+# GENBRIDGE_VST3_INSTALL to point somewhere else.
+INSTALL_DIR="${GENBRIDGE_VST3_INSTALL:-/Library/Audio/Plug-Ins/VST3}"
 INSTALLED="$INSTALL_DIR/$(basename "$OUT")"
 
 if [[ -n "$GENBRIDGE_NO_INSTALL" ]]; then
@@ -206,7 +213,26 @@ if [[ -n "$GENBRIDGE_NO_INSTALL" ]]; then
     print "Not installed (GENBRIDGE_NO_INSTALL is set)."
     print "  cp -R \"$OUT\" \"$INSTALL_DIR/\""
 else
-    mkdir -p "$INSTALL_DIR"
+    if ! mkdir -p "$INSTALL_DIR" 2>/dev/null || [[ ! -w "$INSTALL_DIR" ]]; then
+        print -u2 "error: cannot write to $INSTALL_DIR"
+        print -u2 "       it is normally group-writable by admin users. Either run:"
+        print -u2 "           sudo mkdir -p \"$INSTALL_DIR\" && sudo chgrp admin \"$INSTALL_DIR\" && sudo chmod g+w \"$INSTALL_DIR\""
+        print -u2 "       or install elsewhere: GENBRIDGE_VST3_INSTALL=~/Library/Audio/Plug-Ins/VST3 ./do-vst3"
+        exit 1
+    fi
+
+    # A COPY IN THE OTHER FOLDER OUTRANKS NOTHING - hosts scan both and may list the plug-in twice,
+    # or load whichever they reach first. That is a very convincing way to spend an afternoon fixing
+    # a bug that was fixed already, in the copy the host is not loading.
+    for OTHER in "$HOME/Library/Audio/Plug-Ins/VST3" "/Library/Audio/Plug-Ins/VST3"; do
+        if [[ "$OTHER" != "$INSTALL_DIR" && -d "$OTHER/$(basename "$OUT")" ]]; then
+            print -u2 ""
+            print -u2 "warning: another copy is installed at"
+            print -u2 "           $OTHER/$(basename "$OUT")"
+            print -u2 "         hosts scan both folders. Remove it, or your host may load that one:"
+            print -u2 "           rm -rf \"$OTHER/$(basename "$OUT")\""
+        fi
+    done
 
     # Only ever remove something that is a bundle with the name we are about to write, so a
     # mistyped INSTALL_DIR cannot turn this into a wider delete.

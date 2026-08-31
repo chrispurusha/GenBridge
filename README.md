@@ -184,12 +184,19 @@ one device here that drifts on its own.
 ./do-vst3
 ```
 
-That builds **and installs** to `~/Library/Audio/Plug-Ins/VST3/`, clearing the quarantine flag on the
+That builds **and installs** to `/Library/Audio/Plug-Ins/VST3/`, clearing the quarantine flag on the
 way - a plug-in that is not where a host looks for it has not really been built, and the alternative
 is remembering a copy command after every build. The installed bundle is *replaced* rather than
 copied over, because `cp -R` onto an existing bundle merges: a file dropped from the build would
 survive in the installed copy and go on being loaded. `GENBRIDGE_NO_INSTALL=1` builds without
 touching it, and `GENBRIDGE_VST3_INSTALL` points somewhere else.
+
+The **system-wide** folder, not the per-user one, matching what the `.dmg` tells users to do. It is
+`root:admin` and group-writable, so an administrator account writes to it without `sudo`, and it is
+where every commercial installer puts its plug-ins. Hosts scan both folders, so the build warns if a
+copy is sitting in the other one - two copies means the host may list the plug-in twice or load
+whichever it reaches first, which is a convincing way to spend an afternoon re-fixing a bug that was
+already fixed in the copy the host is not loading.
 
 A host that is already running keeps the copy it loaded until it rescans or restarts.
 
