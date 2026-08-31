@@ -40,6 +40,8 @@
 @property (nonatomic, assign) tGbEditCallback callback;
 @property (nonatomic, assign) void *          user;
 @property (nonatomic, strong) NSTimer *       timer;
+@property (nonatomic, assign) int            statusSlot;
+@property (nonatomic, assign) BOOL           isInstrument;
 @end
 
 @implementation GbView
@@ -110,6 +112,11 @@
     // to do every frame and removes any need to track whose turn it is.
     gfx_attach_window((__bridge void *)self);
 
+    // Both of these are file-scope in the draw layer, so they are asserted per frame rather than
+    // once - with two editors open, whichever drew last would otherwise speak for both.
+    gb_draw_set_status_slot(self.statusSlot);
+    gb_draw_set_instrument(self.isInstrument ? true : false);
+
     gb_draw_frame((int)backing.size.width, (int)backing.size.height);
     gfx_present();
 }
@@ -123,6 +130,15 @@
     double scale = [self bounds].size.width / GB_CANVAS_W;
     double x     = local.x / scale;
     double y     = ([self bounds].size.height - local.y) / scale;
+
+    // ASSERTED BEFORE THE HIT TEST, not just before the draw. The draw layer's notion of which
+    // editor it is serving is file-scope, and the hit test consults it - gb_draw_click() only offers
+    // the Measure and Offset controls when it believes it is drawing an instrument. With an effect
+    // and an instrument both open, the effect's 30 Hz repaint had already set that flag false by the
+    // time a click arrived on the instrument, so those two controls silently did nothing while every
+    // other control worked.
+    gb_draw_set_status_slot(self.statusSlot);
+    gb_draw_set_instrument(self.isInstrument ? true : false);
 
     tGbEditRequest request;
 
@@ -153,20 +169,21 @@
 @end
 
 void * gb_view_create(double width, double height, tGbEditCallback callback, void * user,
-                      int statusSlot) {
+                      int statusSlot, bool instrument) {
     GbView * view = [[GbView alloc] initWithFrame:NSMakeRect(0.0, 0.0, width, height)];
 
-    view.callback = callback;
-    view.user     = user;
-
-    gb_draw_set_status_slot(statusSlot);
+    view.callback     = callback;
+    view.user         = user;
+    view.statusSlot   = statusSlot;
+    view.isInstrument = instrument ? YES : NO;
 
     return (__bridge_retained void *)view;
 }
 
 void gb_view_set_status_slot(void * view, int statusSlot) {
-    (void)view;
-    gb_draw_set_status_slot(statusSlot);
+    if (view != NULL) {
+        ((__bridge GbView *)view).statusSlot = statusSlot;
+    }
 }
 
 void gb_view_destroy(void * view) {
@@ -183,7 +200,8 @@ void gb_view_destroy(void * view) {
 }
 
 void gb_view_set_values(void * view, double device, double rate, double frames, double trim,
-                        double mode, double firstChannel) {
+                        double mode, double firstChannel, double midiDest, double offset,
+                        double midiChannel) {
     (void)view;
-    gb_draw_set_values(device, rate, frames, trim, mode, firstChannel);
+    gb_draw_set_values(device, rate, frames, trim, mode, firstChannel, midiDest, offset, midiChannel);
 }

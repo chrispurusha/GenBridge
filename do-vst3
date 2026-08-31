@@ -29,6 +29,7 @@ C_SOURCES=(
     "$HERE/poc/resampler.c"
     "$HERE/poc/drift.c"
     "$HERE/vst3/gbStatus.c"
+    "$HERE/vst3/gbMidi.c"
     "$HERE/vst3/gbDraw.c"
     "$HERE/vst3/gbAppStubs.c"
 
@@ -43,6 +44,7 @@ C_SOURCES=(
     "$HERE/SynthLib/src/geometry.c"
     "$HERE/SynthLib/src/utils.c"
     "$HERE/SynthLib/src/synthlibHost.c"
+    "$HERE/SynthLib/src/synthlibMidi.c"
     "$HERE/SynthLib/src/clickRegion.c"
     "$HERE/SynthLib/src/inputState.c"
     "$HERE/SynthLib/src/synthlibVersion.c"
@@ -143,7 +145,7 @@ for ARCH in arm64 x86_64; do
 
     clang++ -arch "$ARCH" -mmacosx-version-min=$DEPLOYMENT_TARGET \
         -bundle \
-        -framework CoreAudio -framework CoreFoundation -framework Cocoa \
+        -framework CoreAudio -framework CoreMIDI -framework CoreFoundation -framework Cocoa \
         -framework Metal -framework QuartzCore -framework OpenGL \
         -o "$WORK/GenBridge-$ARCH" "${OBJS[@]}" "$FREETYPE_LIB"
 done

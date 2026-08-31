@@ -227,16 +227,66 @@ Processor and controller are separate registered classes, for the reason G2-Edit
 Ableton instantiates the class named by `getControllerClassId()` and will not ask the component for
 `IEditController`.
 
+### The editor
+
+`vst3/` holds a Metal editor drawn through **SynthLib's own renderer** - the same `render_text()`,
+`render_rectangle()` and `draw_button()` the sibling applications use, so it cannot drift away from
+their look without the change showing up in all of them. Steppers rather than drop-downs, which
+keeps the link surface to a handful of SynthLib files instead of the whole popup and menu-bar
+system.
+
+It shows device, sample rate, device buffer, mono/stereo, input channel, output trim, level meters,
+and the drift telemetry - fill against setpoint, ppm, underruns, resyncs. That last row is the only
+way to see whether the loop is holding without attaching a debugger.
+
+**Two editors can be open at once**, which needed a change in SynthLib: its Metal backend kept the
+layer, render targets, surface size, command buffer and scissor in file-scope globals, so a second
+`gfx_attach_window()` simply overwrote the first window's layer and left it drawing nowhere. Those
+are now a per-window context, selected by `gfx_attach_window()` and released by the new
+`gfx_detach_window()`; the device, queue, pipeline, samplers and texture table stay shared, since
+they belong to the GPU rather than to any surface and one glyph atlas should serve every editor.
+
+### Processor and controller talk over IConnectionPoint
+
+They are separate registered classes precisely so a host MAY keep them apart, and nothing else
+bridges them. Two things need that bridge:
+
+- **Which status slot to read.** The live figures are per instance. They were once a single global,
+  and with two plug-ins in a set the editors read whichever processor wrote last - so a panel
+  showing a microphone reported that it was capturing a Kronos.
+- **Telling the host its latency changed.** A host reads `getLatencySamples()` shortly after
+  activation and caches it. Since a fresh instance opens nothing, that reading is always zero, so
+  choosing a device later left the host compensating for nothing at all. Only the controller holds
+  the `IComponentHandler` that `restartComponent(kLatencyChanged)` lives on.
+
+The slot number travels as a message once; the meters are then read from shared memory, because a
+message per frame per instance would be a lot of allocation for advisory numbers.
+
 ### Choosing a device
 
 Until there is an editor, the capture device is a **stepped list parameter**, which a host renders
 as a drop-down in its generic panel. That makes the plug-in usable with no editor at all, and it
 stays useful afterwards because it is automatable and the host saves it.
 
-There is also a **temporary fallback** so that a fresh instance in a host is not silent and looking
-broken: with no saved state and no parameter set, it opens the first device matching
-`GB_FALLBACK_DEVICE` at `GB_DEFAULT_FRAMES` and `GB_DEFAULT_RATE`. Anything chosen deliberately
-takes precedence, and the whole block goes when the chooser lands.
+**A fresh instance opens nothing at all**, and that is deliberate. Three earlier versions opened
+something on the reasoning that a silent plug-in looks broken - first a hard-coded device, then
+whatever sat at slot 0. Every one was wrong. Slot 0 on the development machine is an iPhone
+Continuity microphone, so loading a set woke it once per instance, synchronously, on the host's main
+thread; Ableton stopped starting. A plug-in has no business seizing capture hardware nobody asked it
+to. Idle until chosen, and the panel says `no device selected`.
+
+**Nor does it retune devices.** Setting a nominal rate or buffer size is a global operation
+affecting every client of that device, including the host itself if it happens to be the same
+interface. Both default to "leave the device alone" and are written only when deliberately changed.
+
+**A selection that fails to resolve stays shut.** A silent substitution turns a clear failure into a
+confusing one - the panel said one device while the speakers played another. Failures are logged and
+the panel shows `device unavailable` in amber.
+
+**Channel requests are clamped to what the device has.** The settings are per device but the
+parameter is per instance, so choosing channels 17/18 on a 32 input desk and then switching to a two
+channel synth asks for channels that do not exist. That used to fail the open, leaving the plug-in
+apparently stuck on the last device big enough to satisfy it.
 
 ### Device changes never happen on the audio thread
 
@@ -245,6 +295,18 @@ Doing that inside `process()` would stall the host's audio thread - which is how
 every open and close runs on a worker thread, and `process()` only ever raises a flag. The two are
 kept apart by a mutex the audio thread **trylocks**, never locks: failing to take it means a device
 swap is in flight, and a block of silence is the right answer.
+
+### Diagnostics
+
+```
+touch /tmp/genbridge-log     # then reload the plug-in
+cat /tmp/genbridge.log
+```
+
+Gated on a FILE rather than an environment variable, because a host launched from the Dock inherits
+no shell environment - the one situation where the log is actually wanted. It records every device
+resolution, every parameter arrival, every clamp and every failed open with its reason. Nearly every
+bug in the plug-in so far was found by reading it rather than by guessing.
 
 ### Remembering settings per device
 

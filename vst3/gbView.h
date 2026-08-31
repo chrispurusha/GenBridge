@@ -31,11 +31,12 @@ typedef void (*tGbEditCallback)(void * user, const tGbEditRequest * request);
 
 // Returns an NSView *, as a void * so the C++ side need not import AppKit.
 void * gb_view_create(double width, double height, tGbEditCallback callback, void * user,
-                      int statusSlot);
+                      int statusSlot, bool instrument);
 void   gb_view_set_status_slot(void * view, int statusSlot);
 void   gb_view_destroy(void * view);
 void   gb_view_set_values(void * view, double device, double rate, double frames, double trim,
-                          double mode, double firstChannel);
+                          double mode, double firstChannel, double midiDest, double offset,
+                          double midiChannel);
 
 #ifdef __cplusplus
 }

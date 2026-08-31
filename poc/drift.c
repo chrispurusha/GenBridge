@@ -59,6 +59,11 @@ void drift_reset(tDrift * drift) {
     drift->primed       = false;
 }
 
+void drift_set_setpoint(tDrift * drift, double setpointFrames) {
+    drift->setpointFrames = setpointFrames;
+    drift->fillFiltered   = -1.0;      // reseed the measurement filter at the new depth
+}
+
 double drift_update(tDrift * drift, double fillFrames, double intervalSeconds) {
     double alpha = (drift->config.filterSeconds > 0.0)
                    ? (1.0 - exp(-intervalSeconds / drift->config.filterSeconds))

@@ -45,6 +45,8 @@
 #include <cstdlib>
 #include <cstdio>
 #include <string>
+#include <vector>
+#include <cmath>      // lround, for the offset pushed to the controller in thousandths
 
 #include "pluginterfaces/base/funknown.h"
 #include "pluginterfaces/base/ipluginbase.h"
@@ -53,6 +55,8 @@
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
+#include "pluginterfaces/vst/ivstevents.h"
+#include "pluginterfaces/vst/ivstmidicontrollers.h"
 #include "pluginterfaces/vst/ivstmessage.h"
 #include "pluginterfaces/vst/ivsthostapplication.h"
 #include "pluginterfaces/base/ipluginbase.h"
@@ -62,6 +66,7 @@
 
 #include "device.h"
 #include "drift.h"
+#include "gbMidi.h"
 #include "gbStatus.h"
 #include "resampler.h"
 #include "ring.h"
@@ -85,6 +90,11 @@ using namespace Steinberg::Vst;
 // cheap next to an audible dropout.
 #define GB_AUTO_MARGIN    (1.25)
 
+// How long to watch the host's real block size before trusting it, and how much has to be on the
+// table before disturbing the host's delay compensation to claim it.
+#define GB_SETTLE_SECONDS    (2.0)
+#define GB_RETUNE_MIN_GAIN   (64.0)      // frames
+
 // TEMPORARY, until the editor exists. With no way to pick a device from inside a host, a fresh
 // instance would sit silent and look broken, so it falls back to this. The device parameter and any
 // saved state both take precedence, so choosing anything else immediately overrides it - and the
@@ -93,6 +103,84 @@ using namespace Steinberg::Vst;
 // that far even though most devices are stereo. Slots past the device's real channel count simply
 // fail to open, which the panel shows.
 #define GB_MAX_FIRST_CHANNEL  (32)
+#define GB_MIDI_SLOTS         (GB_MIDI_MAX_DEST)
+
+// The manual correction, in milliseconds, mapped onto a normalised parameter. A measurement cannot
+// separate the synth's response from its patch's attack, so the number always wants a human able to
+// say "that pad is not really 90 ms late".
+#define GB_OFFSET_MIN_MS      (-100.0)
+#define GB_OFFSET_MAX_MS      (100.0)
+
+// How long to listen for the note before giving up, and how far above the noise floor counts as an
+// onset.
+#define GB_MEASURE_TIMEOUT_S  (1.5)
+#define GB_MEASURE_FLOOR_S    (0.15)
+
+// Time to let a previous note decay before listening for silence. Without it a second measurement
+// starts while the first one's note is still sounding: the floor is taken from a decaying tail, or
+// the tail itself trips the threshold, and the answer comes back as zero. Measuring twice in a row
+// is the normal thing to do, so it has to survive it.
+#define GB_MEASURE_SETTLE_S   (0.35)
+// The onset threshold is RELATIVE to whatever the input is already doing, with an absolute floor
+// under it. A synth with a hissy output, a hum, or a pad still decaying would sit above any fixed
+// level and trip the detector the instant the note went out. Measuring the quiet first and then
+// demanding a multiple of it is what makes the answer mean something.
+#define GB_MEASURE_MARGIN     (0.02f)    // absolute minimum rise, for a genuinely silent input
+#define GB_MEASURE_RATIO      (8.0f)     // ...or this much above the noise, whichever is greater
+#define GB_MEASURE_CEILING    (0.70f)    // never demand more than this; see the note in the code
+#define GB_MEASURE_CONFIRM    (2)        // consecutive blocks required, so one glitch is not an onset
+#define GB_MEASURE_NOTE       (60)
+
+// Remembered per audio device AND per MIDI destination. The same synth answers differently over USB
+// than over DIN, and two different synths on one interface are not comparable at all - so the pair
+// is the key, not either half of it.
+#define GB_MAX_MEASURED       (32)
+
+// measureLatency sentinels. Negative means no usable figure; they are told apart so the panel and
+// the log can say WHICH kind of nothing came back, which is the difference between "the synth is on
+// the wrong channel" and "the onset arrived before our own buffering could have delivered it".
+#define GB_MEASURE_TIMED_OUT  (-1)
+#define GB_MEASURE_TOO_EARLY  (-2)
+
+// ── Continuous controllers ──────────────────────────────────────────────────
+//
+// A DAMPER PEDAL IS NOT AN EVENT. VST3 delivers note on and note off as events, and everything else
+// a keyboard produces - sustain, mod wheel, expression, pitch bend, aftertouch - as PARAMETER
+// changes, routed through IMidiMapping. A plug-in that only walks the event list therefore passes
+// notes to the hardware and silently drops the pedal, which is exactly what this one did.
+//
+// So a parameter is reserved for every controller on every channel, and the processor turns any
+// change on one of them back into the MIDI message it came from. They are hidden: a host must know
+// they exist to deliver values, but nobody wants two thousand entries in an automation menu.
+//
+// Per channel rather than flattened, because a bridge carries whatever the DAW sends and a
+// multitimbral synth is the obvious use for one. Notes already carry their channel, so flattening
+// controllers would make the pedal arrive on a different channel from the notes it belongs to.
+// 0 means "whatever channel the note arrived on"; 1..16 force it. Source is the default so that
+// adding the control changes nothing for a session that already worked - a multitimbral part sending
+// on channel 5 keeps arriving on channel 5 until someone says otherwise.
+#define GB_CHANNEL_SLOTS      (17)
+
+#define GB_CC_BASE            (1000)
+#define GB_CC_PER_CHANNEL     (kCountCtrlNumber)      // 128 controllers, plus aftertouch and bend
+#define GB_CC_CHANNELS        (16)
+#define GB_CC_COUNT           (GB_CC_PER_CHANNEL * GB_CC_CHANNELS)
+
+// ONE ENTRY PER (AUDIO DEVICE, MIDI DESTINATION) PAIR, because that pair is what a round trip is a
+// property of. Two figures, and the difference matters:
+//
+//   hardwareSamples  what the last measurement actually returned. A record, never edited.
+//   offsetMs         the correction IN FORCE, which is what report_latency() adds. A measurement
+//                    seeds it; the panel's +/- moves it from there.
+//
+// Splitting them is what lets the panel show "measured 4.6, using 4.8" - and it means re-measuring
+// replaces the reading and the value together, while a nudge moves only the value.
+typedef struct {
+    char     audioUid[DEVICE_UID_LEN];
+    char     midiDest[GB_MIDI_NAME_LEN];
+    uint32_t hardwareSamples;    // the round trip MINUS whatever the plug-in was contributing
+    double   offsetMs;           // seeded from the measurement, then adjusted by hand
+} tMeasured;
 
 #define GB_FALLBACK_DEVICE    "KRONOS"
 #define GB_DEFAULT_FRAMES     (128)
@@ -103,6 +191,15 @@ using namespace Steinberg::Vst;
 static const FUID kGenBridgeProcessorUID(0x4A1C8E52, 0x9D3B4F07, 0xA6E21B84, 0x53F0C97D);
 static const FUID kGenBridgeControllerUID(0x8B70D6A1, 0x2F594C38, 0xE1A76025, 0x9C4D3B8F);
 
+// The instrument variant. SAME CODE, registered a second time under its own identity and category -
+// the audio path is identical and only the MIDI half and the bus layout differ, so two sets of
+// classes would be two places to fix everything.
+//
+// One bundle, four classes, rather than the two bundles AudioMovers ship as Inject and Inject-MIDI.
+// VST3 supports it and it halves the build, the install and the quarantine dance.
+static const FUID kGenBridgeInstProcessorUID(0x6E2D4B91, 0xA07C3F58, 0x24B9E1D6, 0x8F5307CA);
+static const FUID kGenBridgeInstControllerUID(0xC94A1F63, 0x5B82D70E, 0x3A6C48B1, 0xD25E9F04);
+
 enum {
     kParamDevice = 0,
     kParamTrim,
@@ -110,6 +207,10 @@ enum {
     kParamFrames,
     kParamMode,          // mono or stereo
     kParamFirstChannel,  // which device channel the capture starts at
+    kParamMidiDest,      // instrument only: where note data is sent
+    kParamMidiChannel,   // instrument only: which channel to send on
+    kParamMeasure,       // instrument only: rising edge runs a latency measurement
+    kParamOffsetMs,      // instrument only: manual correction to the measured figure
     kParamCount
 };
 
@@ -144,6 +245,11 @@ typedef struct {
 //
 //     touch /tmp/genbridge-log        # then reload the plug-in
 //     cat /tmp/genbridge.log
+// EVERY LINE SAYS WHO WROTE IT. One log file is shared by every instance in every process on the
+// machine - a DAW with two plug-ins in it, and a command line harness running alongside, all append
+// here. Reading it without attribution means diagnosing one process's symptom from another's
+// output, which is exactly what happened: a run of "measured: 0" lines was read as a harness fault
+// when it came from a DAW that also had the device open.
 static void log_line(const char * format, ...) {
     if (access("/tmp/genbridge-log", F_OK) != 0) {
         return;
@@ -154,6 +260,18 @@ static void log_line(const char * format, ...) {
     if (file == nullptr) {
         return;
     }
+
+    static const char * name = nullptr;
+
+    if (name == nullptr) {
+        // The executable's own name, so a line from Live is distinguishable from one from the
+        // checker at a glance rather than by pid alone.
+        const char * path = getprogname();
+
+        name = (path != nullptr) ? path : "?";
+    }
+
+    fprintf(file, "[%s %d] ", name, (int)getpid());
 
     va_list args;
 
@@ -174,11 +292,14 @@ static void log_line(const char * format, ...) {
 // the file, but nothing told the panel about it.
 struct tGbActive {
     std::string uid;
+    std::string midiName;
+    int         midiChannel{0};
     unsigned    frames{GB_DEFAULT_FRAMES};
     double      rate{GB_DEFAULT_RATE};
     unsigned    firstChannel{0};
     unsigned    channels{GB_CHANNELS};
     float       trim{1.0f};
+    double      offsetMs{0.0};
     bool        valid{false};
 };
 
@@ -196,7 +317,8 @@ static tGbActive gb_parse_active(const std::string & blob) {
         return out;
     }
 
-    size_t pos = 0;
+    size_t                   pos = 0;
+    std::vector<std::string> hwLines;
 
     while (pos < blob.size()) {
         size_t      end  = blob.find('\n', pos);
@@ -204,7 +326,16 @@ static tGbActive gb_parse_active(const std::string & blob) {
 
         pos = (end == std::string::npos) ? blob.size() : end + 1;
 
-        if (line.compare(0, 7, "active=") == 0) {
+        if (line.compare(0, 5, "midi=") == 0) {
+            out.midiName = line.substr(5);
+        } else if (line.compare(0, 7, "midich=") == 0) {
+            out.midiChannel = atoi(line.substr(7).c_str());
+        } else if (line.compare(0, 3, "hw=") == 0) {
+            // Held, not applied. A hw= line names its own pair, and which pair is the ACTIVE one is
+            // not known until active= and midi= have both been seen - and getState writes them
+            // first only by convention, which is a thin thing to parse by.
+            hwLines.push_back(line.substr(3));
+        } else if (line.compare(0, 7, "active=") == 0) {
             out.uid   = line.substr(7);
             out.valid = !out.uid.empty();
         } else if ((line.compare(0, 4, "dev=") == 0) && !out.uid.empty()) {
@@ -250,6 +381,41 @@ static tGbActive gb_parse_active(const std::string & blob) {
         }
     }
 
+    // The correction for the pair this instance is actually on. Same length-prefixed layout the
+    // processor writes - see parse_measured_line() for why the destination is counted, not split.
+    for (const std::string & body : hwLines) {
+        size_t at = 0;
+        double fields[3];
+        bool   ok = true;
+
+        for (int i = 0; (i < 3) && ok; i++) {
+            size_t comma = body.find(',', at);
+
+            if (comma == std::string::npos) {
+                ok = false;
+                break;
+            }
+            fields[i] = strtod(body.substr(at, comma - at).c_str(), nullptr);
+            at        = comma + 1;
+        }
+
+        if (!ok) {
+            continue;
+        }
+
+        size_t      destLen = (size_t)fields[2];
+        std::string tail    = body.substr(at);
+
+        if (destLen > tail.size()) {
+            continue;
+        }
+
+        if ((tail.substr(0, destLen) == out.midiName) && (tail.substr(destLen) == out.uid)) {
+            out.offsetMs = fields[1];
+            break;
+        }
+    }
+
     return out;
 }
 
@@ -259,8 +425,12 @@ static tGbActive gb_parse_active(const std::string & blob) {
 
 class GenBridgePlugin : public IComponent, public IAudioProcessor, public IConnectionPoint {
 public:
-    GenBridgePlugin(void) : refCount(1) {
+    explicit GenBridgePlugin(bool instrumentIn) : refCount(1), instrument(instrumentIn) {
         statusSlot = gb_status_claim();
+
+        if (instrument) {
+            gb_midi_init();
+        }
         memset(&ring, 0, sizeof(ring));
         memset(&resampler, 0, sizeof(resampler));
         memset(&drift, 0, sizeof(drift));
@@ -354,7 +524,9 @@ public:
     // ---- IComponent ----
 
     tresult PLUGIN_API getControllerClassId(TUID classId) SMTG_OVERRIDE {
-        memcpy(classId, kGenBridgeControllerUID.toTUID(), sizeof(TUID));
+        memcpy(classId,
+               instrument ? kGenBridgeInstControllerUID.toTUID() : kGenBridgeControllerUID.toTUID(),
+               sizeof(TUID));
         return kResultOk;
     }
 
@@ -365,14 +537,48 @@ public:
 
     int32 PLUGIN_API getBusCount(MediaType type, BusDirection dir) SMTG_OVERRIDE {
         if (type == kAudio) {
-            return 1;   // one in (ignored, but an effect must have one), one out
+            // An INSTRUMENT has no audio input, and that is allowed here only because
+            // IPluginFactory2 declares the subcategory - the base interface reports a bare "Audio
+            // Module Class", a host assumes effect, looks for the input an effect must have, and
+            // refuses to load. That is the trap G2-Edit fell into.
+            //
+            // The effect variant declares one and ignores it, which is what an effect must do.
+            if ((dir == kInput) && instrument) {
+                return 0;
+            }
+
+            return 1;
         }
-        (void)dir;
+
+        if ((type == kEvent) && (dir == kInput)) {
+            return instrument ? 1 : 0;      // the notes the host plays the hardware with
+        }
+
         return 0;
     }
 
     tresult PLUGIN_API getBusInfo(MediaType type, BusDirection dir, int32 index, BusInfo & info) SMTG_OVERRIDE {
-        if ((type != kAudio) || (index != 0)) {
+        if (index != 0) {
+            return kInvalidArgument;
+        }
+
+        if ((type == kEvent) && (dir == kInput) && instrument) {
+            info.mediaType    = kEvent;
+            info.direction    = kInput;
+            info.channelCount = 16;         // the MIDI channels
+            info.busType      = kMain;
+            info.flags        = BusInfo::kDefaultActive;
+
+            name_to_utf16("MIDI In", info.name, 128);
+
+            return kResultOk;
+        }
+
+        if (type != kAudio) {
+            return kInvalidArgument;
+        }
+
+        if ((dir == kInput) && instrument) {
             return kInvalidArgument;
         }
 
@@ -464,6 +670,39 @@ public:
 
         blob += "active=" + deviceSelector + "\n";
 
+        // BY NAME, not by index. The MIDI list shifts whenever a device is powered on or off, so an
+        // index saved on Monday names something else on Tuesday - the same reasoning that keeps the
+        // audio device stored as a UID. Ableton was not forgetting the destination; nothing was ever
+        // writing it down.
+        if (instrument) {
+            blob += "midi=" + std::string(midiName) + "\n";
+            blob += "midich=" + std::to_string(midiChannel.load()) + "\n";
+
+            // THE MANUAL TRIM, AND THE MEASUREMENTS IT TRIMS. Neither belongs on a dev= line: the
+            // offset is one value for the whole plug-in, and a measurement is keyed by the audio
+            // device and the MIDI destination TOGETHER - a pair no single dev= line names.
+            //
+            // Without both of these the feature came apart on reload, and quietly. report_latency()
+            // adds the measured hardware share and then the offset on top of it, so a session
+            // reopened with the pair missing reported a latency short by the entire round trip,
+            // with the trim someone had dialled in by ear silently back at zero. Restoring the
+            // offset alone would be worse than neither: it would trim a base that was not there.
+            // The live value belongs to a pair like every other, so fold it in before writing -
+            // otherwise a nudge made since the last device change would not be in the table yet.
+            sync_offset_to_pair();
+
+            char line[64 + DEVICE_UID_LEN + GB_MIDI_NAME_LEN];
+
+            for (uint32_t i = 0; i < measuredCount; i++) {
+                const tMeasured * m = &measured[i];
+
+                snprintf(line, sizeof(line), "hw=%u,%.3f,%u,%s%s\n",
+                         m->hardwareSamples, m->offsetMs,
+                         (unsigned)strlen(m->midiDest), m->midiDest, m->audioUid);
+                blob += line;
+            }
+        }
+
         for (uint32_t i = 0; i < rememberedCount; i++) {
             const tDeviceSettings * d = &remembered[i];
             char                    line[512];
@@ -485,7 +724,9 @@ public:
                                           SpeakerArrangement * outputs, int32 numOuts) SMTG_OVERRIDE {
         (void)inputs;
 
-        if ((numIns == 1) && (numOuts == 1) && (outputs[0] == SpeakerArr::kStereo)) {
+        int32 wantIns = instrument ? 0 : 1;
+
+        if ((numIns == wantIns) && (numOuts == 1) && (outputs[0] == SpeakerArr::kStereo)) {
             return kResultOk;
         }
         return kResultFalse;
@@ -516,16 +757,78 @@ public:
         return running ? report_latency() : 0;
     }
 
-    uint32 report_latency(void) const {
+    // WHAT THE PLUG-IN ITSELF ADDS, with no hardware correction in it. Split out of
+    // report_latency() because the measurement has to subtract our share from the onset it sees,
+    // and subtracting the REPORTED figure meant subtracting the previous measurement along with it:
+    // every re-measure came back short by whatever correction was already in force, so the value
+    // walked towards zero the more times it was run. Only ever grows out of the ring and the
+    // converters, so it is the honest thing to net off.
+    double internal_latency_frames(void) const {
         double inputFrames = setpointFrames + resampler_latency_frames() + (double)deviceLatency;
 
         // Reported in the HOST's frames, and the ring is measured in the device's.
-        return (uint32)(inputFrames / nominalRatio);
+        return inputFrames / nominalRatio;
     }
 
+    uint32 internal_latency(void) const {
+        double total = internal_latency_frames();
+
+        return (total > 0.0) ? (uint32)total : 0;
+    }
+
+    uint32 report_latency(void) const {
+        double total = internal_latency_frames();
+
+        // THE HARDWARE'S SHARE IS ADDED FOR THE INSTRUMENT, because that is what makes a recorded
+        // part land on the beat. The host delays everything else to match, which is precisely the
+        // job an External Instrument device does in Live with its Hardware Latency field.
+        //
+        // Not for the effect: nothing is being played through it, so there is no round trip to
+        // compensate and inflating its latency would only push a live input further out of place.
+        //
+        // ONE TERM, NOT TWO. This used to add hardwareSamples and then offsetMs on top of it, which
+        // made the panel incoherent: Measure wrote a figure you could not touch, beside a trim that
+        // started at zero and existed only to correct it. The measurement now lands IN offsetMs, so
+        // what is added is simply the correction in force - and adding hardwareSamples as well here
+        // would count the round trip twice.
+        if (instrument) {
+            total += (offsetMs.load() / 1000.0) * hostRate;
+        }
+
+        return (total > 0.0) ? (uint32)total : 0;
+    }
+
+    // WHETHER THE HOST INTENDS TO RUN US FASTER THAN REALTIME, which it tells us here and nowhere
+    // else. There is no reciprocal call - a plug-in cannot demand realtime, it can only declare
+    // OnlyRT in its class subcategories (see the factory) and find out here whether that was
+    // honoured. Logged for exactly that reason: it is the only evidence of what a host decided.
+    //
+    // A bounce in kOffline cannot work. The ring is filled by a device running at one second per
+    // second, so a host consuming it faster simply drains it, and the render comes out silent or in
+    // pieces. Nothing in here can fix that; the flag exists so the panel can say so afterwards
+    // rather than leaving a silent bounce to be puzzled over.
     tresult PLUGIN_API setupProcessing(ProcessSetup & setup) SMTG_OVERRIDE {
         hostRate      = setup.sampleRate;
         hostMaxFrames = (uint32)setup.maxSamplesPerBlock;
+
+        bool offline  = (setup.processMode == kOffline);
+
+        if (offline != offlineRender.load()) {
+            log_line("host set process mode %d (%s)%s", (int)setup.processMode,
+                     (setup.processMode == kRealtime) ? "realtime"
+                     : ((setup.processMode == kPrefetch) ? "prefetch" : "OFFLINE"),
+                     offline ? " - a bounce in this mode captures nothing, the device runs in real time"
+                             : "");
+        }
+
+        offlineRender.store(offline);
+
+        tGbStatus * status = gb_status(statusSlot);
+
+        if (status != nullptr) {
+            atomic_store(&status->offlineRender, offline ? 1 : 0);
+        }
+
         return kResultOk;
     }
 
@@ -547,6 +850,10 @@ public:
         }
 
         apply_parameter_changes(data);
+
+        if (instrument) {
+            forward_events(data);
+        }
 
         // TRYLOCK, NEVER LOCK. The worker holds this while it tears down and rebuilds the ring,
         // the resampler and the device - during which none of them may be touched. Blocking here
@@ -587,6 +894,8 @@ public:
             primed = true;
         }
 
+        observe_block(frames);
+
         double fill       = (double)ring_fill(&ring);
         double interval   = (double)frames / hostRate;
         double correction = drift_update(&drift, fill, interval);
@@ -616,11 +925,338 @@ public:
             }
         }
 
+        run_measurement(out, frames);
         publish_status(out, frames, fill);
 
         pthread_mutex_unlock(&configLock);
 
         return kResultOk;
+    }
+
+    // ---- latency measurement -------------------------------------------------------------------
+    //
+    // Play a note, time how long until anything comes back, and remember it. The whole point is that
+    // a DAW cannot compensate for a delay it does not know about: without this, a part played
+    // through the instrument records roughly ninety milliseconds behind the beat on the rig this
+    // was built against, and no amount of buffer tuning touches it because most of it is the
+    // hardware.
+    //
+    // WHAT IS STORED IS THE HARDWARE'S SHARE, NOT THE TOTAL, and that distinction is what makes it
+    // correct under a host. The measured onset includes the plug-in's own path, which the host is
+    // ALREADY compensating for because getLatencySamples() reported it. Storing the total and then
+    // reporting it would count our part twice - and worse, the stored figure would silently go
+    // wrong the moment the ring was retuned. Subtracting our contribution at the moment of
+    // measurement leaves a number that is purely the synth and the wire, which stays true whatever
+    // the buffer does afterwards.
+    //
+    // IT CANNOT SEPARATE THE SYNTH FROM ITS PATCH. A slow pad crosses the threshold later than a
+    // piano, and nothing measuring from outside can tell the difference. Hence the manual offset:
+    // the measurement gets you within a few milliseconds and a person settles the rest.
+    void start_measurement(void) {
+        if (!instrument || !running) {
+            return;
+        }
+
+        // ALL NOTES OFF FIRST, on every channel we might have used. Belt and braces: our own test
+        // note is released explicitly, and anything left hanging by a previous attempt - or by the
+        // user playing - goes with it.
+        for (uint8_t channel = 0; channel < 16; channel++) {
+            uint8_t note[3]  = { (uint8_t)(0x80 | channel), GB_MEASURE_NOTE, 0 };
+            uint8_t panic[3] = { (uint8_t)(0xB0 | channel), 123, 0 };   // All Notes Off
+
+            gb_midi_send(midiDestination.load(), note, 3);
+            gb_midi_send(midiDestination.load(), panic, 3);
+        }
+
+        measureUnderrunsAtStart = atomic_load(&ring.underflows);
+        measureResyncsAtStart    = resyncs.load();
+
+        measureState       = eMeasureSettle;
+        measureFrames      = 0;
+        measurePeak        = 0.0f;
+        measureFloor       = 0.0f;
+        measureConfirm     = 0;
+        measureOnsetFrames = 0;
+        measureLatency.store(0);
+    }
+
+    void run_measurement(float ** out, int32 frames) {
+        if (measureState == eMeasureIdle) {
+            return;
+        }
+
+        float peak = 0.0f;
+
+        for (int32 i = 0; i < frames; i++) {
+            for (int c = 0; c < GB_CHANNELS; c++) {
+                float magnitude = (out[c][i] < 0.0f) ? -out[c][i] : out[c][i];
+
+                if (magnitude > peak) {
+                    peak = magnitude;
+                }
+            }
+        }
+
+        measureFrames += (uint32_t)frames;
+
+        if (measureState == eMeasureSettle) {
+            if ((double)measureFrames >= (GB_MEASURE_SETTLE_S * hostRate)) {
+                measureState  = eMeasureFloor;
+                measureFrames = 0;
+                measureFloor  = 0.0f;
+            }
+
+            return;
+        }
+
+        if (measureState == eMeasureFloor) {
+            // Establish what silence looks like on this input before deciding what a note looks
+            // like. A noisy preamp would otherwise register an onset immediately.
+            if (peak > measureFloor) {
+                measureFloor = peak;
+            }
+
+            if ((double)measureFrames >= (GB_MEASURE_FLOOR_S * hostRate)) {
+                uint8_t note[3] = { 0x90, GB_MEASURE_NOTE, 100 };
+
+                gb_midi_send(midiDestination.load(), note, 3);
+
+                measureState  = eMeasureListening;
+                measureFrames = 0;
+            }
+
+            return;
+        }
+
+        // Listening.
+        float threshold = measureFloor * GB_MEASURE_RATIO;
+
+        if (threshold < GB_MEASURE_MARGIN) {
+            threshold = GB_MEASURE_MARGIN;
+        }
+
+        // A very loud input would otherwise set a threshold no note could reach, and the
+        // measurement would time out reporting "nothing came back" when the truth is "this input is
+        // too noisy to measure". The ceiling turns that into a detection that at least tries, and
+        // the logged floor tells the story afterwards.
+        if (threshold > GB_MEASURE_CEILING) {
+            threshold = GB_MEASURE_CEILING;
+        }
+
+        if (peak > threshold) {
+            measureConfirm++;
+
+            // The FIRST block that crossed is the onset; the confirmation only decides whether to
+            // believe it. Counting from the confirming block instead would add its duration to
+            // every measurement.
+            if (measureConfirm == 1) {
+                measureOnsetFrames = measureFrames;
+            }
+        } else {
+            measureConfirm = 0;
+        }
+
+        if (measureConfirm >= GB_MEASURE_CONFIRM) {
+            uint8_t off[3] = { 0x80, GB_MEASURE_NOTE, 0 };
+
+            gb_midi_send(midiDestination.load(), off, 3);
+
+            // Our own share is subtracted here, while it is unambiguously the share that was in
+            // force during the measurement.
+            uint32_t total = measureOnsetFrames;
+            // internal_latency(), NOT report_latency() - see the comment on that pair. Netting off
+            // the reported figure would subtract the correction already in force as well as our own
+            // buffering, so each run would return less than the last.
+            uint32_t ours   = internal_latency();
+
+            // A ROUND TRIP CANNOT BE FASTER THAN OUR OWN PIPELINE. If it looks like it was, the
+            // onset is not the note - a threshold crossing on something else, or a ring that was
+            // not at its setpoint when the arithmetic assumed it was. Reported rather than clamped
+            // to zero: a silent 0 looked exactly like a device that had never been measured.
+            int      theirs = (total > ours) ? (int)(total - ours) : GB_MEASURE_TOO_EARLY;
+
+            measureOnset.store((int)total);
+            measureOurs.store((int)ours);
+            measureTriggerPeak.store(peak);
+            measureFloorSeen.store(measureFloor);
+
+            measureLatency.store(theirs);
+            measureState = eMeasureIdle;
+            measureStore.store(true);
+            wake_worker();
+            return;
+        }
+
+        if ((double)measureFrames >= (GB_MEASURE_TIMEOUT_S * hostRate)) {
+            uint8_t off[3] = { 0x80, GB_MEASURE_NOTE, 0 };
+
+            gb_midi_send(midiDestination.load(), off, 3);
+
+            measureLatency.store(GB_MEASURE_TIMED_OUT);        // nothing came back
+            measureState = eMeasureIdle;
+            measureStore.store(true);
+            wake_worker();
+        }
+    }
+
+    // WATCH THE BLOCK SIZE THE HOST ACTUALLY USES, which need not be the one it declared.
+    //
+    // The ring's floor is computed from maxSamplesPerBlock, because that is all a plug-in is told
+    // before it has to size anything. Ableton declares 512 and then calls with 128 - so the floor
+    // came out at 768 frames where 384 would do, and the plug-in reported 26 ms of latency for a
+    // job that needs 16.
+    //
+    // So: watch for a couple of seconds, take the largest block actually seen, and if that leaves a
+    // worthwhile amount on the table, ask the worker to retune. This runs on the audio thread and
+    // therefore only ever raises a flag - the setpoint change and the message to the host both
+    // allocate, and neither belongs here.
+    //
+    // ONCE ONLY, and never upward. A latency change makes the host redo its delay compensation, so
+    // doing it repeatedly would be worse than the latency it saves. If the gamble is wrong - a
+    // larger block arrives later and underruns - the safety net below puts the conservative floor
+    // back for the rest of the session and stops trying.
+    // THE DAW PLAYS THE HARDWARE. Note data arrives as VST3 events and leaves as MIDI bytes on a
+    // CoreMIDI destination; the audio comes back through the same capture path the effect uses.
+    // That round trip is what makes this an instrument rather than a recorder.
+    //
+    // Sent straight from process(), not queued. MIDISend is not strictly real-time safe, but the
+    // alternative - handing the bytes to another thread - adds exactly the jitter that makes a
+    // hardware synth feel loose, and every plug-in that drives external gear makes the same trade.
+    //
+    // Continuous controllers, pitch bend and aftertouch do NOT arrive here: VST3 delivers those as
+    // parameter changes via IMidiMapping, which is a separate piece of work and is why G2-Edit's
+    // controller implements it. Notes first.
+    // 0 keeps whatever the host sent; anything else forces the channel.
+    uint8_t channel_for(int16 incoming) const {
+        int forced = midiChannel.load();
+
+        return (forced <= 0) ? (uint8_t)(incoming & 0x0F) : (uint8_t)((forced - 1) & 0x0F);
+    }
+
+    void forward_events(ProcessData & data) {
+        if (data.inputEvents == nullptr) {
+            return;
+        }
+
+        int32 destination = midiDestination.load();
+        int32 count       = data.inputEvents->getEventCount();
+
+        for (int32 i = 0; i < count; i++) {
+            Event   event;
+            uint8_t message[3];
+
+            if (data.inputEvents->getEvent(i, event) != kResultOk) {
+                continue;
+            }
+
+            if (event.type == Event::kNoteOnEvent) {
+                int velocity = (int)((event.noteOn.velocity * 127.0f) + 0.5f);
+
+                // A note-on at zero velocity is a note-off on the wire, and some devices treat the
+                // two differently. Sending a real note-off is the safer of the two.
+                if (velocity <= 0) {
+                    message[0] = (uint8_t)(0x80 | channel_for(event.noteOn.channel));
+                    message[1] = (uint8_t)(event.noteOn.pitch & 0x7F);
+                    message[2] = 64;
+                } else {
+                    message[0] = (uint8_t)(0x90 | channel_for(event.noteOn.channel));
+                    message[1] = (uint8_t)(event.noteOn.pitch & 0x7F);
+                    message[2] = (uint8_t)((velocity > 127) ? 127 : velocity);
+                }
+            } else if (event.type == Event::kNoteOffEvent) {
+                int velocity = (int)((event.noteOff.velocity * 127.0f) + 0.5f);
+
+                message[0] = (uint8_t)(0x80 | channel_for(event.noteOff.channel));
+                message[1] = (uint8_t)(event.noteOff.pitch & 0x7F);
+                message[2] = (uint8_t)((velocity < 0) ? 0 : ((velocity > 127) ? 127 : velocity));
+            } else if (event.type == Event::kPolyPressureEvent) {
+                message[0] = (uint8_t)(0xA0 | channel_for(event.polyPressure.channel));
+                message[1] = (uint8_t)(event.polyPressure.pitch & 0x7F);
+                message[2] = (uint8_t)((event.polyPressure.pressure * 127.0f) + 0.5f);
+            } else {
+                continue;
+            }
+
+            gb_midi_send(destination, message, 3);
+        }
+    }
+
+    // Back from a normalised parameter to the wire.
+    void send_controller(ParamID id, ParamValue value) {
+        uint32_t index      = (uint32_t)(id - GB_CC_BASE);
+        uint8_t  channel    = channel_for((int16)((index / GB_CC_PER_CHANNEL) & 0x0F));
+        uint32_t controller = index % GB_CC_PER_CHANNEL;
+        int      destination = midiDestination.load();
+        uint8_t  message[3];
+
+        if (value < 0.0) {
+            value = 0.0;
+        } else if (value > 1.0) {
+            value = 1.0;
+        }
+
+        if (controller == kAfterTouch) {
+            // Channel pressure is two bytes, not three.
+            message[0] = (uint8_t)(0xD0 | channel);
+            message[1] = (uint8_t)((value * 127.0) + 0.5);
+
+            gb_midi_send(destination, message, 2);
+            return;
+        }
+
+        if (controller == kPitchBend) {
+            // FOURTEEN BITS, centred at 8192 - the one controller that is not a 0..127 byte, and
+            // the one a keyboard player notices immediately if it is wrong.
+            int bend = (int)((value * 16383.0) + 0.5);
+
+            message[0] = (uint8_t)(0xE0 | channel);
+            message[1] = (uint8_t)(bend & 0x7F);
+            message[2] = (uint8_t)((bend >> 7) & 0x7F);
+
+            gb_midi_send(destination, message, 3);
+            return;
+        }
+
+        if (controller > 127) {
+            return;
+        }
+
+        message[0] = (uint8_t)(0xB0 | channel);
+        message[1] = (uint8_t)controller;
+        message[2] = (uint8_t)((value * 127.0) + 0.5);
+
+        gb_midi_send(destination, message, 3);
+    }
+
+    void observe_block(int32 frames) {
+        if (retuneState != eRetuneWatching) {
+            return;
+        }
+
+        if ((uint32_t)frames > observedMaxFrames) {
+            observedMaxFrames = (uint32_t)frames;
+        }
+
+        observedFrames += (uint64_t)frames;
+
+        if ((double)observedFrames < (GB_SETTLE_SECONDS * hostRate)) {
+            return;
+        }
+
+        double candidate = minimum_setpoint_for(observedMaxFrames) * GB_AUTO_MARGIN;
+
+        // Nothing to gain if the host is using what it declared.
+        if (observedMaxFrames >= hostMaxFrames) {
+            retuneState = eRetuneSettled;
+            return;
+        }
+
+        if ((setpointFrames - candidate) >= GB_RETUNE_MIN_GAIN) {
+            retuneState = eRetuneRequested;
+            wake_worker();
+        } else {
+            retuneState = eRetuneSettled;
+        }
     }
 
     // Peak-hold with a slow decay, which is what makes a meter readable: a true instantaneous peak
@@ -720,9 +1356,51 @@ private:
             int32       offset = 0;
             ParamValue  value  = 0.0;
 
-            // Only the last point matters for either parameter: the trim is not smoothed yet, and
-            // a device change is not a thing to apply twice in one block.
+            // The last point is what a continuous parameter settles at, and that is all any of
+            // these need - except the measure trigger.
             if ((points <= 0) || (q->getPoint(points - 1, offset, value) != kResultOk)) {
+                continue;
+            }
+
+            // A TRIGGER HAS TO BE FOUND AMONG ALL THE POINTS, because the editor raises it and drops
+            // it again immediately - a momentary control has to return to rest or its next press
+            // produces no edge at all. A host is free to deliver both of those in one block, and
+            // reading only the last point then sees nothing but the release. The button did nothing,
+            // every time.
+            if (q->getParameterId() == kParamMeasure) {
+                bool sawPress = false;
+
+                for (int32 point = 0; point < points; point++) {
+                    int32      at   = 0;
+                    ParamValue held = 0.0;
+
+                    if ((q->getPoint(point, at, held) == kResultOk) && (held >= 0.5)) {
+                        sawPress = true;
+                        break;
+                    }
+                }
+
+                // TRIGGER FROM ANY POINT, BUT ARM FROM THE LAST ONE. Both halves matter and they
+                // are not the same question: the press has to be found wherever it lands in the
+                // block, while whether the button is still DOWN is whatever it settled at. Arming
+                // from "was there a press" latched the flag true - the editor's own release arrives
+                // in the same block - so the button worked exactly once and then never again.
+                if (sawPress && !measureArmed && (measureState == eMeasureIdle)) {
+                    log_line("measure requested");
+                    start_measurement();
+                }
+
+                measureArmed = (value >= 0.5);
+                continue;
+            }
+
+            ParamID id = q->getParameterId();
+
+            if ((id >= GB_CC_BASE) && (id < (GB_CC_BASE + GB_CC_COUNT))) {
+                if (instrument) {
+                    send_controller(id, value);
+                }
+
                 continue;
             }
 
@@ -734,6 +1412,24 @@ private:
                 if (wanted != wantedDevice.load()) {
                     wantedDevice.store(wanted);
                     request_device();       // signals the worker; opens nothing on this thread
+                }
+            } else if (q->getParameterId() == kParamMidiDest) {
+                int wanted = (int)(value * (double)(GB_MIDI_SLOTS - 1) + 0.5);
+
+                midiDestination.store(wanted);
+                gb_midi_destination_name(wanted, midiName, sizeof(midiName));
+            } else if (q->getParameterId() == kParamMidiChannel) {
+                midiChannel.store((int)(value * (double)(GB_CHANNEL_SLOTS - 1) + 0.5));
+            } else if (q->getParameterId() == kParamOffsetMs) {
+                offsetMs.store(GB_OFFSET_MIN_MS + (value * (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS)));
+
+                // The correction is part of the reported figure, so the host has to be told.
+                uint32 nowLatency = running ? report_latency() : 0;
+
+                if (nowLatency != reportedLatency) {
+                    reportedLatency = nowLatency;
+                    latencyDirty.store(true);
+                    wake_worker();
                 }
             } else if (q->getParameterId() == kParamRate) {
                 int index = (int)(value * (double)(gGbRateCount - 1) + 0.5);
@@ -857,6 +1553,28 @@ private:
             if (deviceDirty.exchange(false)) {
                 reconfigure();
             }
+
+            if (retuneState.load() == eRetuneRequested) {
+                retune();
+            }
+
+            if (revertWanted.exchange(false)) {
+                revert_retune();
+            }
+
+            if (measureStore.exchange(false)) {
+                store_measurement();
+            }
+
+            if (latencyDirty.exchange(false)) {
+                // BEFORE send_latency_changed(), deliberately. That call is what makes the host
+                // reactivate us and reopen the device, and reconfigure() decides on reopen whether
+                // to re-seed the offset. Writing the new value into the table first means the pair
+                // is already up to date by the time anything looks at it.
+                sync_offset_to_pair();
+                send_latency_changed();
+                publish_measurement();
+            }
         }
     }
 
@@ -962,6 +1680,294 @@ private:
         return false;
     }
 
+    // Apply the smaller setpoint the observed block size allows, then tell the host its latency
+    // moved. Worker thread only.
+    void retune(void) {
+        pthread_mutex_lock(&configLock);
+
+        if (!running) {
+            pthread_mutex_unlock(&configLock);
+            retuneState.store(eRetuneSettled);
+            return;
+        }
+
+        double before = setpointFrames;
+
+        setpointFrames = minimum_setpoint_for(observedMaxFrames) * GB_AUTO_MARGIN;
+
+        drift_set_setpoint(&drift, setpointFrames);
+        publish_latency_breakdown();
+
+        // The ring holds more than the new setpoint wants, so snap it down rather than waiting for
+        // the loop to drain it at a few hundred ppm - which would take minutes.
+        needResync.store(true);
+
+        tGbStatus * status = gb_status(statusSlot);
+
+        if (status != nullptr) {
+            atomic_store(&status->setpointFrames, setpointFrames);
+        }
+
+        uint32 nowLatency = report_latency();
+
+        pthread_mutex_unlock(&configLock);
+
+        retuneState.store(eRetuneSettled);
+
+        log_line("retuned: host declared %u but uses %u - setpoint %.0f -> %.0f, latency %u -> %u",
+                 hostMaxFrames, observedMaxFrames, before, setpointFrames, reportedLatency, nowLatency);
+
+        if (nowLatency != reportedLatency) {
+            reportedLatency = nowLatency;
+
+            if (status != nullptr) {
+                atomic_store(&status->latencySamples, (int)nowLatency);
+            }
+
+            send_latency_changed();
+        }
+    }
+
+    // The pair a measurement belongs to. Both halves matter: the same synth reached over USB and
+    // over DIN answers at different speeds, and two synths on one interface are not comparable.
+    tMeasured * measured_for(const char * audioUid, const char * midiDest, bool create) {
+        for (uint32_t i = 0; i < measuredCount; i++) {
+            if ((strncmp(measured[i].audioUid, audioUid, DEVICE_UID_LEN) == 0)
+                && (strncmp(measured[i].midiDest, midiDest, GB_MIDI_NAME_LEN) == 0)) {
+                return &measured[i];
+            }
+        }
+
+        if (!create) {
+            return nullptr;
+        }
+
+        uint32_t slot = measuredCount;
+
+        if (measuredCount < GB_MAX_MEASURED) {
+            measuredCount++;
+        } else {
+            memmove(&measured[0], &measured[1], sizeof(tMeasured) * (GB_MAX_MEASURED - 1));
+            slot = GB_MAX_MEASURED - 1;
+        }
+
+        memset(&measured[slot], 0, sizeof(measured[slot]));
+        strncpy(measured[slot].audioUid, audioUid, DEVICE_UID_LEN - 1);
+        strncpy(measured[slot].midiDest, midiDest, GB_MIDI_NAME_LEN - 1);
+
+        return &measured[slot];
+    }
+
+    void current_midi_name(char * out, unsigned long len) {
+        gb_midi_destination_name(midiDestination.load(), out, len);
+    }
+
+    void remember_offset_pair(const char * destination) {
+        snprintf(offsetUid, sizeof(offsetUid), "%s", deviceSelector.c_str());
+        snprintf(offsetDest, sizeof(offsetDest), "%s", destination);
+    }
+
+    // WORKER THREAD ONLY. The +/- arrives on the audio thread, which stores the atomic and asks for
+    // a latency update; the table write happens here instead, because measured_for() can allocate a
+    // slot and memmove the array and that has no business running under a process() call.
+    void sync_offset_to_pair(void) {
+        if (!instrument || deviceSelector.empty()) {
+            return;
+        }
+
+        char destination[GB_MIDI_NAME_LEN];
+
+        current_midi_name(destination, sizeof(destination));
+
+        tMeasured * entry = measured_for(deviceSelector.c_str(), destination, true);
+
+        if (entry != nullptr) {
+            entry->offsetMs = offsetMs.load();
+        }
+
+        remember_offset_pair(destination);
+    }
+
+    void store_measurement(void) {
+        int result = measureLatency.load();
+
+        // A RESYNC OR AN UNDERRUN DURING THE MEASUREMENT INVALIDATES IT. Either one means the ring
+        // was snapped or starved while we were counting, so the onset moved by however long the
+        // disturbance lasted - and the resulting figure is a measurement of the glitch, not of the
+        // hardware. Better to say so and let it be repeated than to store a number that looks
+        // authoritative and is not.
+        unsigned underruns = (unsigned)(atomic_load(&ring.underflows) - measureUnderrunsAtStart);
+        int      resynced  = resyncs.load() - measureResyncsAtStart;
+
+        if ((result >= 0) && ((underruns > 0) || (resynced > 0))) {
+            log_line("measurement discarded: the capture was not clean during it "
+                     "(%u underruns, %d resyncs) - try again", underruns, resynced);
+
+            tGbStatus * status = gb_status(statusSlot);
+
+            if (status != nullptr) {
+                atomic_store(&status->measureFailed, 1);
+            }
+
+            return;
+        }
+
+        if (result < 0) {
+            if (result == GB_MEASURE_TOO_EARLY) {
+                log_line("measurement: onset at %d frames but our own share is %u - the note cannot "
+                         "have arrived before our buffering delivered it. Either the threshold was "
+                         "crossed by something other than the test note, or the ring was not at its "
+                         "setpoint. floor %.4f, triggered at %.4f",
+                         measureOnset.load(), internal_latency(),
+                         (double)measureFloorSeen.load(), (double)measureTriggerPeak.load());
+            } else {
+                log_line("measurement: nothing came back within %.1f s - is the synth on the channel "
+                         "and audible?", GB_MEASURE_TIMEOUT_S);
+            }
+
+            tGbStatus * status = gb_status(statusSlot);
+
+            if (status != nullptr) {
+                atomic_store(&status->measureFailed, (result == GB_MEASURE_TOO_EARLY) ? 0 : 1);
+                atomic_store(&status->measureRanEmpty, (result == GB_MEASURE_TOO_EARLY) ? 1 : 0);
+            }
+
+            return;
+        }
+
+        char destination[GB_MIDI_NAME_LEN];
+
+        current_midi_name(destination, sizeof(destination));
+
+        {
+            tGbStatus * status = gb_status(statusSlot);
+
+            if (status != nullptr) {
+                atomic_store(&status->measureRanEmpty, 0);
+                atomic_store(&status->measureFailed, 0);
+            }
+        }
+
+        // THE MEASUREMENT LANDS IN THE CORRECTION, which is the whole point of the arrangement: the
+        // figure Measure produces is the one the panel then lets you nudge, rather than a number
+        // sitting next to a separate trim that starts at zero.
+        //
+        // Clamped, because offsetMs is a normalised VST3 parameter with a fixed range and a reading
+        // outside it cannot be represented. Logged when that bites - a silently clamped round trip
+        // would put every take in the wrong place with nothing on screen to say why.
+        double measuredMs = (double)result / (hostRate / 1000.0);
+        double seeded     = (measuredMs < GB_OFFSET_MIN_MS) ? GB_OFFSET_MIN_MS
+                            : ((measuredMs > GB_OFFSET_MAX_MS) ? GB_OFFSET_MAX_MS : measuredMs);
+
+        if (seeded != measuredMs) {
+            log_line("measured %.1f ms is outside the offset range %.0f..%.0f - clamped to %.1f",
+                     measuredMs, GB_OFFSET_MIN_MS, GB_OFFSET_MAX_MS, seeded);
+        }
+
+        tMeasured * entry = measured_for(deviceSelector.c_str(), destination, true);
+
+        if (entry != nullptr) {
+            entry->hardwareSamples = (uint32_t)result;
+            entry->offsetMs        = seeded;
+        }
+
+        offsetMs.store(seeded);
+        remember_offset_pair(destination);
+
+        // The panel reads the offset from the CONTROLLER, and the controller has no idea a
+        // measurement just happened. Without this the readout stays at its old value until the next
+        // click, and worse, the next +/- steps from the stale number and throws the reading away.
+        send_message("gbOffset", (int)lround(seeded * 1000.0));
+
+        pthread_mutex_lock(&configLock);
+        hardwareSamples = (uint32_t)result;
+
+        uint32 nowLatency = running ? report_latency() : 0;
+
+        pthread_mutex_unlock(&configLock);
+
+        // Underruns during the measurement matter: a gap in the capture delays the onset by
+        // however long the gap was, so a figure taken while the ring was starving is not a
+        // measurement of the hardware at all.
+        log_line("measured: onset at %d frames, our share %d, hardware %d (%.1f ms). "
+                 "floor %.4f, triggered at %.4f, underruns %u resyncs %d during. '%s' -> '%s'",
+                 measureOnset.load(), measureOurs.load(), result,
+                 (double)result / (hostRate / 1000.0),
+                 (double)measureFloorSeen.load(), (double)measureTriggerPeak.load(),
+                 (unsigned)(atomic_load(&ring.underflows) - measureUnderrunsAtStart),
+                 resyncs.load() - measureResyncsAtStart,
+                 deviceSelector.c_str(), destination);
+
+        publish_measurement();
+
+        if (nowLatency != reportedLatency) {
+            reportedLatency = nowLatency;
+            send_latency_changed();
+        }
+    }
+
+    void publish_measurement(void) {
+        publish_latency_breakdown();
+    }
+
+    // Every component of the reported figure, so the panel can show where the time actually goes
+    // rather than one number nobody can argue with.
+    void publish_latency_breakdown(void) {
+        tGbStatus * status = gb_status(statusSlot);
+
+        if (status == nullptr) {
+            return;
+        }
+
+        double ratio = (nominalRatio > 0.0) ? nominalRatio : 1.0;
+
+        atomic_store(&status->ringSamples, (int)(setpointFrames / ratio));
+        atomic_store(&status->deviceSamples, (int)((double)deviceLatency / ratio));
+        atomic_store(&status->filterSamples, (int)(resampler_latency_frames() / ratio));
+        atomic_store(&status->measuredSamples, (int)hardwareSamples);
+        atomic_store(&status->offsetSamples, (int)((offsetMs.load() / 1000.0) * hostRate));
+        atomic_store(&status->latencySamples, (int)(running ? report_latency() : 0));
+    }
+
+    // Put the conservative floor back after a retune turned out to be too tight.
+    void revert_retune(void) {
+        pthread_mutex_lock(&configLock);
+
+        if (!running) {
+            pthread_mutex_unlock(&configLock);
+            return;
+        }
+
+        double before = setpointFrames;
+
+        setpointFrames = minimum_setpoint(openDeviceFrames) * GB_AUTO_MARGIN;
+
+        drift_set_setpoint(&drift, setpointFrames);
+        needResync.store(true);
+
+        tGbStatus * status = gb_status(statusSlot);
+
+        if (status != nullptr) {
+            atomic_store(&status->setpointFrames, setpointFrames);
+        }
+
+        uint32 nowLatency = report_latency();
+
+        pthread_mutex_unlock(&configLock);
+
+        log_line("retune reverted after an underrun: setpoint %.0f -> %.0f", before, setpointFrames);
+
+        if (nowLatency != reportedLatency) {
+            reportedLatency = nowLatency;
+
+            if (status != nullptr) {
+                atomic_store(&status->latencySamples, (int)nowLatency);
+            }
+
+            send_latency_changed();
+        }
+    }
+
     bool open_capture_locked(const tDeviceInfo & info) {
         tDeviceSettings * settings = ensure_settings(info.uid);
 
@@ -1021,7 +2027,24 @@ private:
         }
 
         if (settings->frames > 0) {
-            device_set_buffer_frames(info.id, settings->frames);
+            uint32_t lowest  = 0;
+            uint32_t highest = 0;
+            uint32_t wanted  = settings->frames;
+
+            // CLAMPED TO WHAT THE DEVICE ALLOWS. Asking a USB interface for 16 frames is simply
+            // refused, and a refusal looks exactly like a device that changed its mind on its own -
+            // so ask what it can do and say what happened.
+            if (device_buffer_frame_range(info.id, &lowest, &highest)) {
+                if (wanted < lowest) {
+                    log_line("device '%s' will not go below %u frames; %u requested",
+                             info.name, lowest, settings->frames);
+                    wanted = lowest;
+                } else if ((highest > 0) && (wanted > highest)) {
+                    wanted = highest;
+                }
+            }
+
+            device_set_buffer_frames(info.id, wanted);
         }
 
         double deviceRate = device_sample_rate(info.id);
@@ -1039,7 +2062,8 @@ private:
                          : 0.0;
         trimGain.store(settings->trim);
 
-        double minimum = minimum_setpoint(deviceFrames);
+        uint32_t effectiveHostFrames = (observedMaxFrames > 0) ? observedMaxFrames : hostMaxFrames;
+        double   minimum              = minimum_setpoint_for(effectiveHostFrames, deviceFrames);
 
         if (setpointFrames <= 0.0) {
             setpointFrames = minimum * GB_AUTO_MARGIN;      // auto
@@ -1088,6 +2112,16 @@ private:
             return false;
         }
 
+        // COUNTERS BELONG TO THIS OPEN, NOT TO THE INSTANCE. A buffer or rate change tears the
+        // device down and rebuilds it, and the rebuild resyncs by design - so carrying the old
+        // totals over reports a fault that was actually a setting being changed. Worse, it makes a
+        // latency measurement refuse itself, because it checks those same counters to decide
+        // whether the capture was clean.
+        atomic_store(&ring.underflows, 0);
+        atomic_store(&ring.overflows, 0);
+        resyncs.store(0);
+        primed = false;
+
         needResync.store(true);
         running = true;
 
@@ -1097,6 +2131,43 @@ private:
         appliedFrames       = deviceFrames;
         appliedChannels     = captureChannels;
         appliedFirstChannel = settings->firstChannel;
+        openDeviceFrames    = deviceFrames;
+
+        // Whatever was measured for this device and destination before.
+        {
+            char destination[GB_MIDI_NAME_LEN];
+
+            current_midi_name(destination, sizeof(destination));
+
+            const tMeasured * previous = measured_for(info.uid, destination, false);
+
+            hardwareSamples = (previous != nullptr) ? previous->hardwareSamples : 0;
+
+            // ONLY WHEN THE PAIR HAS ACTUALLY CHANGED - see offsetUid/offsetDest for why. A reopen
+            // of the same device must leave the live correction alone, or applying it would undo
+            // it. A genuinely different device gets that device's own stored value, or zero if it
+            // has never been measured: a correction belongs to the rig it was taken from, and
+            // carrying it to another one is a whole round trip of error, not a small trim.
+            if ((strncmp(offsetUid, info.uid, DEVICE_UID_LEN) != 0)
+                || (strncmp(offsetDest, destination, GB_MIDI_NAME_LEN) != 0)) {
+                offsetMs.store((previous != nullptr) ? previous->offsetMs : 0.0);
+                remember_offset_pair(destination);
+                send_message("gbOffset", (int)lround(offsetMs.load() * 1000.0));
+            }
+        }
+
+        // THE OBSERVATION SURVIVES A REOPEN, and this is what stops the retune eating itself.
+        //
+        // Telling the host its latency changed makes it deactivate and reactivate the plug-in, which
+        // reopens the device. Resetting the observation there meant: open wide, watch two seconds,
+        // retune, tell the host, get reactivated, open wide again - for ever, with the device torn
+        // down and rebuilt every few seconds and the audio in pieces throughout.
+        //
+        // The real block size is a property of the HOST, not of the device, so once known it stays
+        // known and the correct setpoint is used from the first frame. Nothing then changes after
+        // activation, so nothing asks the host to restart anything.
+        observedFrames = 0;
+        retuneState.store((observedMaxFrames > 0) ? eRetuneSettled : eRetuneWatching);
 
         tGbStatus * status = gb_status(statusSlot);
 
@@ -1104,8 +2175,9 @@ private:
         atomic_store(&status->deviceRate, (int)deviceRate);
         atomic_store(&status->deviceFrames, (int)deviceFrames);
         atomic_store(&status->setpointFrames, setpointFrames);
-        atomic_store(&status->latencySamples, (int)getLatencySamples());
         atomic_store(&status->active, true);
+
+        publish_latency_breakdown();
 
         return true;
     }
@@ -1153,7 +2225,15 @@ private:
     // one - the floor has to cover the largest block the host may ever ask for, even if it
     // normally asks for far less.
     double minimum_setpoint(uint32_t deviceFrames) const {
-        return ((double)hostMaxFrames * nominalRatio)
+        return minimum_setpoint_for(hostMaxFrames, deviceFrames);
+    }
+
+    double minimum_setpoint_for(uint32_t hostFrames) const {
+        return minimum_setpoint_for(hostFrames, openDeviceFrames);
+    }
+
+    double minimum_setpoint_for(uint32_t hostFrames, uint32_t deviceFrames) const {
+        return ((double)hostFrames * nominalRatio)
                + (double)deviceFrames
                + (2.0 * RESAMPLER_TAPS);
     }
@@ -1232,7 +2312,11 @@ private:
 
         entry->trim = trimGain.load();
 
-        if (running) {
+        // DELIBERATELY NOT WRITING BACK targetMs WHEN IT IS AUTO. It used to record the computed
+        // setpoint, which turned "work it out" into a fixed number the moment a project was saved -
+        // so a session saved at one buffer size reopened with that size's setpoint baked in, and the
+        // floor calculation was quietly bypassed for ever after. Only an explicit choice is stored.
+        if (running && (entry->targetMs > 0.0)) {
             entry->targetMs = (setpointFrames / (nominalRatio * hostRate)) * 1000.0;
         }
     }
@@ -1255,7 +2339,16 @@ private:
         }
 
         rememberedCount = 0;
+        measuredCount   = 0;
         deviceSelector.clear();
+
+        // Defaults for a blob that predates these keys, so loading an older session zeroes the
+        // correction rather than leaving whatever the previous project in this instance had. The
+        // pair record is cleared with it, so the device open that follows treats this as a new pair
+        // and seeds the offset from whatever the restored table holds for it.
+        offsetMs.store(0.0);
+        offsetUid[0]  = '\0';
+        offsetDest[0] = '\0';
 
         size_t pos = 0;
 
@@ -1265,15 +2358,79 @@ private:
 
             pos = (end == std::string::npos) ? blob.size() : end + 1;
 
-            if (line.compare(0, 7, "active=") == 0) {
+            if (line.compare(0, 5, "midi=") == 0) {
+                std::string wanted = line.substr(5);
+
+                snprintf(midiName, sizeof(midiName), "%s", wanted.c_str());
+
+                int slot = gb_midi_slot_for_name(midiName);
+
+                if (slot >= 0) {
+                    midiDestination.store(slot);
+                }
+            } else if (line.compare(0, 7, "midich=") == 0) {
+                midiChannel.store(atoi(line.substr(7).c_str()));
+            } else if (line.compare(0, 7, "active=") == 0) {
                 deviceSelector = line.substr(7);
             } else if (line.compare(0, 4, "dev=") == 0) {
                 parse_device_line(line.substr(4), version);
+            } else if (line.compare(0, 3, "hw=") == 0) {
+                parse_measured_line(line.substr(3));
             }
-            // Anything else is from a newer build; skipping it is the point of the format.
+            // Anything else is from a newer build; skipping it is the point of the format. That is
+            // also why hw= arrives without a version bump: it is a new KEY, and only a change to how
+            // a dev= line splits has ever needed the version.
+            //
+            // It also means the short-lived offset=/meas= pair from earlier today is simply ignored
+            // rather than misread. meas= carried SAMPLES where hw= carries milliseconds, so reusing
+            // the name would have loaded a 221-sample reading as 221 ms.
         }
 
         return true;
+    }
+
+    // hw=<samples>,<offset ms>,<destination name length>,<destination name><audio uid>
+    //
+    // THE LENGTH IS THERE BECAUSE BOTH TAILS ARE FREE TEXT. A dev= line gets away with putting its
+    // uid last and taking the rest of the line, but this one carries two names, and a MIDI
+    // destination is quite entitled to contain a comma - "Scarlett 2i2, Port 1" is an ordinary
+    // thing for a driver to call itself. Counting the first name off by length leaves nothing to
+    // guess at, where a third comma would have been a guess that fails on somebody's interface.
+    void parse_measured_line(const std::string & body) {
+        size_t at     = 0;
+        double fields[3];
+
+        for (int i = 0; i < 3; i++) {
+            size_t comma = body.find(',', at);
+
+            if (comma == std::string::npos) {
+                return;
+            }
+            fields[i] = strtod(body.substr(at, comma - at).c_str(), nullptr);
+            at        = comma + 1;
+        }
+
+        size_t      destLen = (size_t)fields[2];
+        std::string tail    = body.substr(at);
+
+        if (destLen > tail.size()) {
+            return;
+        }
+
+        std::string dest = tail.substr(0, destLen);
+        std::string uid  = tail.substr(destLen);
+
+        if (uid.empty()) {
+            return;
+        }
+
+        tMeasured * entry = measured_for(uid.c_str(), dest.c_str(), true);
+
+        if (entry != nullptr) {
+            entry->hardwareSamples = (uint32_t)fields[0];
+            entry->offsetMs        = (fields[1] < GB_OFFSET_MIN_MS) ? GB_OFFSET_MIN_MS
+                                     : ((fields[1] > GB_OFFSET_MAX_MS) ? GB_OFFSET_MAX_MS : fields[1]);
+        }
     }
 
     // The canonical order of the numeric fields, and which of them each version actually wrote.
@@ -1346,6 +2503,51 @@ private:
     IConnectionPoint *  peer{nullptr};
     int                 statusSlot{-1};
     uint32              reportedLatency{0};
+
+    // The block-size observation, and where it has got to.
+    enum tRetuneState { eRetuneWatching = 0, eRetuneRequested, eRetuneSettled, eRetuneBlocked };
+
+    std::atomic<tRetuneState> retuneState{eRetuneSettled};
+    std::atomic<bool>   revertWanted{false};
+    std::atomic<int>    midiDestination{0};
+    std::atomic<bool>   offlineRender{false};
+    std::atomic<double> offsetMs{0.0};
+    std::atomic<int>    midiChannel{0};        // 0 = whatever the note arrived on
+    char                midiName[GB_MIDI_NAME_LEN]{};
+
+    enum tMeasureState { eMeasureIdle = 0, eMeasureSettle, eMeasureFloor, eMeasureListening };
+
+    tMeasureState       measureState{eMeasureIdle};
+    uint32_t            measureFrames{0};
+    uint32_t            measureOnsetFrames{0};
+    int                 measureConfirm{0};
+    float               measurePeak{0.0f};
+    float               measureFloor{0.0f};
+    bool                measureArmed{false};
+    std::atomic<int>    measureLatency{0};
+    std::atomic<bool>   measureStore{false};
+    std::atomic<bool>   latencyDirty{false};
+    std::atomic<int>    measureOnset{0};
+    std::atomic<int>    measureOurs{0};
+    std::atomic<float>  measureTriggerPeak{0.0f};
+    std::atomic<float>  measureFloorSeen{0.0f};
+    uint32_t            measureUnderrunsAtStart{0};
+    int                 measureResyncsAtStart{0};
+
+    tMeasured           measured[GB_MAX_MEASURED];
+    uint32_t            measuredCount{0};
+
+    // WHICH PAIR THE LIVE offsetMs IS FOR. Without this the correction could not survive its own
+    // application: changing the reported latency makes the host reactivate the plug-in, which
+    // reopens the device, and a reopen that re-seeded the offset from the table would undo every
+    // nudge the moment it took effect. Re-seeding is now gated on the pair actually having changed,
+    // so reopening the same device leaves the value exactly where the user put it.
+    char                offsetUid[DEVICE_UID_LEN]{0};
+    char                offsetDest[GB_MIDI_NAME_LEN]{0};
+    uint32_t            hardwareSamples{0};    // in force for the current device/destination pair
+    uint32_t            observedMaxFrames{0};
+    uint64_t            observedFrames{0};
+    uint32_t            openDeviceFrames{0};
     std::atomic<bool>  needResync{true};
     std::atomic<float> trimGain{1.0f};
     std::atomic<bool>  deviceDirty{false};
@@ -1394,6 +2596,7 @@ private:
     float *       interleaved{nullptr};
     bool          running{false};
     bool          primed{false};
+    const bool    instrument;
 };
 
 // ------------------------------------------------------------------------------------------------
@@ -1410,9 +2613,13 @@ private:
 // leaves the host's generic panel empty and looks broken even when it is working perfectly.
 // ------------------------------------------------------------------------------------------------
 
-class GenBridgeController : public IEditController, public IConnectionPoint {
+class GenBridgeController : public IEditController, public IConnectionPoint, public IMidiMapping {
 public:
-    GenBridgeController(void) : refCount(1) {}
+    explicit GenBridgeController(bool instrumentIn) : refCount(1), instrument(instrumentIn) {
+        if (instrument) {
+            gb_midi_init();
+        }
+    }
     virtual ~GenBridgeController(void) {}
 
     tresult PLUGIN_API queryInterface(const TUID iid, void ** obj) SMTG_OVERRIDE {
@@ -1420,6 +2627,7 @@ public:
         QUERY_INTERFACE(iid, obj, IPluginBase::iid, IEditController)
         QUERY_INTERFACE(iid, obj, IEditController::iid, IEditController)
         QUERY_INTERFACE(iid, obj, IConnectionPoint::iid, IConnectionPoint)
+        QUERY_INTERFACE(iid, obj, IMidiMapping::iid, IMidiMapping)
         *obj = nullptr;
         return kNoInterface;
     }
@@ -1477,6 +2685,32 @@ public:
                     gb_editor_set_status_slot(editorView, statusSlot);
                 }
             }
+        } else if (strcmp(id, "gbOffset") == 0) {
+            // A measurement or a device change moved the correction inside the processor. The panel
+            // reads this parameter, and the next +/- steps from it, so a stale value here would be
+            // written straight back over the new reading on the first click.
+            int64 thousandths = 0;
+
+            if (message->getAttributes()->getInt("value", thousandths) == kResultOk) {
+                double ms      = (double)thousandths / 1000.0;
+                double clamped = (ms < GB_OFFSET_MIN_MS) ? GB_OFFSET_MIN_MS
+                                 : ((ms > GB_OFFSET_MAX_MS) ? GB_OFFSET_MAX_MS : ms);
+
+                offset = (clamped - GB_OFFSET_MIN_MS) / (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS);
+
+                // Through the handler, not just into the member: this is a parameter the host
+                // automates and saves, and a value it was never told about is one it will overwrite
+                // from its own copy at the next opportunity.
+                if (componentHandler != nullptr) {
+                    componentHandler->beginEdit(kParamOffsetMs);
+                    componentHandler->performEdit(kParamOffsetMs, offset);
+                    componentHandler->endEdit(kParamOffsetMs);
+                }
+
+                if (editorView != nullptr) {
+                    gb_editor_refresh_values(editorView);
+                }
+            }
         } else if (strcmp(id, "gbLatency") == 0) {
             // The whole point of the round trip: only the controller holds the handler that can
             // tell the host to read the latency again.
@@ -1509,6 +2743,30 @@ public:
         }
 
         tGbActive active = gb_parse_active(blob);
+
+        // The MIDI half is restored even when no audio device was stored: an instrument may have had
+        // its destination chosen and its capture not.
+        if (!active.midiName.empty()) {
+            gb_midi_invalidate();
+
+            int slot = gb_midi_slot_for_name(active.midiName.c_str());
+
+            if (slot >= 0) {
+                midiDest = (double)slot / (double)(GB_MIDI_SLOTS - 1);
+            }
+        }
+
+        midiChannel = (double)active.midiChannel / (double)(GB_CHANNEL_SLOTS - 1);
+
+        // THE CORRECTION IS PER DEVICE, so unlike the MIDI half above it has nothing to restore
+        // until a device is known - gb_parse_active() resolves it by matching the saved pair. With
+        // no device stored there is no pair, and the default of zero is the honest answer.
+        {
+            double clamped = (active.offsetMs < GB_OFFSET_MIN_MS) ? GB_OFFSET_MIN_MS
+                             : ((active.offsetMs > GB_OFFSET_MAX_MS) ? GB_OFFSET_MAX_MS : active.offsetMs);
+
+            offset = (clamped - GB_OFFSET_MIN_MS) / (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS);
+        }
 
         if (!active.valid) {
             return kResultOk;
@@ -1551,7 +2809,12 @@ public:
         return kResultOk;
     }
 
-    int32 PLUGIN_API getParameterCount(void) SMTG_OVERRIDE { return kParamCount; }
+    int32 PLUGIN_API getParameterCount(void) SMTG_OVERRIDE {
+        // The effect has no MIDI out, so it does not pretend to a parameter for one.
+        // The effect has no MIDI out, so no destination, no measurement, no correction to one - and
+        // no controllers to pass on either.
+        return instrument ? (kParamCount + GB_CC_COUNT) : (kParamCount - 4);
+    }
 
     // The rate and buffer lists are the SAME arrays the editor steps through and the processor
     // applies, so an index cannot mean one thing here and another there.
@@ -1559,6 +2822,33 @@ public:
     tresult PLUGIN_API getParameterInfo(int32 index, ParameterInfo & info) SMTG_OVERRIDE {
         memset(&info, 0, sizeof(info));
         info.unitId = 0;           // kRootUnitId, without pulling in ivstunits.h
+
+        // The controller pass-throughs. Hidden and not automatable: they exist so the host has
+        // somewhere to deliver a pedal or a wheel, not so a person can draw one in.
+        if (index >= kParamCount) {
+            uint32_t offsetIndex = (uint32_t)(index - kParamCount);
+
+            if (!instrument || (offsetIndex >= GB_CC_COUNT)) {
+                return kInvalidArgument;
+            }
+
+            uint32_t channel    = offsetIndex / GB_CC_PER_CHANNEL;
+            uint32_t controller = offsetIndex % GB_CC_PER_CHANNEL;
+            char     title[64];
+
+            info.id         = GB_CC_BASE + offsetIndex;
+            info.stepCount  = 0;
+            info.flags      = ParameterInfo::kIsHidden;
+
+            // Pitch bend rests in the middle; everything else rests at zero.
+            info.defaultNormalizedValue = (controller == (uint32_t)kPitchBend) ? 0.5 : 0.0;
+
+            snprintf(title, sizeof(title), "Ch%u CC%u", channel + 1, controller);
+            to_utf16(title, info.title, 128);
+            to_utf16(title, info.shortTitle, 128);
+
+            return kResultOk;
+        }
 
         // A STEPPED LIST PARAMETER IS THE DEVICE CHOOSER, until the SynthLib editor exists. A host
         // renders one as a drop-down in its generic panel, which makes the plug-in usable with no
@@ -1598,6 +2888,55 @@ public:
 
             to_utf16("Sample Rate", info.title, 128);
             to_utf16("Rate", info.shortTitle, 128);
+
+            return kResultOk;
+        }
+
+        if ((index == kParamMidiDest) && instrument) {
+            info.id                     = kParamMidiDest;
+            info.stepCount              = GB_MIDI_SLOTS - 1;
+            info.defaultNormalizedValue = 0.0;
+            info.flags                  = ParameterInfo::kCanAutomate | ParameterInfo::kIsList;
+
+            to_utf16("MIDI Destination", info.title, 128);
+            to_utf16("MIDI", info.shortTitle, 128);
+
+            return kResultOk;
+        }
+
+        if ((index == kParamMidiChannel) && instrument) {
+            info.id                     = kParamMidiChannel;
+            info.stepCount              = GB_CHANNEL_SLOTS - 1;
+            info.defaultNormalizedValue = 0.0;      // "Source"
+            info.flags                  = ParameterInfo::kCanAutomate | ParameterInfo::kIsList;
+
+            to_utf16("MIDI Channel", info.title, 128);
+            to_utf16("Channel", info.shortTitle, 128);
+
+            return kResultOk;
+        }
+
+        if ((index == kParamMeasure) && instrument) {
+            info.id                     = kParamMeasure;
+            info.stepCount              = 1;
+            info.defaultNormalizedValue = 0.0;
+            info.flags                  = ParameterInfo::kCanAutomate;
+
+            to_utf16("Measure Latency", info.title, 128);
+            to_utf16("Measure", info.shortTitle, 128);
+
+            return kResultOk;
+        }
+
+        if ((index == kParamOffsetMs) && instrument) {
+            info.id                     = kParamOffsetMs;
+            info.stepCount              = 0;
+            info.defaultNormalizedValue = -GB_OFFSET_MIN_MS / (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS);
+            info.flags                  = ParameterInfo::kCanAutomate;
+
+            to_utf16("Latency Offset", info.title, 128);
+            to_utf16("Offset", info.shortTitle, 128);
+            to_utf16("ms", info.units, 128);
 
             return kResultOk;
         }
@@ -1679,6 +3018,39 @@ public:
             return kResultOk;
         }
 
+        if (id == kParamMidiChannel) {
+            int slot = (int)((valueNormalized * (double)(GB_CHANNEL_SLOTS - 1)) + 0.5);
+
+            if (slot <= 0) {
+                to_utf16("Source", string, 128);
+            } else {
+                snprintf(buffer, sizeof(buffer), "%d", slot);
+                to_utf16(buffer, string, 128);
+            }
+
+            return kResultOk;
+        }
+
+        if (id == kParamMeasure) {
+            to_utf16((valueNormalized < 0.5) ? "Ready" : "Measuring", string, 128);
+            return kResultOk;
+        }
+
+        if (id == kParamOffsetMs) {
+            snprintf(buffer, sizeof(buffer), "%+.1f",
+                     GB_OFFSET_MIN_MS + (valueNormalized * (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS)));
+            to_utf16(buffer, string, 128);
+            return kResultOk;
+        }
+
+        if (id == kParamMidiDest) {
+            gb_midi_destination_name((int)((valueNormalized * (double)(GB_MIDI_SLOTS - 1)) + 0.5),
+                                     buffer, sizeof(buffer));
+            to_utf16(buffer, string, 128);
+
+            return kResultOk;
+        }
+
         if (id == kParamFirstChannel) {
             int first = (int)((valueNormalized * (double)(GB_MAX_FIRST_CHANNEL - 1)) + 0.5);
 
@@ -1714,7 +3086,18 @@ public:
             case kParamFrames: return frames;
             case kParamMode:   return mode;
             case kParamFirstChannel: return firstChannel;
-            default:           return 0.0;
+            case kParamMidiDest: return midiDest;
+            case kParamMidiChannel: return midiChannel;
+            case kParamMeasure:  return measure;
+            case kParamOffsetMs: return offset;
+            default:
+                // A controller pass-through: the host owns its value, and pitch bend rests centred.
+                if ((id >= GB_CC_BASE) && (id < (GB_CC_BASE + GB_CC_COUNT))) {
+                    return (((id - GB_CC_BASE) % GB_CC_PER_CHANNEL) == (uint32_t)kPitchBend)
+                           ? 0.5 : 0.0;
+                }
+
+                return 0.0;
         }
     }
 
@@ -1726,8 +3109,37 @@ public:
             case kParamFrames: frames = value; return kResultOk;
             case kParamMode:   mode   = value; return kResultOk;
             case kParamFirstChannel: firstChannel = value; return kResultOk;
-            default:           return kInvalidArgument;
+            case kParamMidiDest: midiDest = value; return kResultOk;
+            case kParamMidiChannel: midiChannel = value; return kResultOk;
+            case kParamMeasure:  measure  = value; return kResultOk;
+            case kParamOffsetMs: offset   = value; return kResultOk;
+            default:
+                if ((id >= GB_CC_BASE) && (id < (GB_CC_BASE + GB_CC_COUNT))) {
+                    return kResultOk;      // passed straight to the hardware, nothing to keep here
+                }
+
+                return kInvalidArgument;
         }
+    }
+
+    // WHERE THE PEDAL COMES FROM. A host asks, once, which parameter each MIDI controller should
+    // arrive on; without this it has nowhere to put them and simply discards everything that is not
+    // a note.
+    tresult PLUGIN_API getMidiControllerAssignment(int32 busIndex, int16 channel,
+                                                   CtrlNumber midiControllerNumber,
+                                                   ParamID & id) SMTG_OVERRIDE {
+        if (!instrument || (busIndex != 0)) {
+            return kResultFalse;
+        }
+
+        if ((channel < 0) || (channel >= GB_CC_CHANNELS)
+            || (midiControllerNumber < 0) || (midiControllerNumber >= GB_CC_PER_CHANNEL)) {
+            return kResultFalse;
+        }
+
+        id = GB_CC_BASE + ((uint32_t)channel * GB_CC_PER_CHANNEL) + (uint32_t)midiControllerNumber;
+
+        return kResultTrue;
     }
 
     tresult PLUGIN_API setComponentHandler(IComponentHandler * handler) SMTG_OVERRIDE {
@@ -1740,7 +3152,7 @@ public:
             return nullptr;
         }
 
-        editorView = gb_create_editor_view(this, componentHandler, statusSlot);
+        editorView = gb_create_editor_view(this, componentHandler, statusSlot, instrument);
 
         return editorView;
     }
@@ -1756,6 +3168,7 @@ private:
     }
 
     std::atomic<int32>  refCount;
+    const bool          instrument;
     IComponentHandler * componentHandler{nullptr};
     IConnectionPoint *  peer{nullptr};
     IPlugView *         editorView{nullptr};
@@ -1766,6 +3179,10 @@ private:
     ParamValue          frames{0.25};         // 128, index 1 of 5
     ParamValue          mode{1.0};            // stereo
     ParamValue          firstChannel{0.0};    // channel 1
+    ParamValue          midiDest{0.0};
+    ParamValue          midiChannel{0.0};
+    ParamValue          measure{0.0};
+    ParamValue          offset{0.5};       // zero correction sits in the middle of the range
 };
 
 // ------------------------------------------------------------------------------------------------
@@ -1811,25 +3228,63 @@ public:
         return kResultOk;
     }
 
-    int32 PLUGIN_API countClasses(void) SMTG_OVERRIDE { return 2; }
+    int32 PLUGIN_API countClasses(void) SMTG_OVERRIDE { return 4; }
+
+    // 0/1 are the effect's processor and controller, 2/3 the instrument's. The controllers go under
+    // kVstComponentControllerClass and NOT kVstAudioEffectClass, or a host enumerating plug-ins
+    // finds four audio modules instead of two.
+    struct tClassEntry {
+        const FUID * cid;
+        const char * category;
+        const char * name;
+        const char * subCategory;
+    };
+
+    static const tClassEntry * entry(int32 index) {
+        static const tClassEntry kEntries[4] = {
+            // OnlyRT ON BOTH, because neither of these can be rendered faster than realtime: the
+            // audio does not come from arithmetic, it comes off a wire at whatever speed the
+            // hardware runs, and that speed is one second per second. Steinberg's own words for the
+            // flag are "supports only realtime process call, no processing faster than realtime".
+            //
+            // NoOfflineProcess, which the effect already carried, is NOT the same thing - it opts
+            // out of a host's offline-processing FEATURE (apply a plug-in destructively to a clip),
+            // and says nothing about how a mixdown is rendered.
+            //
+            // Instrument|Synth is kept rather than swapped for Instrument|External, which is the
+            // literal description ("External Instrument (wrapped Hardware)"). Hosts have been known
+            // to refuse to load a plug-in whose class they cannot read as an instrument, and Synth
+            // is the string already known to work here - not worth trading a plug-in that loads for
+            // one that is better described.
+            { &kGenBridgeProcessorUID,      kVstAudioEffectClass,        GB_PLUGIN_NAME,
+              "Fx|NoOfflineProcess|OnlyRT|Tools" },
+            { &kGenBridgeControllerUID,     kVstComponentControllerClass, GB_PLUGIN_NAME " Controller",
+              "" },
+            { &kGenBridgeInstProcessorUID,  kVstAudioEffectClass,        GB_PLUGIN_NAME " Instrument",
+              "Instrument|Synth|OnlyRT" },
+            { &kGenBridgeInstControllerUID, kVstComponentControllerClass, GB_PLUGIN_NAME " Instrument Controller",
+              "" },
+        };
+
+        return ((index < 0) || (index > 3)) ? nullptr : &kEntries[index];
+    }
 
     tresult PLUGIN_API getClassInfo(int32 index, PClassInfo * info) SMTG_OVERRIDE {
-        if ((info == nullptr) || (index < 0) || (index > 1)) {
+        if ((info == nullptr) || (index < 0) || (index > 3)) {
+            return kInvalidArgument;
+        }
+
+        const tClassEntry * e = entry(index);
+
+        if (e == nullptr) {
             return kInvalidArgument;
         }
 
         memset(info, 0, sizeof(PClassInfo));
         info->cardinality = PClassInfo::kManyInstances;
-
-        if (index == 0) {
-            memcpy(info->cid, kGenBridgeProcessorUID.toTUID(), sizeof(TUID));
-            strncpy(info->category, kVstAudioEffectClass, PClassInfo::kCategorySize - 1);
-            strncpy(info->name, GB_PLUGIN_NAME, PClassInfo::kNameSize - 1);
-        } else {
-            memcpy(info->cid, kGenBridgeControllerUID.toTUID(), sizeof(TUID));
-            strncpy(info->category, kVstComponentControllerClass, PClassInfo::kCategorySize - 1);
-            strncpy(info->name, GB_PLUGIN_NAME " Controller", PClassInfo::kNameSize - 1);
-        }
+        memcpy(info->cid, e->cid->toTUID(), sizeof(TUID));
+        strncpy(info->category, e->category, PClassInfo::kCategorySize - 1);
+        strncpy(info->name, e->name, PClassInfo::kNameSize - 1);
 
         return kResultOk;
     }
@@ -1838,7 +3293,13 @@ public:
     // all. "Fx|NoOfflineProcess|Tools" is what Inject declares, and it is what stops a host trying
     // to bounce a live capture faster than realtime.
     tresult PLUGIN_API getClassInfo2(int32 index, PClassInfo2 * info) SMTG_OVERRIDE {
-        if ((info == nullptr) || (index < 0) || (index > 1)) {
+        if ((info == nullptr) || (index < 0) || (index > 3)) {
+            return kInvalidArgument;
+        }
+
+        const tClassEntry * e = entry(index);
+
+        if (e == nullptr) {
             return kInvalidArgument;
         }
 
@@ -1847,17 +3308,10 @@ public:
         strncpy(info->vendor, GB_VENDOR, PClassInfo2::kVendorSize - 1);
         strncpy(info->version, "0.1.0", PClassInfo2::kVersionSize - 1);
         strncpy(info->sdkVersion, kVstVersionString, PClassInfo2::kVersionSize - 1);
-
-        if (index == 0) {
-            memcpy(info->cid, kGenBridgeProcessorUID.toTUID(), sizeof(TUID));
-            strncpy(info->category, kVstAudioEffectClass, PClassInfo::kCategorySize - 1);
-            strncpy(info->name, GB_PLUGIN_NAME, PClassInfo::kNameSize - 1);
-            strncpy(info->subCategories, "Fx|NoOfflineProcess|Tools", PClassInfo2::kSubCategoriesSize - 1);
-        } else {
-            memcpy(info->cid, kGenBridgeControllerUID.toTUID(), sizeof(TUID));
-            strncpy(info->category, kVstComponentControllerClass, PClassInfo::kCategorySize - 1);
-            strncpy(info->name, GB_PLUGIN_NAME " Controller", PClassInfo::kNameSize - 1);
-        }
+        memcpy(info->cid, e->cid->toTUID(), sizeof(TUID));
+        strncpy(info->category, e->category, PClassInfo::kCategorySize - 1);
+        strncpy(info->name, e->name, PClassInfo::kNameSize - 1);
+        strncpy(info->subCategories, e->subCategory, PClassInfo2::kSubCategoriesSize - 1);
 
         return kResultOk;
     }
@@ -1888,9 +3342,13 @@ public:
         FUnknown * instance = nullptr;
 
         if (memcmp(cid, kGenBridgeProcessorUID.toTUID(), sizeof(TUID)) == 0) {
-            instance = (IComponent *)new GenBridgePlugin();
+            instance = (IComponent *)new GenBridgePlugin(false);
         } else if (memcmp(cid, kGenBridgeControllerUID.toTUID(), sizeof(TUID)) == 0) {
-            instance = (IEditController *)new GenBridgeController();
+            instance = (IEditController *)new GenBridgeController(false);
+        } else if (memcmp(cid, kGenBridgeInstProcessorUID.toTUID(), sizeof(TUID)) == 0) {
+            instance = (IComponent *)new GenBridgePlugin(true);
+        } else if (memcmp(cid, kGenBridgeInstControllerUID.toTUID(), sizeof(TUID)) == 0) {
+            instance = (IEditController *)new GenBridgeController(true);
         } else {
             return kResultFalse;
         }

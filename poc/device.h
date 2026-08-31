@@ -84,6 +84,10 @@ bool     device_set_sample_rate_and_wait(AudioObjectID id, double rate);
 uint32_t device_buffer_frames(AudioObjectID id);
 bool     device_set_buffer_frames(AudioObjectID id, uint32_t frames);
 
+// What the device will actually accept. Asking for less than the minimum is simply refused, and a
+// refusal is indistinguishable from a device that changed its mind - so ask first.
+bool     device_buffer_frame_range(AudioObjectID id, uint32_t * minFrames, uint32_t * maxFrames);
+
 // deviceLatency + safetyOffset + bufferFrames, the three parts AudioMovers' feeder logs
 // separately and which together are what a host must be told about.
 uint32_t device_latency_frames(AudioObjectID id, bool isInput);

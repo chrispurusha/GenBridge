@@ -44,8 +44,10 @@ using namespace Steinberg::Vst;
 
 class GenBridgeEditorView : public IPlugView {
 public:
-    GenBridgeEditorView(IEditController * controllerIn, IComponentHandler * handlerIn, int slot)
-        : refCount(1), controller(controllerIn), handler(handlerIn), statusSlot(slot) {
+    GenBridgeEditorView(IEditController * controllerIn, IComponentHandler * handlerIn, int slot,
+                        bool instrument)
+        : refCount(1), statusSlot(slot), isInstrument(instrument),
+          controller(controllerIn), handler(handlerIn) {
         if (controller != nullptr) {
             controller->addRef();
         }
@@ -92,7 +94,7 @@ public:
 
         NSView * host = (__bridge NSView *)parent;
 
-        view = gb_view_create(width, height, on_edit, this, statusSlot);
+        view = gb_view_create(width, height, on_edit, this, statusSlot, isInstrument);
 
         if (view == nullptr) {
             return kResultFalse;
@@ -208,6 +210,10 @@ private:
             case eGbEditTrim:   id = 1; break;
             case eGbEditMode:   id = 4; break;
             case eGbEditFirstChannel: id = 5; break;
+            case eGbEditMidiDest: id = 6; break;
+            case eGbEditMidiChannel: id = 7; break;
+            case eGbEditMeasure:  id = 8; break;
+            case eGbEditOffset:   id = 9; break;
             default: return;
         }
 
@@ -215,10 +221,20 @@ private:
             handler->beginEdit(id);
             handler->performEdit(id, request->normalized);
             handler->endEdit(id);
+
+            // The measure control is a momentary trigger, so it must return to rest - otherwise the
+            // rising edge never comes round again and the button works exactly once.
+            if (request->which == eGbEditMeasure) {
+                handler->beginEdit(id);
+                handler->performEdit(id, 0.0);
+                handler->endEdit(id);
+            }
         }
 
         if (controller != nullptr) {
-            controller->setParamNormalized(id, request->normalized);
+            controller->setParamNormalized(id,
+                                           (request->which == eGbEditMeasure) ? 0.0
+                                                                              : request->normalized);
         }
 
         push_values();
@@ -235,10 +251,17 @@ private:
                            controller->getParamNormalized(3),
                            controller->getParamNormalized(1),
                            controller->getParamNormalized(4),
-                           controller->getParamNormalized(5));
+                           controller->getParamNormalized(5),
+                           controller->getParamNormalized(6),
+                           controller->getParamNormalized(9),
+                           controller->getParamNormalized(7));
     }
 
 public:
+    void refresh_values(void) {
+        push_values();
+    }
+
     void set_status_slot(int slot) {
         statusSlot = slot;
 
@@ -250,6 +273,7 @@ public:
 private:
     std::atomic<int32>  refCount;
     int                 statusSlot = -1;
+    bool                isInstrument = false;
     IEditController *   controller = nullptr;
     IComponentHandler * handler    = nullptr;
     IPlugFrame *        plugFrame  = nullptr;
@@ -259,8 +283,14 @@ private:
 };
 
 IPlugView * gb_create_editor_view(IEditController * controller, IComponentHandler * handler,
-                                  int statusSlot) {
-    return new GenBridgeEditorView(controller, handler, statusSlot);
+                                  int statusSlot, bool instrument) {
+    return new GenBridgeEditorView(controller, handler, statusSlot, instrument);
+}
+
+void gb_editor_refresh_values(IPlugView * view) {
+    if (view != nullptr) {
+        ((GenBridgeEditorView *)view)->refresh_values();
+    }
 }
 
 void gb_editor_set_status_slot(IPlugView * view, int statusSlot) {

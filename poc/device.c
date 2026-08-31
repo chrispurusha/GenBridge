@@ -154,6 +154,28 @@ uint32_t device_buffer_frames(AudioObjectID id) {
     return (uint32_t)frames;
 }
 
+bool device_buffer_frame_range(AudioObjectID id, uint32_t * minFrames, uint32_t * maxFrames) {
+    AudioObjectPropertyAddress address = { kAudioDevicePropertyBufferFrameSizeRange,
+                                           kAudioObjectPropertyScopeGlobal,
+                                           kAudioObjectPropertyElementMain };
+    AudioValueRange            range   = { 0.0, 0.0 };
+    UInt32                     size    = sizeof(range);
+
+    if (AudioObjectGetPropertyData(id, &address, 0, NULL, &size, &range) != noErr) {
+        return false;
+    }
+
+    if (minFrames != NULL) {
+        *minFrames = (uint32_t)range.mMinimum;
+    }
+
+    if (maxFrames != NULL) {
+        *maxFrames = (uint32_t)range.mMaximum;
+    }
+
+    return true;
+}
+
 bool device_set_buffer_frames(AudioObjectID id, uint32_t frames) {
     AudioObjectPropertyAddress address = { kAudioDevicePropertyBufferFrameSize,
                                            kAudioObjectPropertyScopeGlobal,

@@ -99,6 +99,11 @@ void         drift_init(tDrift * drift, const tDriftConfig * config, double inRa
 
 void         drift_reset(tDrift * drift);
 
+// Move the setpoint without disturbing the integrator's estimate of the clock offset. The offset is
+// a property of the two crystals and does not change because the buffer target did, so throwing it
+// away would mean re-converging over tens of seconds for no reason.
+void         drift_set_setpoint(tDrift * drift, double setpointFrames);
+
 // Feed the measured fill depth and how long this block covers; returns the fractional ratio
 // correction to apply. Multiply the nominal ratio by (1.0 + correction).
 //

@@ -35,7 +35,7 @@ extern "C" {
 // The logical canvas. Every coordinate below is in these units and is scaled to whatever surface
 // the host gives us, so the panel is the same shape at any window size.
 #define GB_CANVAS_W    (520.0)
-#define GB_CANVAS_H    (340.0)
+#define GB_CANVAS_H    (556.0)
 
 // A click landed on a control that the HOST must be told about, because these are VST3 parameters
 // and changing one behind the host's back would leave its automation and its saved state wrong.
@@ -47,6 +47,10 @@ typedef enum {
     eGbEditTrim,
     eGbEditMode,
     eGbEditFirstChannel,
+    eGbEditMidiDest,
+    eGbEditMeasure,
+    eGbEditOffset,
+    eGbEditMidiChannel,
 } tGbEdit;
 
 typedef struct {
@@ -82,6 +86,7 @@ extern const int    gGbFrameCount;
 
 void gb_draw_init(void);
 void gb_draw_set_status_slot(int slot);
+void gb_draw_set_instrument(bool instrument);
 void gb_draw_frame(int pixelWidth, int pixelHeight);
 
 // Hit test in LOGICAL units. Returns true when something was hit; request describes what the host
@@ -90,7 +95,8 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request);
 
 // Current parameter values, so the editor draws what the host believes rather than its own idea.
 void gb_draw_set_values(double device, double rate, double frames, double trim,
-                        double mode, double firstChannel);
+                        double mode, double firstChannel, double midiDest, double offset,
+                        double midiChannel);
 
 #ifdef __cplusplus
 }

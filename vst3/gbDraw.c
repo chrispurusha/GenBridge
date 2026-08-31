@@ -35,6 +35,7 @@
 #include <time.h>
 
 #include "gbDraw.h"
+#include "gbMidi.h"
 #include "gbStatus.h"
 
 #include "device.h"
@@ -56,17 +57,34 @@
 // The lists the stepper parameters index into. These must agree with the processor's own mapping,
 // which is why both read them from here rather than each keeping a copy.
 const double gGbRates[]    = { 44100.0, 48000.0, 88200.0, 96000.0 };
-const int    gGbFrames[]   = { 64, 128, 256, 512, 1024 };
+// Down to 16, which no USB device will accept but built-in and Thunderbolt hardware sometimes will.
+// A device that cannot go that low says so through kAudioDevicePropertyBufferFrameSizeRange, and
+// the request is clamped rather than failing - see the clamp in the plug-in's open path.
+const int    gGbFrames[]   = { 16, 32, 64, 128, 256, 512, 1024 };
 const int    gGbRateCount  = (int)(sizeof(gGbRates) / sizeof(gGbRates[0]));
 const int    gGbFrameCount = (int)(sizeof(gGbFrames) / sizeof(gGbFrames[0]));
 
-static bool   gFontReady = false;
+static bool   gFontReady  = false;
+
+// Set by the view before every frame rather than once at creation: like the status slot, one editor
+// must not answer for another's. With an effect and an instrument both open, whichever drew last
+// would otherwise decide the layout for both.
+static bool   gInstrument = false;
+
+void gb_draw_set_instrument(bool instrument) {
+    gInstrument = instrument;
+}
 static double gDevice    = 0.0;
 static double gRate      = 0.0;
 static double gFrames    = 0.0;
 static double gTrim      = 0.5;
 static double gMode      = 1.0;
 static double gFirst     = 0.0;
+static double gMidiDest  = 0.0;
+static double gOffset    = 0.5;
+static double gMidiChan  = 0.0;
+
+#define GB_CHANNEL_SLOTS    (17)
 
 // Which processor's figures this panel shows. -1 until the host has connected the two ends, which
 // it may do before or after the editor opens - so the panel simply shows no live figures until it
@@ -79,30 +97,81 @@ void gb_draw_set_status_slot(int slot) {
 
 // One table, used by BOTH the drawing and the hit test. Two copies of these numbers is how a
 // control ends up looking like it is somewhere it cannot be clicked.
-// device, rate, buffer, mode, first channel
-static const double kRowY[] = { 56.0, 92.0, 128.0, 164.0, 200.0 };
-#define ROW_COUNT    ((int)(sizeof(kRowY) / sizeof(kRowY[0])))
+// EVERY POSITION IS COMPUTED FROM ONE PLACE, because the instrument has a row the effect does not
+// and hard-coded coordinates simply drew the extra row on top of everything below it. The hit tests
+// call the same functions the drawing does, so a control cannot appear somewhere it cannot be
+// clicked.
+#define ROW_TOP          (56.0)
+#define ROW_STEP         (36.0)
+#define ROW_COUNT        (7)          // the last two are MIDI destination and channel, instrument only
+
+static int row_count(void) {
+    return gInstrument ? ROW_COUNT : (ROW_COUNT - 2);
+}
+
+static double row_y(int row) {
+    return ROW_TOP + (ROW_STEP * (double)row);
+}
+
+// Where the block of steppers ends, and everything below it begins.
+static double rows_bottom(void) {
+    return row_y(row_count() - 1) + ROW_STEP;
+}
+
+static double trim_y(void)      { return rows_bottom() + 8.0; }
+static double level_y(void)     { return trim_y() + 30.0; }
+static double measure_y(void)   { return level_y() + 40.0; }
+static double offset_y(void)    { return measure_y() + 34.0; }
+static double telemetry_y(void) { return (gInstrument ? offset_y() : level_y()) + 42.0; }
 
 #define GB_MAX_FIRST_CHANNEL    (32)
 
 static tRectangle row_prev(int row) {
-    return (tRectangle){ { LABEL_W, kRowY[row] }, { ARROW_W, ROW_H - 6.0 } };
+    return (tRectangle){ { LABEL_W, row_y(row) }, { ARROW_W, ROW_H - 6.0 } };
 }
 
 static tRectangle row_next(int row) {
-    return (tRectangle){ { GB_CANVAS_W - 30.0 - ARROW_W, kRowY[row] }, { ARROW_W, ROW_H - 6.0 } };
+    return (tRectangle){ { GB_CANVAS_W - 30.0 - ARROW_W, row_y(row) }, { ARROW_W, ROW_H - 6.0 } };
 }
 
 static tRectangle row_value(int row) {
     double x = LABEL_W + ARROW_W + 6.0;
 
-    return (tRectangle){ { x, kRowY[row] }, { (GB_CANVAS_W - 36.0 - ARROW_W) - x, ROW_H - 6.0 } };
+    return (tRectangle){ { x, row_y(row) }, { (GB_CANVAS_W - 36.0 - ARROW_W) - x, ROW_H - 6.0 } };
 }
 
 #define RIGHT_GUTTER    (74.0)     // room for the trim readout, which sits outside the track
 
+#define GB_OFFSET_MIN_MS    (-100.0)
+#define GB_OFFSET_MAX_MS    (100.0)
+#define GB_OFFSET_STEP_MS   (0.1)
+
+#define MEASURE_LABEL     "Measure"
+#define BUTTON_H          (18.0)
+
+// draw_button() renders its label at the RECTANGLE'S OWN HEIGHT, not at some smaller text size, and
+// then draws the box a margin larger than what it was passed. Sizing the width from TEXT_H got both
+// of those wrong at once and the word ran out of its box.
+static tRectangle measure_button(void) {
+    return (tRectangle){ { LABEL_W, measure_y() },
+                         { get_text_width(MEASURE_LABEL, BUTTON_H, eCache), BUTTON_H } };
+}
+
+// What draw_button actually paints, and therefore what a click has to land in.
+static tRectangle measure_bounds(void) {
+    return draw_button_bounds(measure_button());
+}
+
+static tRectangle offset_down(void) {
+    return (tRectangle){ { LABEL_W, offset_y() }, { ARROW_W, 20.0 } };
+}
+
+static tRectangle offset_up(void) {
+    return (tRectangle){ { LABEL_W + ARROW_W + 6.0, offset_y() }, { ARROW_W, 20.0 } };
+}
+
 static tRectangle trim_track(void) {
-    return (tRectangle){ { LABEL_W, 244.0 }, { GB_CANVAS_W - LABEL_W - RIGHT_GUTTER, 14.0 } };
+    return (tRectangle){ { LABEL_W, trim_y() }, { GB_CANVAS_W - LABEL_W - RIGHT_GUTTER, 14.0 } };
 }
 
 static bool hit(tRectangle r, double x, double y) {
@@ -226,7 +295,11 @@ void gb_input_device_name(int index, char * out, unsigned long len) {
 // Kept for the rows that genuinely do step across a short fixed list.
 
 void gb_draw_set_values(double device, double rate, double frames, double trim,
-                        double mode, double firstChannel) {
+                        double mode, double firstChannel, double midiDest, double offset,
+                        double midiChannel) {
+    gMidiDest = midiDest;
+    gOffset   = offset;
+    gMidiChan = midiChannel;
     gDevice = device;
     gRate   = rate;
     gFrames = frames;
@@ -267,12 +340,34 @@ static void value_box(int row, const char * text) {
 }
 
 static void stepper(int row, const char * labelText, const char * valueText) {
-    label(20.0, kRowY[row] + 5.0, labelText);
+    label(20.0, row_y(row) + 5.0, labelText);
 
     draw_button(mainArea, row_prev(row), "<", (tRgb){ 0.30, 0.30, 0.33 });
     draw_button(mainArea, row_next(row), ">", (tRgb){ 0.30, 0.30, 0.33 });
 
     value_box(row, valueText);
+}
+
+// A LABELLED FIGURE AT A FIXED COLUMN. Everything below used to be built with snprintf into one
+// string, so a fill of 480 and a fill of 1920 pushed everything to their right along by a character
+// - the drift figure never sat still long enough to read, which rather defeats the point of showing
+// it. Label and value each get their own x, so only the digits change.
+#define STAT_VALUE_DX    (52.0)
+
+// THE PANEL'S THIRD TEXT TIER - captions and hints, everything that supports a figure rather than
+// being one. It sits on RGB_BACKGROUND_GREY, which is 0.30 in every build that is not G2_EDIT, so
+// the old values were barely there: the stat captions ran at 0.45 (~1.8:1 against their own
+// background) and the offset hint at 0.50 (~2.1:1). 0.60 lifts both to ~3.3:1 while staying under
+// the 0.70 of the figure beside it, so the tier still reads as secondary instead of flattening
+// into it. Named because three places share it and a fourth would otherwise be a fourth literal.
+#define GB_CAPTION_GREY    {0.60, 0.60, 0.63}
+
+static void stat(double x, double y, const char * name, const char * value) {
+    set_rgb_colour((tRgb)GB_CAPTION_GREY);
+    render_text(mainArea, (tRectangle){ { x, y }, { 0.0, 11.0 } }, name);
+
+    set_rgb_colour((tRgb){ 0.70, 0.70, 0.73 });
+    render_text(mainArea, (tRectangle){ { x + STAT_VALUE_DX, y }, { 0.0, 11.0 } }, value);
 }
 
 static void meter(double x, double y, double w, float peak) {
@@ -321,7 +416,13 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
     set_rgb_colour((tRgb){ 0.95, 0.95, 0.97 });
     render_text(mainArea, (tRectangle){ { 20.0, 18.0 }, { 0.0, 20.0 } }, "GenBridge");
 
-    if ((status != NULL) && atomic_load(&status->active)) {
+    if ((status != NULL) && atomic_load(&status->offlineRender)) {
+        // AHEAD OF "capturing", because during an offline render it is still nominally capturing
+        // and that is precisely the misleading thing to show. A bounce faster than realtime drains
+        // the ring - the device cannot be hurried - so the render is silent whatever else is true.
+        set_rgb_colour((tRgb){ 0.85, 0.60, 0.25 });
+        snprintf(buffer, sizeof(buffer), "%s", "host is rendering offline - bounce in real time");
+    } else if ((status != NULL) && atomic_load(&status->active)) {
         set_rgb_colour((tRgb){ 0.45, 0.75, 0.50 });
         snprintf(buffer, sizeof(buffer), "capturing %s", status->deviceName);
     } else {
@@ -364,8 +465,102 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
 
     stepper(4, "Input", buffer);
 
+    // The instrument's own row, and the measurement it enables.
+    if (gInstrument) {
+        gb_midi_destination_name((int)(gMidiDest * (double)(GB_MIDI_MAX_DEST - 1) + 0.5),
+                                 buffer, sizeof(buffer));
+        stepper(5, "MIDI Out", buffer);
+
+        int channel = (int)(gMidiChan * (double)(GB_CHANNEL_SLOTS - 1) + 0.5);
+
+        if (channel <= 0) {
+            snprintf(buffer, sizeof(buffer), "%s", "Source (as the DAW sends)");
+        } else {
+            snprintf(buffer, sizeof(buffer), "%d", channel);
+        }
+
+        stepper(6, "Channel", buffer);
+    }
+
     // ---- trim ----
-    label(20.0, 246.0, "Trim");
+    if (gInstrument) {
+        label(20.0, measure_y() + 4.0, "Latency");
+
+        draw_button(mainArea, measure_button(), MEASURE_LABEL, (tRgb){ 0.30, 0.42, 0.55 });
+
+        int measured = (status != NULL) ? atomic_load(&status->measuredSamples) : 0;
+        int rate     = (status != NULL) ? atomic_load(&status->deviceRate) : 48000;
+
+        if (rate <= 0) {
+            rate = 48000;
+        }
+
+        int failed   = (status != NULL) ? atomic_load(&status->measureFailed) : 0;
+        int ranEmpty = (status != NULL) ? atomic_load(&status->measureRanEmpty) : 0;
+
+        if (failed) {
+            snprintf(buffer, sizeof(buffer), "%s", "measurement failed - try again");
+            set_rgb_colour((tRgb){ 0.85, 0.60, 0.25 });
+        } else if (measured > 0) {
+            snprintf(buffer, sizeof(buffer), "%d smp (%.1f ms) measured", measured,
+                     (double)measured / ((double)rate / 1000.0));
+            set_rgb_colour((tRgb){ 0.72, 0.72, 0.74 });
+        } else if (ranEmpty) {
+            // RAN, AND CAME BACK WITH NOTHING. Indistinguishable from "never measured" until now,
+            // which is exactly the wrong thing to show: one is a starting state and the other is a
+            // result that needs acting on.
+            snprintf(buffer, sizeof(buffer), "%s", "onset beat our own latency - see log");
+            set_rgb_colour((tRgb){ 0.85, 0.60, 0.25 });
+        } else {
+            snprintf(buffer, sizeof(buffer), "%s", "not measured");
+            set_rgb_colour((tRgb){ 0.72, 0.72, 0.74 });
+        }
+
+        tRectangle bounds = measure_bounds();
+
+        render_text(mainArea,
+                    (tRectangle){ { bounds.coord.x + bounds.size.w + 14.0, measure_y() + 5.0 },
+                                  { 0.0, 11.0 } }, buffer);
+
+        // THE CORRECTION IN FORCE - what report_latency() actually adds, not a trim on top of it.
+        // Measure seeds this row; the +/- moves it from there, because a measurement includes the
+        // patch's own attack and cannot know it, so the last fraction of a millisecond stays a
+        // judgement rather than a reading. The row above shows what was measured, so the two can be
+        // compared and you can see how far you have moved from it.
+        // "In use", not "Correction": labels are drawn at x=20 and the arrows start at LABEL_W (74),
+        // so a label has 54 px. "Correction" ran straight under the < >. The longest label this
+        // panel already proves fits is "MIDI Out" at eight characters - stay inside that.
+        label(20.0, offset_y() + 4.0, "In use");
+
+        draw_button(mainArea, offset_down(), "<", (tRgb){ 0.30, 0.30, 0.33 });
+        draw_button(mainArea, offset_up(), ">", (tRgb){ 0.30, 0.30, 0.33 });
+
+        double offsetMs = GB_OFFSET_MIN_MS + (gOffset * (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS));
+
+        snprintf(buffer, sizeof(buffer), "%+.1f ms", offsetMs);
+        set_rgb_colour((tRgb){ 0.92, 0.92, 0.94 });
+        render_text(mainArea, (tRectangle){ { 190.0, offset_y() + 6.0 }, { 0.0, 11.0 } }, buffer);
+
+        // WHICH WAY IT MOVES THE RECORDING, spelled out. "+8 ms" tells nobody whether their part
+        // will end up earlier or later, and getting it backwards doubles the error instead of
+        // removing it.
+        set_rgb_colour((tRgb)GB_CAPTION_GREY);
+
+        if (offsetMs > 0.05) {
+            snprintf(buffer, sizeof(buffer), "%s", "recording pulled earlier");
+        } else if (offsetMs < -0.05) {
+            snprintf(buffer, sizeof(buffer), "%s", "recording pushed later");
+        } else {
+            // Zero here now means NOTHING is being corrected, which after a measurement would be a
+            // fault rather than a default - so it points at the measurement instead of offering
+            // the old "nudge me if takes sound late" advice.
+            snprintf(buffer, sizeof(buffer), "%s", "no correction - measure, or set by ear");
+        }
+
+        render_text(mainArea, (tRectangle){ { 270.0, offset_y() + 6.0 }, { 0.0, 11.0 } }, buffer);
+    }
+
+    label(20.0, trim_y() + 2.0, "Trim");
 
     tRectangle track = trim_track();
 
@@ -377,13 +572,13 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
 
     snprintf(buffer, sizeof(buffer), "%.2fx", gTrim * 2.0);
     set_rgb_colour((tRgb){ 0.72, 0.72, 0.74 });
-    render_text(mainArea, (tRectangle){ { track.coord.x + track.size.w + 6.0, 246.0 }, { 0.0, 11.0 } }, buffer);
+    render_text(mainArea, (tRectangle){ { track.coord.x + track.size.w + 6.0, trim_y() + 2.0 }, { 0.0, 11.0 } }, buffer);
 
     // ---- meters ----
-    label(20.0, 276.0, "Level");
-    meter(LABEL_W, 274.0, GB_CANVAS_W - LABEL_W - RIGHT_GUTTER,
+    label(20.0, level_y() + 2.0, "Level");
+    meter(LABEL_W, level_y(), GB_CANVAS_W - LABEL_W - RIGHT_GUTTER,
           (status != NULL) ? atomic_load(&status->peakLeft) : 0.0f);
-    meter(LABEL_W, 288.0, GB_CANVAS_W - LABEL_W - RIGHT_GUTTER,
+    meter(LABEL_W, level_y() + 14.0, GB_CANVAS_W - LABEL_W - RIGHT_GUTTER,
           (status != NULL) ? atomic_load(&status->peakRight) : 0.0f);
 
     // ---- telemetry ----
@@ -392,19 +587,78 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
     // to see whether the drift loop is holding without attaching a debugger, and because a buffer
     // that is quietly resyncing every twenty seconds is otherwise indistinguishable from one that
     // is not.
-    set_rgb_colour((tRgb){ 0.55, 0.55, 0.58 });
+    // WHERE THE LATENCY ACTUALLY GOES. One total tells you nothing actionable: on this rig two
+    // thirds of it is usually the device's own buffer, which is fixed by a control three rows up,
+    // and the ring is the only part the plug-in chooses. Showing the parts makes it obvious which
+    // number to argue with.
+    int rate = (status != NULL) ? atomic_load(&status->deviceRate) : 0;
 
-    snprintf(buffer, sizeof(buffer), "latency %d smp   fill %.0f / %.0f",
-             (status != NULL) ? atomic_load(&status->latencySamples) : 0,
+    if (rate <= 0) {
+        rate = 48000;
+    }
+
+    double perMs = (double)rate / 1000.0;
+
+    int ring   = (status != NULL) ? atomic_load(&status->ringSamples) : 0;
+    int device = (status != NULL) ? atomic_load(&status->deviceSamples) : 0;
+    int filter = (status != NULL) ? atomic_load(&status->filterSamples) : 0;
+    int hw     = (status != NULL) ? atomic_load(&status->measuredSamples) : 0;
+    int off    = (status != NULL) ? atomic_load(&status->offsetSamples) : 0;
+    int total  = (status != NULL) ? atomic_load(&status->latencySamples) : 0;
+
+    // Four columns across the panel, so a figure that grows a digit does not shove its neighbours.
+    const double kCol[4] = { 20.0, 145.0, 270.0, 395.0 };
+
+    double y = telemetry_y();
+
+    snprintf(buffer, sizeof(buffer), "%d", ring);
+    stat(kCol[0], y, "ring", buffer);
+
+    snprintf(buffer, sizeof(buffer), "%d", device);
+    stat(kCol[1], y, "device", buffer);
+
+    snprintf(buffer, sizeof(buffer), "%d", filter);
+    stat(kCol[2], y, "filter", buffer);
+
+    if (gInstrument) {
+        y += 16.0;
+
+        snprintf(buffer, sizeof(buffer), "%d", hw);
+        stat(kCol[0], y, "measured", buffer);
+
+        snprintf(buffer, sizeof(buffer), "%+d", off);
+        stat(kCol[1], y, "in use", buffer);
+    }
+
+    y += 20.0;
+
+    // Hand-rolled rather than stat(), because its value spans two columns - but it is the same
+    // caption, so it takes the same colour.
+    set_rgb_colour((tRgb)GB_CAPTION_GREY);
+    render_text(mainArea, (tRectangle){ { kCol[0], y }, { 0.0, 12.0 } }, "reported");
+
+    set_rgb_colour((tRgb){ 0.88, 0.88, 0.91 });
+    snprintf(buffer, sizeof(buffer), "%d smp", total);
+    render_text(mainArea, (tRectangle){ { kCol[0] + STAT_VALUE_DX, y }, { 0.0, 12.0 } }, buffer);
+
+    snprintf(buffer, sizeof(buffer), "%.1f ms", (double)total / perMs);
+    render_text(mainArea, (tRectangle){ { kCol[1] + STAT_VALUE_DX, y }, { 0.0, 12.0 } }, buffer);
+
+    y += 20.0;
+
+    snprintf(buffer, sizeof(buffer), "%.0f/%.0f",
              (status != NULL) ? atomic_load(&status->fillFrames) : 0.0,
              (status != NULL) ? atomic_load(&status->setpointFrames) : 0.0);
-    render_text(mainArea, (tRectangle){ { 20.0, 314.0 }, { 0.0, 11.0 } }, buffer);
+    stat(kCol[0], y, "fill", buffer);
 
-    snprintf(buffer, sizeof(buffer), "drift %+.2f ppm   underruns %d   resyncs %d",
-             (status != NULL) ? atomic_load(&status->driftPpm) : 0.0,
-             (status != NULL) ? atomic_load(&status->underruns) : 0,
-             (status != NULL) ? atomic_load(&status->resyncs) : 0);
-    render_text(mainArea, (tRectangle){ { 20.0, 330.0 }, { 0.0, 11.0 } }, buffer);
+    snprintf(buffer, sizeof(buffer), "%+.2f", (status != NULL) ? atomic_load(&status->driftPpm) : 0.0);
+    stat(kCol[1], y, "drift", buffer);
+
+    snprintf(buffer, sizeof(buffer), "%d", (status != NULL) ? atomic_load(&status->underruns) : 0);
+    stat(kCol[2], y, "under", buffer);
+
+    snprintf(buffer, sizeof(buffer), "%d", (status != NULL) ? atomic_load(&status->resyncs) : 0);
+    stat(kCol[3], y, "resync", buffer);
 
     render_backend_flush();
 }
@@ -434,11 +688,13 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
         { eGbEditFrames,       &gFrames, gGbFrameCount         },
         { eGbEditMode,         &gMode,   2                     },
         { eGbEditFirstChannel, &gFirst,  GB_MAX_FIRST_CHANNEL  },
+        { eGbEditMidiDest,     &gMidiDest, GB_MIDI_MAX_DEST     },
+        { eGbEditMidiChannel,  &gMidiChan, GB_CHANNEL_SLOTS     },
     };
 
     request->which = eGbEditNone;
 
-    for (int row = 0; row < ROW_COUNT; row++) {
+    for (int row = 0; row < row_count(); row++) {
         int delta = 0;
 
         if (hit(row_prev(row), x, y)) {
@@ -472,6 +728,32 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
         }
 
         return true;
+    }
+
+    if (gInstrument) {
+        if (hit(measure_bounds(), x, y)) {
+            request->which      = eGbEditMeasure;
+            request->normalized = 1.0;          // a trigger; the plug-in acts on the rising edge
+            return true;
+        }
+
+        if (hit(offset_down(), x, y) || hit(offset_up(), x, y)) {
+            // A TENTH OF A MILLISECOND A CLICK. This was 1 ms on the argument that a millisecond is
+            // the resolution a person can judge - true of a latency heard on its own, wrong for this
+            // control. The measurement already puts the hardware's share into report_latency(), so
+            // what is left here is the residual a take still sounds early or late by, and a whole
+            // millisecond steps straight over it. 0.1 ms is 4.8 samples at 48k, so it is a real
+            // move rather than a rounding, and the readout was already %+.1f.
+            //
+            // The range stays +/-100 ms deliberately: it is a normalised VST3 parameter, so
+            // narrowing it would silently re-scale the offset saved in every existing host project.
+            double step = GB_OFFSET_STEP_MS / (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS);
+            double next = gOffset + (hit(offset_up(), x, y) ? step : -step);
+
+            request->which      = eGbEditOffset;
+            request->normalized = (next < 0.0) ? 0.0 : ((next > 1.0) ? 1.0 : next);
+            return true;
+        }
     }
 
     tRectangle track = trim_track();

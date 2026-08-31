@@ -52,6 +52,16 @@ typedef struct {
     atomic_int      deviceRate;
     atomic_int      deviceFrames;
     atomic_int      latencySamples;
+    atomic_int      measuredSamples;    // the hardware round trip, 0 until measured
+
+    // The reported total, broken into what it is made of. All in HOST frames, so they add up.
+    atomic_int      ringSamples;
+    atomic_int      deviceSamples;
+    atomic_int      filterSamples;
+    atomic_int      offsetSamples;
+    atomic_int      measureFailed;
+    atomic_int      measureRanEmpty;   // ran, but the onset beat our own latency - see GB_MEASURE_TOO_EARLY
+    atomic_int      offlineRender;     // host asked for faster-than-realtime processing - see setupProcessing      // last attempt could not produce a trustworthy figure
     atomic_int      underruns;
     atomic_int      resyncs;
 
