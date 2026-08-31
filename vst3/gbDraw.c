@@ -623,11 +623,19 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
     if (gInstrument) {
         y += 16.0;
 
-        snprintf(buffer, sizeof(buffer), "%d", hw);
+        // MILLISECONDS IN BRACKETS, as the Latency row above prints them - samples alone mean
+        // nothing without the rate in your head, and this pair is the one people actually read.
+        //
+        // "in use" moves to kCol[2], NOT kCol[1]. A stat's value is inset STAT_VALUE_DX (52) into a
+        // column 125 wide, so it has 73 px before the next column's caption - enough for "221" and
+        // not for "221 (4.6 ms)", which would have run straight under the caption beside it, the
+        // same way "Correction" ran under its arrows. Columns 1 and 3 are unused on this row, so
+        // spreading across the gap costs nothing and gives each value 198 px.
+        snprintf(buffer, sizeof(buffer), "%d (%.1f ms)", hw, (double)hw / perMs);
         stat(kCol[0], y, "measured", buffer);
 
-        snprintf(buffer, sizeof(buffer), "%+d", off);
-        stat(kCol[1], y, "in use", buffer);
+        snprintf(buffer, sizeof(buffer), "%+d (%+.1f ms)", off, (double)off / perMs);
+        stat(kCol[2], y, "in use", buffer);
     }
 
     y += 20.0;
