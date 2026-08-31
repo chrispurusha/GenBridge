@@ -5,7 +5,7 @@ Bridge any Core Audio device into a DAW, without an aggregate device.
 The problem this exists for: an aggregate device is macOS's answer to using two interfaces at once,
 and it is unreliable — devices fail to enumerate, and the clock reconciliation is not really there.
 The alternative is a plug-in that opens the device itself and hands its audio to the host, which is
-what AudioMovers' Inject does for Elektron Overbridge-style hardware.
+what Elektron OverBridge does for Elektron Overbridge-style hardware.
 
 **Status: proof of concept.** The `poc/` directory holds a command line program that proves the one
 part nobody hands you for free — the clock drift loop. There is no plug-in yet.
