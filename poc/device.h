@@ -20,6 +20,10 @@
 #ifndef DEVICE_H
 #define DEVICE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -56,6 +60,7 @@ typedef struct {
     AudioDeviceIOProcID procId;
     bool                isInput;
     bool                running;
+    uint32_t            firstChannel;  // first device channel to take
     uint32_t            channels;      // channels the caller asked for
     uint32_t            deviceChannels;// channels the device actually presents on that scope
     float *             scratch;       // interleaved staging buffer
@@ -71,6 +76,11 @@ bool     device_find(const char * needle, bool needInput, tDeviceInfo * found);
 
 double   device_sample_rate(AudioObjectID id);
 bool     device_set_sample_rate(AudioObjectID id, double rate);
+
+// Setting a nominal rate is ASYNCHRONOUS - AudioObjectSetPropertyData returns before the device has
+// changed, and reading it straight back returns the old value. This polls until it takes. Never
+// call it from an audio callback; it can block for a second or more.
+bool     device_set_sample_rate_and_wait(AudioObjectID id, double rate);
 uint32_t device_buffer_frames(AudioObjectID id);
 bool     device_set_buffer_frames(AudioObjectID id, uint32_t frames);
 
@@ -78,10 +88,17 @@ bool     device_set_buffer_frames(AudioObjectID id, uint32_t frames);
 // separately and which together are what a host must be told about.
 uint32_t device_latency_frames(AudioObjectID id, bool isInput);
 
-bool     device_open(tDeviceStream * stream, AudioObjectID id, bool isInput, uint32_t channels,
+// firstChannel is the device channel the first returned channel comes from, so a stereo pair can
+// be taken from anywhere on a 32 input interface rather than always from 1/2.
+bool     device_open(tDeviceStream * stream, AudioObjectID id, bool isInput,
+                     uint32_t firstChannel, uint32_t channels,
                      uint32_t maxFrames, tDeviceCallback callback, void * user);
 bool     device_start(tDeviceStream * stream);
 void     device_stop(tDeviceStream * stream);
 void     device_close(tDeviceStream * stream);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // DEVICE_H

@@ -20,6 +20,10 @@
 #ifndef RING_H
 #define RING_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdatomic.h>
@@ -78,5 +82,9 @@ uint64_t ring_fill(const tRing * ring);
 // needs minutes to walk off at a few hundred ppm. Snapping the cursor makes the opening error
 // zero by construction.
 void     ring_resync(tRing * ring, uint32_t targetFrames);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // RING_H

@@ -20,6 +20,10 @@
 #ifndef DRIFT_H
 #define DRIFT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -50,6 +54,20 @@
 //
 //     Kp = 2*zeta*omega / inRate        Ki = omega^2 / inRate      (omega = 2*pi*bandwidth)
 //
+// THE FILL MEASUREMENT MUST BE FILTERED BEFORE THE CONTROLLER SEES IT, and this is not optional
+// once the two rates differ. Input arrives in whole device blocks while output consumes a
+// fractional number of them, on a different callback rate: at 44.1 kHz in and 48 kHz out, blocks
+// of 256 arrive at 172.3 Hz and roughly 235 frames leave at 187.5 Hz. The instantaneous depth
+// therefore sawtooths by up to a whole input block no matter how perfect the clocks are. That is
+// quantisation, not drift, and it is large - at 128 frames the proportional term alone demands
+// 730 ppm, which pins the correction to its clamp on nearly every update and makes the loop
+// thrash. At a ratio of exactly 1.0 the callbacks happen to interleave evenly and the effect is
+// invisible, which is how it survives a same-rate test.
+//
+// A one-pole low-pass fixes it for nothing: the noise sits at block rate, hundreds of hertz, while
+// the loop bandwidth is hundredths of a hertz, so a time constant anywhere between the two removes
+// the noise without touching the loop's own response.
+//
 // Bandwidth is set low - a fraction of a hertz - for an audible reason. The correction is a pitch
 // shift. A loop that chases the error quickly turns buffer jitter into wow and flutter, so it must
 // be slow enough that its own output is inaudible: at 0.02 Hz the ratio takes tens of seconds to
@@ -60,34 +78,47 @@ typedef struct {
     double bandwidthHz;      // loop bandwidth; lower is smoother and slower to settle
     double damping;          // 1.0 = critically damped
     double maxCorrectionPpm; // clamp on the total correction, and on the integrator (anti-windup)
+    double filterSeconds;    // time constant of the low-pass on the fill measurement
 } tDriftConfig;
 
 typedef struct {
     tDriftConfig config;
     double       kp;             // per frame of error
-    double       ki;             // per frame of error, per update
+    double       kiPerSecond;    // per frame of error, per second - scaled by each block's duration
     double       integrator;     // converges on the true fractional clock offset
     double       correction;     // last total correction applied, fractional
     double       setpointFrames;
+    double       fillFiltered;   // low-passed fill; negative means "not yet seeded"
     bool         primed;
 } tDrift;
 
 tDriftConfig drift_default_config(void);
 
-// updateIntervalSeconds is the period at which drift_update() will be called - one output block.
 void         drift_init(tDrift * drift, const tDriftConfig * config, double inRate,
-                        double setpointFrames, double updateIntervalSeconds);
+                        double setpointFrames);
 
 void         drift_reset(tDrift * drift);
 
-// Feed the measured fill depth; returns the fractional ratio correction to apply. Multiply the
-// nominal ratio by (1.0 + correction).
-double       drift_update(tDrift * drift, double fillFrames);
+// Feed the measured fill depth and how long this block covers; returns the fractional ratio
+// correction to apply. Multiply the nominal ratio by (1.0 + correction).
+//
+// THE INTERVAL IS PASSED PER CALL, not fixed at init, because a DAW is free to hand the plug-in a
+// different block size on any call - and it does, at the start of playback and around loop points.
+// The integrator gain and the measurement filter are both per unit TIME; deriving them once from an
+// assumed block size means the loop silently retunes itself whenever the host changes its mind.
+double       drift_update(tDrift * drift, double fillFrames, double intervalSeconds);
+
+// The low-passed fill the controller actually acted on, as opposed to the raw instantaneous depth.
+double       drift_filtered_fill(const tDrift * drift);
 
 // The converged integrator, in ppm: this is the measured offset between the two clocks.
 double       drift_measured_ppm(const tDrift * drift);
 
 // The correction actually applied on the last update, in ppm.
 double       drift_correction_ppm(const tDrift * drift);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // DRIFT_H

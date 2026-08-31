@@ -62,7 +62,7 @@ static void build_table(tResampler * rs) {
     // Cutoff as a fraction of the INPUT Nyquist. Upsampling needs no extra band limiting - the
     // input is already band limited to its own Nyquist. Downsampling does: the output Nyquist is
     // lower, so everything above it must go before the rate changes, or it folds back as aliasing.
-    double cutoff = (rs->nominalRatio > 1.0) ? (1.0 / rs->nominalRatio) : 1.0;
+    double cutoff = RESAMPLER_GUARD * ((rs->nominalRatio > 1.0) ? (1.0 / rs->nominalRatio) : 1.0);
     double i0Beta = bessel_i0(KAISER_BETA);
 
     for (int p = 0; p <= RESAMPLER_PHASES; p++) {

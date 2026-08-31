@@ -50,6 +50,8 @@ the capture device's.
 | `--target-ms <ms>` | ring setpoint (default 40) |
 | `--bandwidth <hz>` | drift loop bandwidth (default 0.02) |
 | `--max-ppm <ppm>` | correction clamp (default 500) |
+| `--filter-s <s>` | time constant of the low-pass on the fill measurement (default 2.0) |
+| `--in-rate <hz>` / `--out-rate <hz>` | set device rates before opening; restored on exit |
 | `--inject-ppm <ppm>` | lie about the rate ratio, to give the loop a known drift to find |
 | `--no-correct` | disable the loop — the control case |
 
@@ -73,21 +75,222 @@ the capture device's.
 
 ## Measured results
 
-Korg Kronos (USB) in, U28E850 (DisplayPort) out, on real hardware.
+All on real hardware. `integ` is the loop's own estimate of the crystal offset; `raw` is the same
+figure derived independently from the ring's read cursor.
 
-**These two devices show essentially no relative drift** — a USB device running synchronous to the
-host is slaved to the host's clock, so there is nothing to correct. That is worth knowing, and it is
-also why the loop has to be tested with `--inject-ppm` rather than by trusting whatever hardware is
-to hand.
+### Does the loop work
+
+Korg Kronos in, U28E850 (DisplayPort) out, both 48 kHz, drift injected with `--inject-ppm`.
 
 | Test | Result |
 |---|---|
-| No injection, 90 s | fill held at setpoint, 0 xruns, correction +0.02 ppm |
-| `--inject-ppm 50`, 120 s | integrator converged to **−49.99 ppm**, raw 0.000, fill exact, 0 xruns |
-| `--inject-ppm 2000 --max-ppm 3000`, 90 s | converged to −1995 ppm, fill exact, 0 xruns |
+| `--inject-ppm 50`, 120 s | integrator converged to **-49.99 ppm**, raw 0.000, fill exact, 0 xruns |
+| `--inject-ppm 2000 --max-ppm 3000`, 90 s | converged to -1995 ppm, fill exact, 0 xruns |
 | `--inject-ppm 2000 --no-correct`, 45 s | underrun and resync every ~20 s, indefinitely |
 
-That last row is the JUCE behaviour, and the first three are what replaces it.
+That last row is the JUCE behaviour, and the rows above it are what replaces it.
+
+### Rate conversion
+
+Roland TD-50X against the U28E850, run both ways.
+
+| Direction | Ratio | Result |
+|---|---|---|
+| 44.1k -> 48k (upsampling) | 0.918750 | fill held to +/-1.5 frames, integ -16.7 ppm, 0 xruns |
+| 48k -> 44.1k (downsampling, anti-alias engaged) | 1.088435 | fill held to +/-1 frame, integ -17.3 ppm, 0 xruns |
+
+Both directions report the same drift for the same pair of crystals, which is the answer they must
+give: the offset is a property of the hardware, not of which way the conversion runs.
+
+### Resampler quality
+
+`genbridge --self-test` measures the resampler offline against known signals - no hardware, no
+listening. THD+N in dB; more negative is better.
+
+| ratio | 0.01fs | 0.10fs | 0.25fs | 0.40fs | 0.45fs |
+|---|---|---|---|---|---|
+| 1:1 (48k -> 48k) | -139.8 | -146.3 | -310.0 | -148.8 | -139.6 |
+| up 0.919 (44.1k -> 48k) | -105.0 | -104.4 | -113.1 | -108.6 | **-94.8** |
+| down 1.088 (48k -> 44.1k) | -109.4 | -114.1 | -115.9 | -103.9 | -90.5 |
+| up 0.5 (24k -> 48k) | -107.3 | -107.8 | -115.0 | -107.4 | -94.0 |
+
+The 0.45fs column is the one that matters: it is where a resampler with no transition band images
+audibly. It originally read **-27.1 dB**, because the upsampling path set its anti-alias cutoff to
+the full input Nyquist and so left the filter nowhere to roll off. Widening the filter to 64 taps
+and pulling the passband edge back to 0.95 of Nyquist fixed it, at no audible cost - 0.95 still
+keeps the passband above 20 kHz either side of a 44.1/48 conversion.
+
+Note that at ratio 1.0 the resampler is transparent (-140 dB and below), so it costs nothing in
+quality when there is no conversion to do.
+
+### Which devices actually drift
+
+Measured against the U28E850. This matters more than it sounds.
+
+| Device | Rates | Drift | Note |
+|---|---|---|---|
+| Roland TD-50X | 44.1 / 48 / 96k | **~-17 ppm** | free-running; the loop earns its keep |
+| Korg Kronos (USB) | 48k only | ~0 ppm | host-synchronous |
+| Elektron Analog Keys | 48k only | ~0 ppm | host-synchronous |
+| Line 6 Helix | 48k only | 0.00 ppm | host-synchronous; exactly zero over 143 s |
+
+**A USB device running synchronous to the host is slaved to the host's clock and does not drift at
+all.** Three of the four devices here behave that way - the Helix is locked so tightly that frames
+consumed equalled frames produced exactly, across 6.9 million of them - so a bridge tested only
+against those looks perfect while never exercising the loop.
+
+`kAudioDevicePropertyClockDomain` is the closest thing to a way of detecting this, and it is not
+close enough: devices sharing a non-zero domain are hardware-synchronised, but **every USB device
+here reports 0, meaning "unknown"**. Only the DisplayPort output and the built-in audio report a
+real domain, and they share it - so the Mac's own clock is the reference every drift figure above is
+measured against. The drift machinery therefore has to run unconditionally; a device cannot be asked
+whether it will need it.
+
+### The one device that drifts has a vendor driver
+
+Worth noting, because it is a plausible explanation rather than a coincidence. Every zero-drift
+device runs on Apple's class-compliant driver (`AppleUSBAudioEngine:...` UIDs). The TD-50X does not:
+it uses `/Library/Audio/Plug-Ins/HAL/RDUSB0264Audio.driver`, and it looks unusual from the outside -
+transport type `????` rather than `usb`, and a safety offset of 6 frames where every real USB device
+reports 74.
+
+It does **not**, however, declare any rate conversion: `kAudioStreamPropertyPhysicalFormat` and
+`kAudioStreamPropertyVirtualFormat` agree with each other at both 44.1 and 48 kHz, which is the
+mechanism a resampling driver would use to say so. The ~-17 ppm is consistent across both
+conversion directions, which is what a fixed crystal offset looks like.
+
+The practical consequence either way: if a vendor driver *does* convert internally at a non-native
+rate, running the device there means two conversions - the driver's, then GenBridge's. Prefer the
+device's native rate and let GenBridge do the single conversion to whatever the DAW wants. That is why `--inject-ppm` exists: it manufactures a
+drift of known size, turning "it held steady" into a check with a right answer. The TD-50X is the
+one device here that drifts on its own.
+
+## The plug-in
+
+```
+./do-vst3
+```
+
+That builds **and installs** to `~/Library/Audio/Plug-Ins/VST3/`, clearing the quarantine flag on the
+way - a plug-in that is not where a host looks for it has not really been built, and the alternative
+is remembering a copy command after every build. The installed bundle is *replaced* rather than
+copied over, because `cp -R` onto an existing bundle merges: a file dropped from the build would
+survive in the installed copy and go on being loaded. `GENBRIDGE_NO_INSTALL=1` builds without
+touching it, and `GENBRIDGE_VST3_INSTALL` points somewhere else.
+
+A host that is already running keeps the copy it loaded until it rescans or restarts.
+
+Built the way G2-Edit's is: a script rather than an Xcode target, against `pluginterfaces/` only,
+with no CMake, no vstgui and no `public.sdk` helper classes beyond the three files that do nothing
+but instantiate interface IDs. The bridge core in `poc/` is compiled in unchanged - only the CLI and
+the self-test stay behind.
+
+`tools/do-vst3host` builds two harnesses for exercising the plug-in outside a DAW:
+
+- **`vst3host`** opens a window and shows the editor view. Copied from G2-Edit, whose own copy was
+  written into a scratchpad twice and lost twice.
+- **`vst3check`** is headless and answers different questions - factory shape, state round trips,
+  whether activation really opens a device. It reports pass/fail and returns non-zero on failure, so
+  it can gate a change.
+
+Neither proves a DAW will accept the plug-in. An earlier version of `vst3host` asked only for
+`IPluginFactory` and so never noticed `IPluginFactory2` was missing, which is exactly what Ableton
+rejected G2-Edit for. `~/Library/Preferences/Ableton/Live */Log.txt` names a rejection cause
+precisely and remains the last word.
+
+Both are plug-in agnostic and shared with the sibling projects, so they eventually want a home of
+their own rather than a copy per repository.
+
+### Building the dependencies
+
+`SynthLib/ThirdParty/{glfw,freetype,libusb}` are **nested submodules**, not directories - which is
+why files must never be copied into them, as a copy collides with the next `submodule update`.
+
+```
+cd SynthLib && git submodule update --init ThirdParty/glfw ThirdParty/freetype
+```
+
+`libusb` is deliberately left out: it is G2-Edit's USB transport and GenBridge has no use for it.
+Only freetype needs building, and it must be built at the same 11.5 deployment target as everything
+else or the linker warns that the object file was built for a newer macOS. The cmake invocation is
+in `G2-Edit/Docs/Third Party build notes.txt`; the build directory must be deleted before re-running
+cmake, because the value is cached. glfw is needed for its **headers only** - SynthLib's key and
+mouse constants come from them - so it is not built at all.
+
+**It registers as an effect** - `Fx|NoOfflineProcess|Tools`, which is what Inject declares. An
+instrument would seem the natural fit, since the plug-in generates audio and consumes none, but an
+effect *has* an input bus, so the "no valid audio input bus" rejection that forced G2-Edit into
+`IPluginFactory2` with `kInstrumentSynth` never arises. The input is declared and ignored.
+`NoOfflineProcess` keeps a live capture out of offline bounces, where it has nothing to give.
+
+Processor and controller are separate registered classes, for the reason G2-Edit found the hard way:
+Ableton instantiates the class named by `getControllerClassId()` and will not ask the component for
+`IEditController`.
+
+### Choosing a device
+
+Until there is an editor, the capture device is a **stepped list parameter**, which a host renders
+as a drop-down in its generic panel. That makes the plug-in usable with no editor at all, and it
+stays useful afterwards because it is automatable and the host saves it.
+
+There is also a **temporary fallback** so that a fresh instance in a host is not silent and looking
+broken: with no saved state and no parameter set, it opens the first device matching
+`GB_FALLBACK_DEVICE` at `GB_DEFAULT_FRAMES` and `GB_DEFAULT_RATE`. Anything chosen deliberately
+takes precedence, and the whole block goes when the chooser lands.
+
+### Device changes never happen on the audio thread
+
+Opening a Core Audio device allocates, talks to a driver and can block for tens of milliseconds.
+Doing that inside `process()` would stall the host's audio thread - which is how a DAW drops out. So
+every open and close runs on a worker thread, and `process()` only ever raises a flag. The two are
+kept apart by a mutex the audio thread **trylocks**, never locks: failing to take it means a device
+swap is in flight, and a block of silence is the right answer.
+
+### Remembering settings per device
+
+The host-saved state carries a small table keyed by device UID, not just the active device, so
+switching away and back does not lose how a device was set up - a 32 channel drum module and a
+stereo synth want different buffer sizes and channel pairs.
+
+The format is versioned and line based, and it is that way now rather than later because a state
+format becomes expensive to change the moment a session has been saved against it. Unknown keys are
+skipped, so an older build can read a newer file. The device UID is written **last** on each line
+and parsed as the whole remainder, because real UIDs contain commas -
+`AppleUSBAudioEngine:CalDigit, Inc.:...` - and splitting on them truncates it.
+
+```
+GENBRIDGE1
+active=AppleUSBAudioEngine:KORG INC.:KRONOS:1140000:2,1
+dev=128,25.500,2,0.7500,AppleUSBAudioEngine:CalDigit, Inc.:CalDigit Thunderbolt 3 Audio:20200000:2
+dev=256,40.000,0,1.0000,AppleUSBAudioEngine:KORG INC.:KRONOS:1140000:2,1
+```
+
+## Scope: a HAL client, not a driver
+
+GenBridge takes whatever Core Audio offers and asks no questions about how it got there. That is
+the whole value: it needs no per-device knowledge and works with any device that has a driver,
+rather than being a driver for one device.
+
+The TD-50X is the case that proves the boundary is in the right place. All four of its USB
+interfaces are `bInterfaceClass = 255` - vendor specific, not USB Audio Class - so Apple's
+class-compliant driver cannot claim it and Roland ships its own HAL plug-in
+(`/Library/Audio/Plug-Ins/HAL/RDUSB0264Audio.driver`). Reaching its "native" data would mean
+unloading that driver, claiming the interfaces through IOKit, reverse engineering an undocumented
+vendor protocol and implementing isochronous USB streaming from user space. That is writing a device
+driver, for one drum module.
+
+Roland wrote a driver. Elektron wrote a driver - `se.elektron.overbridge.driverkit.driver` is how
+Overbridge gets its channel counts. Vendors who want native access write drivers, because they own
+the hardware. Adding one device's proprietary protocol here would trade away the thing that makes
+this useful for every other device.
+
+**A device's "class-compliant mode" may not include audio at all.** Switching the TD-50X from Vendor
+to Generic and power cycling it does make it enumerate as USB Audio Class - and it then exposes an
+AudioControl interface (subclass 1) and MIDIStreaming (subclass 3) with **no AudioStreaming
+interface (subclass 2) behind them**. The result is a working MIDI device that has vanished from
+Core Audio entirely, which looks like a bug rather than a setting. On this module, Generic means
+MIDI only, so Roland's proprietary protocol is the only route to its audio and there is no
+class-compliant path to compare it against.
 
 ## Design notes
 
@@ -101,6 +304,19 @@ devices — the DisplayPort output here takes about 160 ms to deliver its first 
 input run 5738 frames past the setpoint, an opening error the loop then needs four minutes to walk
 off. Snapping the read cursor makes the opening error zero by construction.
 
+**The fill measurement is low-passed before the controller sees it, and that is not optional.**
+Input arrives in whole device blocks while output consumes a fractional number of them, on a
+different callback rate: at 44.1 kHz in and 48 kHz out, blocks of 256 arrive at 172.3 Hz while about
+235 frames leave at 187.5 Hz. The instantaneous depth therefore sawtooths by up to a whole input
+block however good the clocks are. That is quantisation, not drift, and it is big enough to matter -
+measured at +/-110 frames, which the proportional term answers with more than 500 ppm, pinning the
+correction to its clamp on nearly every update. At a ratio of exactly 1.0 the callbacks interleave
+evenly and none of this shows, so a same-rate test will not find it. A one-pole filter fixes it for
+nothing, because the noise is at block rate and the loop bandwidth is hundredths of a hertz.
+
+**The setpoint must clear a whole input block**, for the same reason: the sawtooth dips that far
+below the mean even with the clocks in perfect agreement.
+
 **The loop bandwidth is deliberately low (0.02 Hz).** The correction is a pitch shift, so a loop
 that chases the error quickly turns buffer jitter into wow and flutter. It must be slow enough that
 its own output is inaudible; a real crystal offset does not change faster than that anyway. The cost
@@ -112,6 +328,10 @@ would buy nothing audible.
 
 ## Still to do
 
+- **Measure the resampler's audio quality.** Everything above validates the buffer arithmetic and
+  the control loop; none of it measures what happens to a signal. An offline self-test - known
+  inputs at several ratios, reporting SNR, THD and worst spurious component - would also give the
+  number needed to judge whether libsoxr is worth vendoring at all, which is currently a blind call.
 - Replace the built-in resampler with **libsoxr** (`soxr_set_io_ratio`, the variable-rate engine).
   It is not in Homebrew core and will need vendoring into `ThirdParty/`, built at the 11.5
   deployment target like the sibling projects' libraries.

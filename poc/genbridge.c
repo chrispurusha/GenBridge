@@ -43,6 +43,7 @@
 #include "drift.h"
 #include "resampler.h"
 #include "ring.h"
+#include "selftest.h"
 
 #define DEFAULT_CHANNELS     (2)
 #define DEFAULT_FRAMES       (256)
@@ -150,7 +151,7 @@ static void output_callback(void * user, const float * input, float * output, ui
     }
 
     double fill       = (double)ring_fill(&bridge->ring);
-    double correction = drift_update(&bridge->drift, fill);
+    double correction = drift_update(&bridge->drift, fill, (double)frames / bridge->outRate);
     double ratio      = bridge->workingRatio * (1.0 + correction);
 
     uint32_t needed = resampler_needed(&bridge->resampler, frames, ratio);
@@ -188,7 +189,7 @@ static void output_callback(void * user, const float * input, float * output, ui
         atomic_store(&bridge->liveRawPpm, ((appliedRatio / bridge->nominalRatio) - 1.0) * 1.0e6);
     }
 
-    atomic_store(&bridge->liveFill, fill);
+    atomic_store(&bridge->liveFill, drift_filtered_fill(&bridge->drift));
     atomic_store(&bridge->liveCorrectionPpm, drift_correction_ppm(&bridge->drift));
     atomic_store(&bridge->liveMeasuredPpm, drift_measured_ppm(&bridge->drift));
 }
@@ -210,7 +211,8 @@ static void list_devices(void) {
 
 static void usage(const char * argv0) {
     printf("usage: %s --in <device> --out <device> [options]\n", argv0);
-    printf("       %s --list\n\n", argv0);
+    printf("       %s --list\n", argv0);
+    printf("       %s --self-test        measure the resampler offline, no hardware\n\n", argv0);
     printf("  --in <substring>      capture device (matched against name or UID)\n");
     printf("  --out <substring>     playback device\n");
     printf("  --channels <n>        channels to bridge (default %d)\n", DEFAULT_CHANNELS);
@@ -218,6 +220,9 @@ static void usage(const char * argv0) {
     printf("  --target-ms <ms>      ring setpoint (default %.0f)\n", DEFAULT_TARGET_MS);
     printf("  --bandwidth <hz>      drift loop bandwidth (default %.3f)\n", drift_default_config().bandwidthHz);
     printf("  --max-ppm <ppm>       correction clamp (default %.0f)\n", drift_default_config().maxCorrectionPpm);
+    printf("  --filter-s <s>        time constant of the fill low-pass (default %.1f)\n", drift_default_config().filterSeconds);
+    printf("  --in-rate <hz>        set the capture device's rate first (restored on exit)\n");
+    printf("  --out-rate <hz>       set the playback device's rate first (restored on exit)\n");
     printf("  --seconds <n>         run time; 0 runs until interrupted (default 0)\n");
     printf("  --no-correct          disable the drift loop, to show what it is fixing\n");
     printf("  --inject-ppm <ppm>    lie to the bridge about the rate ratio by this much, so the\n");
@@ -233,6 +238,8 @@ int main(int argc, char ** argv) {
     double       targetMs  = DEFAULT_TARGET_MS;
     double       runFor    = 0.0;
     double       injectPpm = 0.0;
+    double       wantInRate  = 0.0;
+    double       wantOutRate = 0.0;
     bool         correct   = true;
     tDriftConfig driftConfig = drift_default_config();
 
@@ -240,6 +247,8 @@ int main(int argc, char ** argv) {
         if ((strcmp(argv[i], "--list") == 0)) {
             list_devices();
             return 0;
+        } else if ((strcmp(argv[i], "--self-test") == 0)) {
+            return self_test();
         } else if ((strcmp(argv[i], "--help") == 0) || (strcmp(argv[i], "-h") == 0)) {
             usage(argv[0]);
             return 0;
@@ -260,10 +269,16 @@ int main(int argc, char ** argv) {
                 driftConfig.bandwidthHz = atof(argv[++i]);
             } else if (strcmp(argv[i], "--max-ppm") == 0) {
                 driftConfig.maxCorrectionPpm = atof(argv[++i]);
+            } else if (strcmp(argv[i], "--filter-s") == 0) {
+                driftConfig.filterSeconds = atof(argv[++i]);
             } else if (strcmp(argv[i], "--seconds") == 0) {
                 runFor = atof(argv[++i]);
             } else if (strcmp(argv[i], "--inject-ppm") == 0) {
                 injectPpm = atof(argv[++i]);
+            } else if (strcmp(argv[i], "--in-rate") == 0) {
+                wantInRate = atof(argv[++i]);
+            } else if (strcmp(argv[i], "--out-rate") == 0) {
+                wantOutRate = atof(argv[++i]);
             } else {
                 fprintf(stderr, "unknown option: %s\n", argv[i]);
                 return 1;
@@ -299,6 +314,20 @@ int main(int argc, char ** argv) {
     if (inInfo.id == outInfo.id) {
         fprintf(stderr, "input and output resolve to the same device (%s).\n", inInfo.name);
         fprintf(stderr, "one device is one clock, so there would be no drift to correct.\n");
+        return 1;
+    }
+
+    // Remember what the devices were on, so a test that retunes someone's interface puts it back.
+    double originalInRate  = device_sample_rate(inInfo.id);
+    double originalOutRate = device_sample_rate(outInfo.id);
+
+    if ((wantInRate > 0.0) && !device_set_sample_rate_and_wait(inInfo.id, wantInRate)) {
+        fprintf(stderr, "could not set %s to %.0f Hz\n", inInfo.name, wantInRate);
+        return 1;
+    }
+
+    if ((wantOutRate > 0.0) && !device_set_sample_rate_and_wait(outInfo.id, wantOutRate)) {
+        fprintf(stderr, "could not set %s to %.0f Hz\n", outInfo.name, wantOutRate);
         return 1;
     }
 
@@ -338,7 +367,11 @@ int main(int argc, char ** argv) {
     // The setpoint has to clear one output block's worth of input plus the filter's reach, or the
     // very first read underruns and the loop spends its life recovering from a hole of its own
     // making.
-    double minimumSetpoint = ((double)outFrames * bridge->workingRatio) + (2.0 * RESAMPLER_TAPS);
+    // Must clear one output block's worth of input, the filter's reach, AND a whole input block -
+    // the fill sawtooths by that much from block granularity alone, so a setpoint below it dips
+    // into underrun on the troughs even with the clocks in perfect agreement.
+    double minimumSetpoint = ((double)outFrames * bridge->workingRatio)
+                             + (double)inFrames + (2.0 * RESAMPLER_TAPS);
 
     if (setpoint < minimumSetpoint) {
         setpoint = minimumSetpoint;
@@ -370,7 +403,7 @@ int main(int argc, char ** argv) {
         driftConfig.maxCorrectionPpm = 0.0;
     }
 
-    drift_init(&bridge->drift, &driftConfig, inRate, setpoint, (double)outFrames / outRate);
+    drift_init(&bridge->drift, &driftConfig, inRate, setpoint);
 
     bridge->setpointFrames = setpoint;
 
@@ -380,11 +413,11 @@ int main(int argc, char ** argv) {
     tDeviceStream inStream;
     tDeviceStream outStream;
 
-    if (!device_open(&inStream, inInfo.id, true, channels, inFrames * 4, input_callback, bridge)) {
+    if (!device_open(&inStream, inInfo.id, true, 0, channels, inFrames * 4, input_callback, bridge)) {
         return 1;
     }
 
-    if (!device_open(&outStream, outInfo.id, false, channels, outFrames * 4, output_callback, bridge)) {
+    if (!device_open(&outStream, outInfo.id, false, 0, channels, outFrames * 4, output_callback, bridge)) {
         return 1;
     }
 
@@ -455,6 +488,14 @@ int main(int argc, char ** argv) {
            atomic_load(&bridge->ring.overflows),
            atomic_load(&bridge->resyncs),
            bridge->resampler.overruns);
+
+    if (wantInRate > 0.0) {
+        device_set_sample_rate_and_wait(inInfo.id, originalInRate);
+    }
+
+    if (wantOutRate > 0.0) {
+        device_set_sample_rate_and_wait(outInfo.id, originalOutRate);
+    }
 
     ring_free(&bridge->ring);
     resampler_free(&bridge->resampler);

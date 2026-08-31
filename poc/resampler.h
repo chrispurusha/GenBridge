@@ -20,6 +20,10 @@
 #ifndef RESAMPLER_H
 #define RESAMPLER_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -41,8 +45,36 @@
 // better filter, and is the intended replacement once it is vendored - see README. The arithmetic
 // either side of it does not change, which is why this is behind an interface.
 
-#define RESAMPLER_TAPS      (32)    // filter length; group delay is half this, in input frames
+// Overridable at build time so the self-test can sweep them; see do-poc.
+#ifndef RESAMPLER_TAPS
+#define RESAMPLER_TAPS      (64)    // filter length; group delay is half this, in input frames
+#endif
+
+#ifndef RESAMPLER_PHASES
 #define RESAMPLER_PHASES    (512)   // fractional-delay resolution, linearly interpolated between
+#endif
+
+// Passband edge as a fraction of the target Nyquist. A finite filter cannot go from passband to
+// stopband instantly, so it needs somewhere to roll off, and giving it none is what leaves imaging
+// sitting right below Nyquist.
+//
+// These two numbers were chosen by measurement, not taste - `genbridge --self-test` prints the
+// table they came from. Upsampling THD+N at 0.45 fs, which is where the defect lives:
+//
+//      taps  guard   THD+N          note
+//        32   1.00   -27 dB         no transition band at all: the original bug
+//        32   0.95   -50 dB         32 taps cannot reach the stopband in 5% of guard
+//        48   0.95   -90 dB
+//        64   0.95   -95 dB         chosen
+//       128   0.95   -103 dB        2 dB per doubling from here; not worth it
+//
+// 0.95 keeps the passband above 20 kHz either side of a 44.1/48 conversion, so nothing audible is
+// given up in exchange. The cost of 64 taps is twice the multiply-accumulates of 32 and twice the
+// group delay - 32 input frames, well under a millisecond - which matters only at high channel
+// counts, where a 32-channel device would be doing about 98 M MAC/s.
+#ifndef RESAMPLER_GUARD
+#define RESAMPLER_GUARD     (0.95)
+#endif
 
 typedef struct {
     float *  coef;            // (RESAMPLER_PHASES + 1) * RESAMPLER_TAPS, phase-major
@@ -67,5 +99,9 @@ void     resampler_process(tResampler * rs, float * out, uint32_t outFrames, dou
 
 // Constant group delay through the filter, in input frames. Part of the reported latency.
 double   resampler_latency_frames(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // RESAMPLER_H

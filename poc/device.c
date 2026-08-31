@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Weverything"
@@ -113,6 +114,30 @@ bool device_set_sample_rate(AudioObjectID id, double rate) {
     Float64                    value   = (Float64)rate;
 
     return AudioObjectSetPropertyData(id, &address, 0, NULL, sizeof(value), &value) == noErr;
+}
+
+bool device_set_sample_rate_and_wait(AudioObjectID id, double rate) {
+    if (device_sample_rate(id) == rate) {
+        return true;
+    }
+
+    if (!device_set_sample_rate(id, rate)) {
+        return false;
+    }
+
+    // Bounded, because this is called from setActive() - the HOST'S MAIN THREAD - where a plug-in
+    // is expected to do its expensive set-up but not to stall the application. Two seconds per
+    // instance made Ableton visibly slow to load a set with several of them. A device that has not
+    // taken the rate in under a second is not going to.
+    for (int i = 0; i < 40; i++) {
+        usleep(20000);
+
+        if (device_sample_rate(id) == rate) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 uint32_t device_buffer_frames(AudioObjectID id) {
@@ -229,8 +254,10 @@ bool device_find(const char * needle, bool needInput, tDeviceInfo * found) {
 // interleaved channels, or N buffers of one channel each, or something in between. Rather than
 // assume, walk the buffers and track a running channel index - which covers every layout with one
 // piece of code, and is the reason this loop looks more general than it first appears it needs to.
-static void gather(const AudioBufferList * list, float * out, uint32_t frames, uint32_t wanted) {
+static void gather(const AudioBufferList * list, float * out, uint32_t frames,
+                   uint32_t firstChannel, uint32_t wanted) {
     uint32_t written = 0;
+    uint32_t global  = 0;      // channel index across the whole device, not within one buffer
 
     memset(out, 0, (size_t)frames * wanted * sizeof(float));
 
@@ -240,10 +267,18 @@ static void gather(const AudioBufferList * list, float * out, uint32_t frames, u
         const float *       src    = (const float *)buffer->mData;
 
         if (src == NULL) {
+            global += stride;
             continue;
         }
 
-        for (uint32_t c = 0; (c < stride) && (written < wanted); c++) {
+        for (uint32_t c = 0; (c < stride) && (written < wanted); c++, global++) {
+            // Skipping has to count across buffers, not within them: a device may present 32
+            // channels as 32 single-channel buffers, one 32-channel buffer, or anything between,
+            // and "channel 17" must mean the same thing in every case.
+            if (global < firstChannel) {
+                continue;
+            }
+
             for (uint32_t f = 0; f < frames; f++) {
                 out[((size_t)f * wanted) + written] = src[((size_t)f * stride) + c];
             }
@@ -306,7 +341,7 @@ static OSStatus io_proc(AudioObjectID device, const AudioTimeStamp * now,
             frames = stream->scratchFrames;
         }
 
-        gather(inputData, stream->scratch, frames, stream->channels);
+        gather(inputData, stream->scratch, frames, stream->firstChannel, stream->channels);
         stream->callback(stream->user, stream->scratch, NULL, frames);
     } else {
         if ((outputData == NULL) || (outputData->mNumberBuffers == 0)) {
@@ -327,12 +362,14 @@ static OSStatus io_proc(AudioObjectID device, const AudioTimeStamp * now,
     return noErr;
 }
 
-bool device_open(tDeviceStream * stream, AudioObjectID id, bool isInput, uint32_t channels,
+bool device_open(tDeviceStream * stream, AudioObjectID id, bool isInput,
+                 uint32_t firstChannel, uint32_t channels,
                  uint32_t maxFrames, tDeviceCallback callback, void * user) {
     memset(stream, 0, sizeof(*stream));
 
     stream->id             = id;
     stream->isInput        = isInput;
+    stream->firstChannel   = firstChannel;
     stream->channels       = channels;
     stream->deviceChannels = channel_count(id, isInput);
     stream->callback       = callback;
@@ -344,9 +381,9 @@ bool device_open(tDeviceStream * stream, AudioObjectID id, bool isInput, uint32_
         return false;
     }
 
-    if (stream->deviceChannels < channels) {
-        fprintf(stderr, "device has only %u %s channels, %u requested\n",
-                stream->deviceChannels, isInput ? "input" : "output", channels);
+    if (stream->deviceChannels < (firstChannel + channels)) {
+        fprintf(stderr, "device has %u %s channels; %u from channel %u requested\n",
+                stream->deviceChannels, isInput ? "input" : "output", channels, firstChannel + 1);
         return false;
     }
 

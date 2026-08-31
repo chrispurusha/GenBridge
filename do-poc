@@ -17,6 +17,7 @@ SOURCES=(
     "$HERE/poc/ring.c"
     "$HERE/poc/resampler.c"
     "$HERE/poc/drift.c"
+    "$HERE/poc/selftest.c"
 )
 
 # Matching the sibling projects: every one of them targets 11.5, so anything shared later links

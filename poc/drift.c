@@ -30,12 +30,13 @@ tDriftConfig drift_default_config(void) {
     config.bandwidthHz      = 0.02;   // ~50 s natural period; see the header for why it is this low
     config.damping          = 1.0;    // critically damped - overshoot in a buffer level is an xrun
     config.maxCorrectionPpm = 500.0;  // real crystals are within ~200 ppm; the rest is recovery room
+    config.filterSeconds    = 2.0;    // >> block rate, << loop period; see the header
 
     return config;
 }
 
 void drift_init(tDrift * drift, const tDriftConfig * config, double inRate,
-                double setpointFrames, double updateIntervalSeconds) {
+                double setpointFrames) {
     memset(drift, 0, sizeof(*drift));
 
     drift->config         = *config;
@@ -45,23 +46,34 @@ void drift_init(tDrift * drift, const tDriftConfig * config, double inRate,
 
     // Kp and Ki fall straight out of the second order form in the header. Ki is per update rather
     // than per second, so the loop behaves the same whatever block size the device hands us.
-    drift->kp = (2.0 * config->damping * omega) / inRate;
-    drift->ki = ((omega * omega) / inRate) * updateIntervalSeconds;
+    drift->kp          = (2.0 * config->damping * omega) / inRate;
+    drift->kiPerSecond = (omega * omega) / inRate;
 
     drift_reset(drift);
 }
 
 void drift_reset(tDrift * drift) {
-    drift->integrator = 0.0;
-    drift->correction = 0.0;
-    drift->primed     = false;
+    drift->integrator   = 0.0;
+    drift->correction   = 0.0;
+    drift->fillFiltered = -1.0;   // seed on the next update rather than ramping up from zero
+    drift->primed       = false;
 }
 
-double drift_update(tDrift * drift, double fillFrames) {
-    double error = fillFrames - drift->setpointFrames;
+double drift_update(tDrift * drift, double fillFrames, double intervalSeconds) {
+    double alpha = (drift->config.filterSeconds > 0.0)
+                   ? (1.0 - exp(-intervalSeconds / drift->config.filterSeconds))
+                   : 1.0;
+
+    if (drift->fillFiltered < 0.0) {
+        drift->fillFiltered = fillFrames;
+    } else {
+        drift->fillFiltered += alpha * (fillFrames - drift->fillFiltered);
+    }
+
+    double error = drift->fillFiltered - drift->setpointFrames;
     double limit = drift->config.maxCorrectionPpm * PPM;
 
-    drift->integrator += drift->ki * error;
+    drift->integrator += (drift->kiPerSecond * intervalSeconds) * error;
 
     // Anti-windup. Without this a long start-up transient - or a device that was stopped and
     // restarted - leaves the integrator holding a value it then takes minutes to unwind, during
@@ -84,6 +96,10 @@ double drift_update(tDrift * drift, double fillFrames) {
     drift->primed     = true;
 
     return correction;
+}
+
+double drift_filtered_fill(const tDrift * drift) {
+    return drift->fillFiltered;
 }
 
 double drift_measured_ppm(const tDrift * drift) {
