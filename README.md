@@ -7,8 +7,21 @@ and it is unreliable — devices fail to enumerate, and the clock reconciliation
 The alternative is a plug-in that opens the device itself and hands its audio to the host, which is
 what Elektron OverBridge does for Elektron Overbridge-style hardware.
 
-**Status: proof of concept.** The `poc/` directory holds a command line program that proves the one
-part nobody hands you for free — the clock drift loop. There is no plug-in yet.
+**Status: working beta.** The plug-in builds, loads and captures — it appears in a host as two
+devices, an effect and an instrument, and `./do-release` packages a `.dmg`. The `poc/` directory is
+still here and still useful: it holds the command line program that proved the one part nobody hands
+you for free, the clock drift loop, and it remains the place to measure that loop without a DAW in
+the way.
+
+Binary beta releases: https://github.com/chrispurusha/GenBridge/releases
+
+If anyone is interested in helping, please drop me a line.
+
+Since I'm now incurring costs (I recently started using LLMs) which would be good to at least cover, I now have a Buy Me a Coffee page:
+
+https://buymeacoffee.com/chrispurusha
+
+Thanks for any donations!
 
 ---
 
@@ -180,9 +193,16 @@ touching it, and `GENBRIDGE_VST3_INSTALL` points somewhere else.
 
 A host that is already running keeps the copy it loaded until it rescans or restarts.
 
+`./do-release` packages a `.dmg` for a GitHub release - same interface as G2-Edit's, versions from
+semver git tags, output to the Desktop, and it never creates the tag. It builds with
+`GENBRIDGE_NO_INSTALL=1` so cutting a release cannot replace the copy you are testing with, checks
+the version reached both the `Info.plist` and the compiled-in class info, and refuses to ship
+without the licence notices FreeType and the VST3 SDK require - see `THIRD_PARTY.md`.
+
 Built the way G2-Edit's is: a script rather than an Xcode target, against `pluginterfaces/` only,
-with no CMake, no vstgui and no `public.sdk` helper classes beyond the three files that do nothing
-but instantiate interface IDs. The bridge core in `poc/` is compiled in unchanged - only the CLI and
+with no CMake, no vstgui and no `public.sdk` helper classes beyond the four translation units that
+do nothing but instantiate interface IDs - `funknown.cpp`, `coreiids.cpp`, `vstinitiids.cpp` and
+`commoniids.cpp`. The bridge core in `poc/` is compiled in unchanged - only the CLI and
 the self-test stay behind.
 
 `tools/do-vst3host` builds two harnesses for exercising the plug-in outside a DAW:
@@ -217,11 +237,37 @@ in `G2-Edit/Docs/Third Party build notes.txt`; the build directory must be delet
 cmake, because the value is cached. glfw is needed for its **headers only** - SynthLib's key and
 mouse constants come from them - so it is not built at all.
 
-**It registers as an effect** - `Fx|NoOfflineProcess|Tools`, which is what Inject declares. An
-instrument would seem the natural fit, since the plug-in generates audio and consumes none, but an
-effect *has* an input bus, so the "no valid audio input bus" rejection that forced G2-Edit into
-`IPluginFactory2` with `kInstrumentSynth` never arises. The input is declared and ignored.
-`NoOfflineProcess` keeps a live capture out of offline bounces, where it has nothing to give.
+**It registers as two devices from one bundle** - four factory classes, a processor and a
+controller each:
+
+| Device | Subcategories |
+|---|---|
+| `GenBridge` | `Fx\|NoOfflineProcess\|OnlyRT\|Tools` |
+| `GenBridge Instrument` | `Instrument\|Synth\|OnlyRT` |
+
+There is one file to install and both appear after a rescan. The effect captures a device into a
+track; the instrument does that *and* sends MIDI out, so a hardware synth can be played from a clip
+and recorded back as one device.
+
+The effect came first, and its category was chosen to dodge a trap: an effect *has* an input bus, so
+the "no valid audio input bus" rejection that forced G2-Edit into `IPluginFactory2` with
+`kInstrumentSynth` never arises. The input is declared and ignored. The instrument has to face that
+question head-on, and answers it the way G2-Edit did - `Instrument|Synth`, which is the string known
+to work here. `Instrument|External` is the literal description ("External Instrument (wrapped
+Hardware)") and would be more honest, but a plug-in that loads beats one that is better described.
+
+**`NoOfflineProcess` and `OnlyRT` are not the same flag, and only one of them is about bouncing.**
+`NoOfflineProcess` opts out of a host's *offline-processing feature* - applying a plug-in
+destructively to a clip - and says nothing about how a mixdown is rendered. `OnlyRT` is the one that
+means "no processing faster than realtime", which is the literal truth here: the audio comes off a
+wire at one second per second and a host consuming it faster simply drains the ring.
+
+Both are declared. **Ableton Live 12.4.5 reads `OnlyRT` and ignores it** - its plug-in database
+stores the subcategory string verbatim, and it still calls `setupProcessing` with `kOffline`. So an
+offline bounce of a GenBridge track comes out silent, and no VST3 mechanism prevents it. The plug-in
+detects `kOffline`, logs it, and the panel says "host is rendering offline - bounce in real time"
+rather than leaving a quiet empty render to be puzzled over. The workaround is to record the track
+onto an audio track in real time and export that.
 
 Processor and controller are separate registered classes, for the reason G2-Edit found the hard way:
 Ableton instantiates the class named by `getControllerClassId()` and will not ask the component for
@@ -316,16 +362,68 @@ stereo synth want different buffer sizes and channel pairs.
 
 The format is versioned and line based, and it is that way now rather than later because a state
 format becomes expensive to change the moment a session has been saved against it. Unknown keys are
-skipped, so an older build can read a newer file. The device UID is written **last** on each line
-and parsed as the whole remainder, because real UIDs contain commas -
+skipped, so an older build can read a newer file - which is why new keys arrive without a version
+bump, and only a change to how an existing line *splits* has ever needed one. The device UID is
+written **last** on each line and parsed as the whole remainder, because real UIDs contain commas -
 `AppleUSBAudioEngine:CalDigit, Inc.:...` - and splitting on them truncates it.
 
 ```
-GENBRIDGE1
+GENBRIDGE3
 active=AppleUSBAudioEngine:KORG INC.:KRONOS:1140000:2,1
-dev=128,25.500,2,0.7500,AppleUSBAudioEngine:CalDigit, Inc.:CalDigit Thunderbolt 3 Audio:20200000:2
-dev=256,40.000,0,1.0000,AppleUSBAudioEngine:KORG INC.:KRONOS:1140000:2,1
+midi=KRONOS SOUND
+midich=0
+hw=236,4.917,12,KRONOS SOUNDAppleUSBAudioEngine:KORG INC.:KRONOS:1140000:2,1
+dev=128,48000.0,25.500,2,2,0.7500,AppleUSBAudioEngine:CalDigit, Inc.:CalDigit Thunderbolt 3 Audio:20200000:2
+dev=512,48000.0,40.000,0,2,1.0000,AppleUSBAudioEngine:KORG INC.:KRONOS:1140000:2,1
 ```
+
+`dev=` is frames, rate, target ms, first channel, channel count, trim, UID. `midi=`/`midich=` are
+the instrument's destination, stored **by name** rather than index because the MIDI list shifts
+whenever a device is powered on or off.
+
+`hw=` is the latency record for one *pair* - see below - and is the one line that cannot put its
+free text last, because it carries two names. It counts the first off by length instead: samples,
+correction in ms, destination-name length, then the destination and the UID run together. A MIDI
+destination is quite entitled to contain a comma, and a third comma would have been a guess that
+fails on somebody's interface.
+
+### Measuring the hardware round trip
+
+The instrument sends MIDI out and takes audio back, so a recorded part lands late by however long
+the synth and the wire take. **Latency > Measure** sends a note, watches its own output for the
+onset, and nets off the plug-in's own share of the delay.
+
+**What it nets off is `internal_latency()`, not `report_latency()`, and the difference is the whole
+correctness of it.** The reported figure *includes* the correction already in force, so subtracting
+it meant subtracting the previous measurement too - every re-measure came back short by whatever was
+already applied, and the value walked towards zero the more times it was run. The internal figure is
+the ring, the resampler and the converters, which is the honest thing to net off.
+
+**The measurement lands in the value you can edit.** There is one number, `In use`, seeded by
+Measure and nudged by hand at 0.1 ms a click - about 4.8 samples at 48 kHz, so a real move rather
+than a rounding. It used to be two: a measured figure you could not touch beside a trim starting at
+zero whose only job was to correct it, which is backwards. `measured` is still shown next to it as
+the raw reading, so you can see how far you have moved from it, but only `In use` is added to the
+reported latency.
+
+A measurement cannot separate the synth from its patch - a slow pad crosses the threshold later than
+a piano - so the last fraction of a millisecond stays a judgement. That is what the +/- is for.
+
+**The correction belongs to a (audio device, MIDI destination) pair**, not to the plug-in. The same
+synth reached over USB and over DIN answers at different speeds, and two synths on one interface are
+not comparable. Carrying one rig's figure to another is a whole round trip of error rather than a
+small trim.
+
+**It survives its own application.** Changing the reported latency makes the host reactivate the
+plug-in, which reopens the device - so re-seeding the correction on device open would undo every
+nudge the instant it took effect. Re-seeding is gated on the pair having actually changed. A reopen
+of the same rig leaves the value alone; a genuinely different one brings its own, or zero if it has
+never been measured.
+
+A measurement that comes back with an onset *earlier* than the plug-in's own pipeline is reported
+rather than clamped to zero. It cannot be a real round trip, so it means the threshold was crossed
+by something other than the test note, or the ring was not at its setpoint - and a silent zero was
+indistinguishable from a device that had never been measured at all.
 
 ## Scope: a HAL client, not a driver
 
@@ -399,10 +497,10 @@ would buy nothing audible.
   deployment target like the sibling projects' libraries.
 - Split the capture side into a separate feeder process, spawned with `posix_spawn` so it inherits
   the host's microphone consent, talking to the plug-in over a framed pipe protocol.
-- Wrap it as a VST3, reusing G2-Edit's hand-written COM plumbing and SynthLib's renderer-in-an-
-  NSView. Register as an **effect** (`Fx|NoOfflineProcess|Tools`), not an instrument — an effect has
-  an input bus, which sidesteps the host rejections an instrument category invites, and
-  `NoOfflineProcess` keeps a live-input plug-in out of offline bounces.
+- **Make an offline bounce work.** Live ignores `OnlyRT`, so the only real fix is capture and
+  replay: write the captured audio to disk during a realtime pass, keyed to
+  `ProcessContext::projectTimeSamples`, and play that back during an offline render instead of
+  reading the live ring. Needs that timeline behaviour proving in an offline pass first.
 
 ## Licence
 
