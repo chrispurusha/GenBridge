@@ -45,9 +45,9 @@ using namespace Steinberg::Vst;
 class GenBridgeEditorView : public IPlugView {
 public:
     GenBridgeEditorView(IEditController * controllerIn, IComponentHandler * handlerIn, int slot,
-                        bool instrument)
+                        bool instrument, tGbEditorGone goneIn, void * goneUserIn)
         : refCount(1), statusSlot(slot), isInstrument(instrument),
-          controller(controllerIn), handler(handlerIn) {
+          controller(controllerIn), handler(handlerIn), gone(goneIn), goneUser(goneUserIn) {
         if (controller != nullptr) {
             controller->addRef();
         }
@@ -57,6 +57,14 @@ public:
         if (view != nullptr) {
             gb_view_destroy(view);
             view = nullptr;
+        }
+
+        // BEFORE the controller reference goes, since that is what has been keeping the controller
+        // alive to be told. The reference this holds is also why the callback is safe: the controller
+        // cannot have been destroyed while an editor of its own still exists.
+        if (gone != nullptr) {
+            gone(goneUser);
+            gone = nullptr;
         }
 
         if (controller != nullptr) {
@@ -277,14 +285,17 @@ private:
     IEditController *   controller = nullptr;
     IComponentHandler * handler    = nullptr;
     IPlugFrame *        plugFrame  = nullptr;
+    tGbEditorGone       gone       = nullptr;
+    void *              goneUser   = nullptr;
     void *              view       = nullptr;
     double              width      = GB_CANVAS_W;
     double              height     = GB_CANVAS_H;
 };
 
 IPlugView * gb_create_editor_view(IEditController * controller, IComponentHandler * handler,
-                                  int statusSlot, bool instrument) {
-    return new GenBridgeEditorView(controller, handler, statusSlot, instrument);
+                                  int statusSlot, bool instrument,
+                                  tGbEditorGone gone, void * goneUser) {
+    return new GenBridgeEditorView(controller, handler, statusSlot, instrument, gone, goneUser);
 }
 
 void gb_editor_refresh_values(IPlugView * view) {

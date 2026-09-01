@@ -23,9 +23,16 @@
 #include "pluginterfaces/gui/iplugview.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 
+// Called from the editor view's destructor. THE HOST OWNS THE VIEW, not the controller: createView()
+// hands over a reference the host releases whenever it closes the editor, and the object deletes
+// itself at that point. Whoever kept the pointer has to be told, or it keeps a dangling one and
+// writes through it the next time a status update or a parameter change comes round.
+typedef void (*tGbEditorGone)(void * user);
+
 Steinberg::IPlugView * gb_create_editor_view(Steinberg::Vst::IEditController * controller,
                                              Steinberg::Vst::IComponentHandler * handler,
-                                             int statusSlot, bool instrument);
+                                             int statusSlot, bool instrument,
+                                             tGbEditorGone gone, void * goneUser);
 
 // The slot may arrive after the editor is open - a host connects the two ends whenever it likes.
 void gb_editor_set_status_slot(Steinberg::IPlugView * view, int statusSlot);

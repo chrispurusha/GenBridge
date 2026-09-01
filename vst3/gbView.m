@@ -66,21 +66,92 @@
 
     gb_draw_init();
 
-    // A timer rather than a CVDisplayLink. The panel shows meters and drift telemetry, so it has to
-    // repaint continuously rather than on demand, but nothing here is worth a display link's
-    // complications - and a link fires on its own thread, which would mean marshalling every frame
-    // back to the main one before touching AppKit.
-    self.timer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 30.0)
-                                                  target:self
-                                                selector:@selector(tick:)
-                                                userInfo:nil
-                                                 repeats:YES];
-
-    // Without this the timer stops while a menu is tracking or the window is being resized, and the
-    // meters freeze at whatever they last showed - which reads as the plug-in having crashed.
-    [[NSRunLoop currentRunLoop] addTimer:self.timer forMode:NSRunLoopCommonModes];
-
+    // NO TIMER YET. There is no window at this point, so there is nothing to repaint for;
+    // -viewDidMoveToWindow starts one once there is. See -updateTimer.
     return self;
+}
+
+// Whether a repaint would be seen by anyone. THE EDITOR BEING CLOSED IS NOT THE ONLY WAY TO STOP
+// SHOWING IT: the host calls removed() for that and the timer goes with the view, but a window that
+// is minimised, completely covered by another, or sitting on an inactive Space is just as invisible
+// and the view is still in the hierarchy. So is one in a host that HIDES its plug-in view rather than
+// removing it, which some do when switching between panels in a rack. In every one of those cases
+// this used to go on drawing thirty full Metal frames a second, each a complete redraw - gb_draw_frame()
+// has no dirty check - into a surface nobody was looking at.
+- (BOOL)shouldRepaint {
+    NSWindow * window = [self window];
+
+    if ((window == nil) || [self isHiddenOrHasHiddenAncestor]) {
+        return NO;
+    }
+
+    return ([window occlusionState] & NSWindowOcclusionStateVisible) != 0;
+}
+
+// The timer exists exactly while it is worth having. Starting one is cheap, so this is driven from
+// the notifications rather than by letting a tick fire and return early: a tick that returns early
+// still wakes the process thirty times a second, which is most of what there was to save on a
+// machine that has gone to sleep with a project open.
+- (void)updateTimer {
+    BOOL wanted = [self shouldRepaint];
+
+    if (wanted && (self.timer == nil)) {
+        // A timer rather than a CVDisplayLink. The panel shows meters and drift telemetry, so it has
+        // to repaint continuously rather than on demand, but nothing here is worth a display link's
+        // complications - and a link fires on its own thread, which would mean marshalling every
+        // frame back to the main one before touching AppKit.
+        self.timer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 30.0)
+                                                      target:self
+                                                    selector:@selector(tick:)
+                                                    userInfo:nil
+                                                     repeats:YES];
+
+        // Without this the timer stops while a menu is tracking or the window is being resized, and
+        // the meters freeze at whatever they last showed - which reads as the plug-in having crashed.
+        [[NSRunLoop currentRunLoop] addTimer:self.timer forMode:NSRunLoopCommonModes];
+
+        // At once, rather than up to a thirtieth of a second later: coming back to an uncovered
+        // window should not show a frame of whatever the meters read when it was covered.
+        [self redraw];
+    } else if (!wanted && (self.timer != nil)) {
+        [self.timer invalidate];    // the timer retains self, so this is also what lets the view go
+        self.timer = nil;
+    }
+}
+
+// PER WINDOW, not once: the notification is observed against a specific window and a plug-in view is
+// moved between them - re-parented as a host opens the editor in a floating window, docks it in a
+// rack, or closes it. Registering against nil instead would catch every window in the host.
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+
+    [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                    name:NSWindowDidChangeOcclusionStateNotification
+                                                  object:nil];
+
+    if ([self window] != nil) {
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(occlusionChanged:)
+                                                     name:NSWindowDidChangeOcclusionStateNotification
+                                                   object:[self window]];
+    }
+
+    [self updateTimer];
+}
+
+- (void)occlusionChanged:(NSNotification *)note {
+    (void)note;
+    [self updateTimer];
+}
+
+- (void)viewDidHide {
+    [super viewDidHide];
+    [self updateTimer];
+}
+
+- (void)viewDidUnhide {
+    [super viewDidUnhide];
+    [self updateTimer];
 }
 
 - (BOOL)isOpaque {
@@ -105,6 +176,13 @@
 
 - (void)redraw {
     NSRect backing = [self convertRectToBacking:[self bounds]];
+
+    // A view with no window has no drawable behind it, and a zero-sized one would ask the backend for
+    // render targets it cannot make. Both are reachable: -redraw is called from -mouseDown: and from
+    // -updateTimer as well as from the tick.
+    if (([self window] == nil) || (backing.size.width < 1.0) || (backing.size.height < 1.0)) {
+        return;
+    }
 
     // SELECT THIS VIEW'S CONTEXT FIRST. With two editors open, whichever drew last left the backend
     // pointing at its own layer; drawing without claiming ours would paint into the other one's
@@ -156,6 +234,7 @@
 }
 
 - (void)removeFromSuperview {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     [self.timer invalidate];        // the timer retains self; leaving it running leaks the view
     self.timer = nil;
 
@@ -193,6 +272,7 @@ void gb_view_destroy(void * view) {
 
     GbView * v = (__bridge_transfer GbView *)view;
 
+    [[NSNotificationCenter defaultCenter] removeObserver:v];
     [v.timer invalidate];
     v.timer = nil;
     [v removeFromSuperview];

@@ -3159,12 +3159,26 @@ public:
             return nullptr;
         }
 
-        editorView = gb_create_editor_view(this, componentHandler, statusSlot, instrument);
+        // ONE EDITOR AT A TIME is all this pointer can describe, and a host that opens a second
+        // without closing the first would leave the older one unreachable. No host does, but the
+        // assignment is worth reading as deliberate rather than accidental.
+        editorView = gb_create_editor_view(this, componentHandler, statusSlot, instrument,
+                                           editor_gone, this);
 
         return editorView;
     }
 
 private:
+    // The host, not this, owns the reference createView() returned: it releases it when the user
+    // closes the editor and the view deletes itself there and then. Nothing here held a reference or
+    // was told, so editorView went on pointing at freed memory and the status and parameter-notify
+    // paths below wrote through it - reached routinely, since they run precisely when the editor is
+    // NOT open. Taking a reference of our own instead would be worse: the view already addRefs the
+    // controller, so the two would keep each other alive for ever.
+    static void editor_gone(void * user) {
+        ((GenBridgeController *)user)->editorView = nullptr;
+    }
+
     static void to_utf16(const char * src, char16 * dst, int max) {
         int i = 0;
 
