@@ -5,3 +5,4 @@ Measurements, reasoning and completed-work narrative go in findings.txt, NOT her
 Built-but-unchecked work goes in to-test.txt.
 
 - FX variation doesn't allow for recording on that track in Ableton. One of the attributes we're presenting to host maybe wrong?
+- On Cubase, helix audio is playing when Kronox is selected. Says capturing Helix, but Kronos actually selected. Seems OK on Ableton as-is.
