@@ -1,0 +1,8 @@
+GenBridge TO TEST
+
+Finished code that is built but not yet checked against a real host or real hardware.
+Confirmed -> delete the line. Check failed -> move it to todo.txt.
+
+- Editor stops repainting when it cannot be seen (gbView.m): timer started/stopped from viewDidMoveToWindow, viewDidHide/Unhide and NSWindowDidChangeOcclusionStateNotification. The start/stop plumbing was traced under tools/vst3host; the OCCLUSION TRANSITION itself was never scripted - minimise the plug-in window in a real host and watch Activity Monitor
+- Editor size remembered across sessions (controller getState/setState, gbVst3.cpp): round-trips in tools/vst3check, but hosts differ over WHEN they call controller setState/getState and some manage plug-in window size themselves - needs a real Ableton session, closed and reopened
+- editorView use-after-free fixed (gbVst3.cpp editor_gone callback): the close path runs clean under tools/vst3host, but the crash it prevents was in the status/parameter-notify paths after the editor closes - open the editor, close it, leave the set running and change a device

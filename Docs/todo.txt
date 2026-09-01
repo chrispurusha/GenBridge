@@ -5,14 +5,24 @@ Measurements, reasoning and completed-work narrative go in findings.txt, NOT her
 Built-but-unchecked work goes in to-test.txt.
 
 FROM CT
-- Resize smoothness, as Claude described below
+- Resize smoothness - three causes, see EDITOR RESIZE
+- Plug-in falls back to the mic when the saved USB device is absent - see DEVICE SELECTION
 
+EDITOR RESIZE
+- checkSizeConstraint() reads only width (gbEditor.mm:198-215) so a bottom-edge drag has its height discarded and recomputed from the unchanged width, and the window fights the drag vertically - fit the aspect box to whichever dimension the host actually changed
+- Content repaints only on the 30 Hz timer, so during a live resize it lags the window edge - G2-Edit redraws on demand and stays in step; override -setFrameSize: in gbView.m to redraw at once
+- Two masters on the frame: attached() sets NSViewWidthSizable|NSViewHeightSizable (gbEditor.mm:107) AND onSize() setFrame:s, in no guaranteed order - drop the autoresizing mask and let onSize() be the only authority
+- Minor: the (int32) truncations in checkSizeConstraint let a repeated resize creep a pixel at a time
+- Minor: plugFrame is stored but never used - the missing half if the plug-in is ever to REQUEST a size rather than accept one
 
-2. Erratic resizing                                                    
-Three separate causes, and only one of them is the one you'd guess:    
-a) checkSizeConstraint() only ever looks at width (gbEditor.mm:198-215)wanted comes from rect->r height is then recomputedfrom it. Drag the bottom edge and your requested height is discarded anreplaced by one derived fthe window snaps back andfights you vertically. It should fit the aspect box to whichever dimenshost actually changed.
-                                                                       b) The content repaints oring a live resize the host moves the frame at display rate while our content updates 30×/s, so it visibly lags the window eerence from G2-Edit, whichredraws on demand in its own loop and so repaints in step with the drag. An override of -setFrameSize immediately fixes it.
-                                                                            c) Two masters on the fraNSViewWidthSizable|NSViewHeightSizable (gbEditor.mm:107) and onSize()       explicitly setFrame:s. Aprtional adjustment when the parent changes and then onSize() overwrites it, with no guaranteed order — aframe of wrong geometry erop the autoresizing maskand let onSize() be the sole authority.                                     
-Minor: the (int32) truncations in checkSizeConstraint let a repeated resize creep a pixel at a time. t never used — that's themissing half if the plug-in ever wants to request a size rather than accept one.
-
-- If plugin can't find the USB core audio device, should indicate a not found and wait for it to become present. Definitely shouldn't pass through mic audio, which is does as-is
+DEVICE SELECTION
+- Absent saved device must show "not found" and wait for it, never open something else - plan below
+- Root cause: gbVst3.cpp:2784, controller setComponentState() - gb_slot_for_uid() returns -1 for an absent device, the `if (slot >= 0)` skips, and `device` keeps its member default of 0.0, which is slot 0, the first device with inputs (a Continuity mic here)
+- The PROCESSOR is not at fault: reconfigure() already stays closed on an unresolved UID and is overridden by the kParamDevice 0.0 the controller sends
+- Option A - add a "none" step at the bottom of the device parameter and shift devices to 1..N - is REJECTED: it changes what a saved `device` value means, so every existing project reopens naming the wrong device
+- Option B, no change to the parameter space: controller keeps waitingForUid, set in setComponentState() when gb_slot_for_uid() fails, cleared when the device appears or the user picks one
+- B: tell the processor to stay closed while waiting, over the IConnectionPoint the two already share - a kParamDevice arriving meanwhile must open nothing
+- B: clear the flag only on a real user choice - an editor click reaches apply() in gbEditor.mm, which is what distinguishes it from a host restoring parameters
+- B: re-resolve on device-list change and open the saved device when it appears - needs a rescan trigger, the list is cached (gb_device_list_invalidate())
+- B: header says "waiting for <name>" - gbDraw.c:433 already has the three-state header and nothing ever puts it in the unavailable state; the blob stores the UID as active=, so check whether a dev= line carries the NAME or the header can only show a UID
+- B to-test: reopen a project with the USB device unplugged, confirm no mic passthrough and nothing opened, then plug it in and confirm it connects on its own
