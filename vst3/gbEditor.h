@@ -29,10 +29,18 @@
 // writes through it the next time a status update or a parameter change comes round.
 typedef void (*tGbEditorGone)(void * user);
 
+// Called whenever the host resizes the editor. The size belongs to the CONTROLLER, not to the view:
+// a view is built afresh every time the editor is opened, so anything it remembers itself is gone the
+// moment the window closes. Both callbacks share one user pointer - the controller is the only thing
+// either of them has ever wanted to talk to.
+typedef void (*tGbEditorResized)(void * user, double width, double height);
+
 Steinberg::IPlugView * gb_create_editor_view(Steinberg::Vst::IEditController * controller,
                                              Steinberg::Vst::IComponentHandler * handler,
                                              int statusSlot, bool instrument,
-                                             tGbEditorGone gone, void * goneUser);
+                                             double width, double height,
+                                             tGbEditorGone gone, tGbEditorResized resized,
+                                             void * user);
 
 // The slot may arrive after the editor is open - a host connects the two ends whenever it likes.
 void gb_editor_set_status_slot(Steinberg::IPlugView * view, int statusSlot);

@@ -45,9 +45,11 @@ using namespace Steinberg::Vst;
 class GenBridgeEditorView : public IPlugView {
 public:
     GenBridgeEditorView(IEditController * controllerIn, IComponentHandler * handlerIn, int slot,
-                        bool instrument, tGbEditorGone goneIn, void * goneUserIn)
+                        bool instrument, double widthIn, double heightIn,
+                        tGbEditorGone goneIn, tGbEditorResized resizedIn, void * userIn)
         : refCount(1), statusSlot(slot), isInstrument(instrument),
-          controller(controllerIn), handler(handlerIn), gone(goneIn), goneUser(goneUserIn) {
+          controller(controllerIn), handler(handlerIn), gone(goneIn), resized(resizedIn),
+          callbackUser(userIn), width(widthIn), height(heightIn) {
         if (controller != nullptr) {
             controller->addRef();
         }
@@ -63,7 +65,7 @@ public:
         // alive to be told. The reference this holds is also why the callback is safe: the controller
         // cannot have been destroyed while an editor of its own still exists.
         if (gone != nullptr) {
-            gone(goneUser);
+            gone(callbackUser);
             gone = nullptr;
         }
 
@@ -158,6 +160,13 @@ public:
 
         width  = (double)(newSize->right - newSize->left);
         height = (double)(newSize->bottom - newSize->top);
+
+        // Straight on to the controller, which is what outlives this view and what the host asks for
+        // its state. Remembering it here alone is what made the size revert every time the editor was
+        // reopened: createView() builds a new view each time, and a new view starts at the default.
+        if (resized != nullptr) {
+            resized(callbackUser, width, height);
+        }
 
         if (view != nullptr) {
             NSView * ours = (__bridge NSView *)view;
@@ -285,17 +294,20 @@ private:
     IEditController *   controller = nullptr;
     IComponentHandler * handler    = nullptr;
     IPlugFrame *        plugFrame  = nullptr;
-    tGbEditorGone       gone       = nullptr;
-    void *              goneUser   = nullptr;
-    void *              view       = nullptr;
-    double              width      = GB_CANVAS_W;
-    double              height     = GB_CANVAS_H;
+    tGbEditorGone       gone         = nullptr;
+    tGbEditorResized    resized      = nullptr;
+    void *              callbackUser = nullptr;
+    void *              view         = nullptr;
+    double              width        = GB_CANVAS_W;
+    double              height       = GB_CANVAS_H;
 };
 
 IPlugView * gb_create_editor_view(IEditController * controller, IComponentHandler * handler,
                                   int statusSlot, bool instrument,
-                                  tGbEditorGone gone, void * goneUser) {
-    return new GenBridgeEditorView(controller, handler, statusSlot, instrument, gone, goneUser);
+                                  double width, double height,
+                                  tGbEditorGone gone, tGbEditorResized resized, void * user) {
+    return new GenBridgeEditorView(controller, handler, statusSlot, instrument, width, height,
+                                   gone, resized, user);
 }
 
 void gb_editor_refresh_values(IPlugView * view) {

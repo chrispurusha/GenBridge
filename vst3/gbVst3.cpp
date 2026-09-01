@@ -2806,14 +2806,62 @@ public:
         return kResultOk;
     }
 
+    // THE CONTROLLER'S OWN STATE, which is a different thing from the component's and is exactly
+    // where the GUI's own settings belong: the processor has no business knowing how big a window is,
+    // and a size on a dev= line would travel with a device it has nothing to do with.
+    //
+    // Line based and versioned like the component's blob above, and for the same reason - an older
+    // build skips a key it does not know rather than rejecting the lot. Both of these returned
+    // kResultOk without reading or writing a byte, which is why the editor came back at its default
+    // size in every session however the last one was left.
     tresult PLUGIN_API setState(IBStream * state) SMTG_OVERRIDE {
-        (void)state;
+        if (state == nullptr) {
+            return kResultFalse;
+        }
+
+        std::string blob;
+        char        chunk[256];
+        int32       read = 0;
+
+        while ((state->read(chunk, (int32)sizeof(chunk), &read) == kResultOk) && (read > 0)) {
+            blob.append(chunk, (size_t)read);
+
+            if (read < (int32)sizeof(chunk)) {
+                break;
+            }
+        }
+        size_t at = blob.find("editor=");
+
+        if (at != std::string::npos) {
+            double w = 0.0;
+            double h = 0.0;
+
+            if (sscanf(blob.c_str() + at, "editor=%lf,%lf", &w, &h) == 2) {
+                // SANITY-CHECKED, not trusted. This blob comes out of a saved project and a
+                // nonsensical size would leave an editor the user cannot see or cannot fit on a
+                // screen, with no way back to the default short of editing the project file. The
+                // bounds are checkSizeConstraint()'s own.
+                if ((w >= (GB_CANVAS_W * 0.75)) && (w <= (GB_CANVAS_W * 2.0)) && (h > 0.0)) {
+                    editorWidth  = w;
+                    editorHeight = h;
+                }
+            }
+        }
+
         return kResultOk;
     }
 
     tresult PLUGIN_API getState(IBStream * state) SMTG_OVERRIDE {
-        (void)state;
-        return kResultOk;
+        if (state == nullptr) {
+            return kResultFalse;
+        }
+
+        char  blob[128];
+        int   len   = snprintf(blob, sizeof(blob), "GENBRIDGEGUI1\neditor=%.0f,%.0f\n",
+                               editorWidth, editorHeight);
+        int32 wrote = 0;
+
+        return (state->write(blob, (int32)len, &wrote) == kResultOk) ? kResultOk : kResultFalse;
     }
 
     int32 PLUGIN_API getParameterCount(void) SMTG_OVERRIDE {
@@ -3163,7 +3211,8 @@ public:
         // without closing the first would leave the older one unreachable. No host does, but the
         // assignment is worth reading as deliberate rather than accidental.
         editorView = gb_create_editor_view(this, componentHandler, statusSlot, instrument,
-                                           editor_gone, this);
+                                           editorWidth, editorHeight,
+                                           editor_gone, editor_resized, this);
 
         return editorView;
     }
@@ -3177,6 +3226,13 @@ private:
     // controller, so the two would keep each other alive for ever.
     static void editor_gone(void * user) {
         ((GenBridgeController *)user)->editorView = nullptr;
+    }
+
+    static void editor_resized(void * user, double width, double height) {
+        GenBridgeController * self = (GenBridgeController *)user;
+
+        self->editorWidth  = width;
+        self->editorHeight = height;
     }
 
     static void to_utf16(const char * src, char16 * dst, int max) {
@@ -3193,6 +3249,8 @@ private:
     IComponentHandler * componentHandler{nullptr};
     IConnectionPoint *  peer{nullptr};
     IPlugView *         editorView{nullptr};
+    double              editorWidth{GB_CANVAS_W};
+    double              editorHeight{GB_CANVAS_H};
     int                 statusSlot{-1};
     ParamValue          trim{0.5};
     ParamValue          device{0.0};

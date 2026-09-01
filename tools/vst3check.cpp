@@ -529,6 +529,38 @@ int main(int argc, char ** argv) {
         factory->createInstance(processorCid, IComponent::iid, (void **)&fresh);
         fresh->initialize(nullptr);
 
+        // THE CONTROLLER'S state, not the component's: the editor size lives there, and both halves
+        // of it were stubs that returned kResultOk without touching the stream, so every session
+        // opened at the default size however the last one was left.
+        {
+            MemStream guiSaved;
+            MemStream guiLoaded;
+
+            controller->getState(&guiSaved);
+            check("controller writes a GUI state", guiSaved.buf.find("editor=") != std::string::npos);
+
+            guiLoaded.buf = "GENBRIDGEGUI1\neditor=700,748\nfuturekey=a newer build wrote this\n";
+            check("controller loads a GUI state", controller->setState(&guiLoaded) == kResultOk);
+
+            MemStream guiBack;
+
+            controller->getState(&guiBack);
+            check("editor size survives the round trip", guiBack.buf.find("editor=700,748") != std::string::npos);
+
+            // Straight out of a project file, so it is checked rather than trusted: a size the user
+            // cannot see or cannot fit on screen has no way back short of editing the project.
+            MemStream absurd;
+
+            absurd.buf = "GENBRIDGEGUI1\neditor=40,4\n";
+            controller->setState(&absurd);
+
+            MemStream afterAbsurd;
+
+            controller->getState(&afterAbsurd);
+            check("an out-of-range saved size is refused",
+                  afterAbsurd.buf.find("editor=700,748") != std::string::npos);
+        }
+
         check("loads state with comma-bearing UIDs", fresh->setState(&tricky) == kResultOk);
 
         MemStream saved;
