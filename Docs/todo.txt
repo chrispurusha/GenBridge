@@ -4,5 +4,6 @@ Things to do. ONE LINE PER ITEM - keep it that way.
 Measurements, reasoning and completed-work narrative go in findings.txt, NOT here.
 Built-but-unchecked work goes in to-test.txt.
 
-- FX variation doesn't allow for recording on that track in Ableton. One of the attributes we're presenting to host maybe wrong?
+- The current FX variation doesn't allow for recording on the host audio track in Ableton. One of the attributes we're presenting to host maybe wrong?
 - On Cubase, helix audio is playing when Kronox is selected. Says capturing Helix, but Kronos actually selected. Seems OK on Ableton as-is.
+- Ideally should be able to freeze / bounce when we're using GenBridge as an instrument. Although, Elektron OverBridge doesn't do that, so not high priority.
