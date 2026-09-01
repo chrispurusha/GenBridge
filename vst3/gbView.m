@@ -179,8 +179,29 @@
     [self redraw];
 }
 
+// One more once the drag stops, because the tick above stood down for the duration and the last
+// -setFrameSize: may have arrived mid-frame.
+- (void)viewDidEndLiveResize {
+    [super viewDidEndLiveResize];
+    [self redraw];
+}
+
 - (void)tick:(NSTimer *)timer {
     (void)timer;
+
+    // NOT WHILE THE USER IS DRAGGING THE EDGE. -setFrameSize: is already redrawing, at least as often
+    // as the timer would and usually more, so a tick here draws a second frame nobody asked for - and
+    // that is not merely wasted, it is actively what made a resize judder.
+    //
+    // MEASURED: a redraw takes a drawable from the layer and presents it, and CAMetalLayer keeps a
+    // small pool. Present more often than the display refreshes and [gLayer nextDrawable] blocks
+    // until one comes free - up to a full refresh, 15.4 ms of the 17 ms a resize step was costing.
+    // That block happens INSIDE AppKit's drag loop, so the window itself stops moving while we wait
+    // for a frame the user was never going to see. Reallocating the render targets, which is what
+    // this looked like it ought to be, measured 0.00 ms.
+    if ([self inLiveResize]) {
+        return;
+    }
     [self redraw];
 }
 
@@ -205,8 +226,18 @@
     gb_draw_set_status_slot(self.statusSlot);
     gb_draw_set_instrument(self.isInstrument ? true : false);
 
+    // ONE FRAME, ONE TRANSACTION. gb_draw_frame() moves the layer's geometry and gfx_present() hands
+    // over the pixels for it, and until now those were two separate Core Animation transactions - so
+    // for one commit the layer had its NEW size and its OLD contents, stretched to fit. That is seen
+    // as a jump on every step of a resize. The backend presents with presentsWithTransaction set for
+    // a hosted view, which is what makes putting them in the same transaction meaningful.
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+
     gb_draw_frame((int)backing.size.width, (int)backing.size.height);
     gfx_present();
+
+    [CATransaction commit];
 }
 
 - (void)mouseDown:(NSEvent *)event {

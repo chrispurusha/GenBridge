@@ -31,6 +31,9 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdarg>
+#include <cstdio>
+#include <unistd.h>
 #include <cstring>
 
 #include "pluginterfaces/base/funknown.h"
@@ -42,6 +45,31 @@
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
+
+// Same gate as the processor's log_line(): touch /tmp/genbridge-log to turn it on. Resize is
+// negotiated between host and plug-in over several calls per pointer move, and no amount of staring
+// at the code shows which rects a given host actually asks for - two versions of
+// checkSizeConstraint() were reasoned out and both were wrong. This is how the next one gets
+// evidence instead.
+static void gb_editor_log(const char * format, ...) {
+    if (access("/tmp/genbridge-log", F_OK) != 0) {
+        return;
+    }
+
+    FILE * file = fopen("/tmp/genbridge.log", "a");
+
+    if (file == nullptr) {
+        return;
+    }
+    va_list args;
+
+    va_start(args, format);
+    fprintf(file, "[editor] ");
+    vfprintf(file, format, args);
+    fprintf(file, "\n");
+    va_end(args);
+    fclose(file);
+}
 
 class GenBridgeEditorView : public IPlugView {
 public:
@@ -113,13 +141,19 @@ public:
 
         NSView * ours = (__bridge NSView *)view;
 
-        // NOT AUTORESIZING. With NSViewWidthSizable|NSViewHeightSizable set, AppKit applies its own
-        // proportional adjustment when the host resizes the parent and onSize() then overwrites it,
-        // in an order nobody guarantees - a frame of wrong geometry on every resize, which is a good
-        // part of what made this feel erratic next to G2-Edit. The host is required to call onSize(),
-        // so onSize() is the single authority on where this view sits.
+        // AUTORESIZING, and the earlier decision to turn it off was wrong. The reasoning was that
+        // onSize() should be the single authority, since AppKit and onSize() both writing the frame
+        // in no guaranteed order is a real hazard. What that missed is WHEN each of them acts: AppKit
+        // resizes this view with its parent on every frame of a live drag, while a host calls
+        // onSize() when the drag ENDS. Take the mask away and the view simply sits at its old size
+        // until the user lets go - "the components only seem to be resized after the window resize
+        // completes". CT reported exactly that, and it was this line that did it.
+        //
+        // They do not in fact fight. This view is created filling its parent, and the mask keeps
+        // margins rather than scaling proportionally, so it goes on filling it; onSize() then asks
+        // for a frame it already has, and the setFrame there is guarded to a no-op when it agrees.
         [ours setFrame:NSMakeRect(0.0, 0.0, width, height)];
-        [ours setAutoresizingMask:NSViewNotSizable];
+        [ours setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
         [host addSubview:ours];
 
         push_values();
@@ -184,6 +218,8 @@ public:
         width  = (double)(newSize->right - newSize->left);
         height = (double)(newSize->bottom - newSize->top);
 
+        gb_editor_log("onSize %.0fx%.0f", width, height);
+
         // Straight on to the controller, which is what outlives this view and what the host asks for
         // its state. Remembering it here alone is what made the size revert every time the editor was
         // reopened: createView() builds a new view each time, and a new view starts at the default.
@@ -191,10 +227,17 @@ public:
             resized(callbackUser, width, height);
         }
 
+        // ONLY WHEN IT DISAGREES. The autoresizing mask has usually put the view here already, and
+        // setting a frame it already has still runs a layout pass and still marks the layer dirty -
+        // per resize, for nothing. Writing it unconditionally is also what made the two of them look
+        // like rival authorities; guarded, whichever got there first is simply right.
         if (view != nullptr) {
             NSView * ours = (__bridge NSView *)view;
+            NSRect   want = NSMakeRect(0.0, 0.0, width, height);
 
-            [ours setFrame:NSMakeRect(0.0, 0.0, width, height)];
+            if (!NSEqualRects([ours frame], want)) {
+                [ours setFrame:want];
+            }
         }
 
         return kResultOk;
@@ -212,24 +255,28 @@ public:
     // The panel is a fixed logical canvas that simply scales, so any size works as long as the
     // aspect is kept - otherwise the layout stretches and the text goes with it.
     //
-    // DRIVEN BY WHICHEVER EDGE THE USER ACTUALLY MOVED, which is the whole of a bug worth
-    // remembering. This used to read the width and nothing else, so dragging the BOTTOM edge had its
-    // requested height thrown away and replaced by one derived from a width that had not changed:
-    // the window snapped straight back and fought the drag vertically. Comparing both against the
-    // size we are currently at says which edge moved; a corner drag moves both and either answer is
-    // right, so width wins the tie by being the one tested second.
+    // NO HISTORY. THAT IS THE WHOLE POINT OF THIS VERSION. Two earlier ones asked which edge the user
+    // was moving by comparing the proposed rect against the size we believed we were at, and both
+    // were wrong in the same way: `width`/`height` only advance when the host calls onSize(), and
+    // they are updated from our OWN previous answers, so the reply to a given rect depended on what
+    // had happened before it. A host that asks twice for one pointer position - or asks with the
+    // pointer's raw rect, whose unmoved dimension is still the PRE-DRAG value - then gets two
+    // different answers and applies both. CT: "the whole plugin window resizes randomly and restores".
+    //
+    // Averaging the two candidate widths depends on nothing but the rect in hand. It is idempotent,
+    // so feeding our own answer back returns it unchanged and the size cannot oscillate; and it is
+    // continuous, so there is no branch to flip and no tie to break. Dragging one edge moves the
+    // other axis at half rate for a frame or two and converges - which for an aspect-locked window
+    // is what should happen anyway, and it eases rather than jumping.
     tresult PLUGIN_API checkSizeConstraint(ViewRect * rect) SMTG_OVERRIDE {
         if (rect == nullptr) {
             return kInvalidArgument;
         }
 
-        double wantW  = (double)(rect->right - rect->left);
-        double wantH  = (double)(rect->bottom - rect->top);
         double aspect = GB_CANVAS_H / GB_CANVAS_W;
-
-        // The height converted into the width that would produce it, so the clamp below has one
-        // number to work on however the drag arrived.
-        double wanted = (fabs(wantH - height) > fabs(wantW - width)) ? (wantH / aspect) : wantW;
+        double fromW  = (double)(rect->right - rect->left);
+        double fromH  = (double)(rect->bottom - rect->top) / aspect;
+        double wanted = (fromW + fromH) * 0.5;
 
         if (wanted < (GB_CANVAS_W * 0.75)) {
             wanted = GB_CANVAS_W * 0.75;
@@ -237,11 +284,17 @@ public:
             wanted = GB_CANVAS_W * 2.0;
         }
 
-        // ROUNDED, NOT TRUNCATED. A host asks this repeatedly as a drag proceeds and feeds each
-        // answer back in, so a truncation is not a one-off half-pixel - it is a step the window
-        // takes every time it is asked, and the size creeps a pixel at a time.
-        rect->right  = rect->left + (int32)lround(wanted);
-        rect->bottom = rect->top + (int32)lround(wanted * aspect);
+        // ROUNDED, NOT TRUNCATED. A host asks this repeatedly through a drag and feeds each answer
+        // back in, so a truncation is not a one-off half pixel - it is a step taken every time.
+        int32 outW = (int32)lround(wanted);
+        int32 outH = (int32)lround(wanted * aspect);
+
+        gb_editor_log("checkSizeConstraint %dx%d -> %dx%d  (at %.0fx%.0f)",
+                      rect->right - rect->left, rect->bottom - rect->top,
+                      outW, outH, width, height);
+
+        rect->right  = rect->left + outW;
+        rect->bottom = rect->top + outH;
 
         return kResultTrue;
     }

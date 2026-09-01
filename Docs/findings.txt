@@ -69,3 +69,106 @@ onSize() is the only authority - the host is required to call it.
 plugFrame was stored and never used. attached() now uses it to ASK for the remembered size when the
 host handed over a parent that is not that size, which is the case editor-size persistence would
 otherwise still lose. Once, not in a loop.
+
+
+2026-09-01  RESIZE: CONTENTS ONLY CAUGHT UP WHEN THE DRAG ENDED
+---------------------------------------------------------------
+Reported by CT after the first resize pass: "the components it contains only seem to be resized after
+window resize completes. G2-Edit dynamically resizes them along with the window."
+
+TWO CAUSES, AND THE FIRST ONE WAS MINE. Earlier the same day I removed the plug-in view's
+NSViewWidthSizable|NSViewHeightSizable mask, reasoning that AppKit and onSize() both writing the
+frame in no guaranteed order was a hazard and that onSize() should be the single authority. That
+reasoning ignored WHEN each of them acts: AppKit resizes the view with its parent on every frame of a
+live drag, while a host calls onSize() when the drag ENDS. Without the mask the view simply sat at
+its old size until the user let go. Measured under vst3host by growing the parent with no onSize()
+call - mask on, the subview follows 520x556 -> 640x684; mask off, it stays at 520x556. The mask is
+back, and onSize()'s setFrame is now guarded to a no-op when the two already agree, which is what
+stops them looking like rival authorities.
+
+The lesson worth keeping: "one authority" is the right instinct for state, and the wrong one for
+something two mechanisms update at different RATES. The fast one has to keep running.
+
+SECOND CAUSE, present all along and not mine: CALayer.frame and CAMetalLayer.drawableSize are
+ANIMATABLE properties, so a bare assignment enrols them in the default 0.25s implicit action. During
+a live drag that is a fresh animation every frame, each starting from where the last had reached -
+the window edge moves at once and the contents crawl after it. In a plug-in the layer is a SUBLAYER
+of the host view's layer (mtl_attach_window), so nothing lays it out for us and there is no free ride
+from the view's own resizing. Both mtl_set_surface() and mtl_attach_window() now wrap their geometry
+writes in a CATransaction with setDisableActions:YES.
+
+That change is in SynthLib, so it reaches G2-Edit and SynthEdit as well - both resize a real window
+and neither has been looked at since.
+
+
+2026-09-01  RESIZE, MEASURED (after CT reported it was still jumpy)
+--------------------------------------------------------------------
+Two speculative rounds had already been spent, so this one was measured. Temporary instrumentation in
+tools/vst3host drove 60 resize steps as fast as they would go, timing each stage.
+
+  gb_draw_frame (the whole panel)          mean  0.52 ms   worst 10.21 ms
+  gfx_present                              mean  3.75 ms   worst 16.11 ms
+    of which [gLayer nextDrawable]         mean  3.39 ms   worst 15.44 ms
+  mtl_set_surface realloc + GPU wait       mean  0.00 ms   worst  0.00 ms
+  whole step                               mean 16.30 ms
+
+WHAT WAS WRONG WITH THE GUESSES. Reallocating the render targets and the waitUntilCompleted inside
+mtl_set_surface looked like the obvious cost - a 16 MB MSAA texture per drag frame - and measured
+zero. Suppressing the 30 Hz timer during the drag, which looked like a certain win, moved the mean by
+0.06 ms. Neither was the problem.
+
+WHAT THE NUMBERS ACTUALLY SAY: drawing is free, and every millisecond is nextDrawable waiting for the
+display. That is CORRECT back-pressure - a loop that redraws flat out cannot present faster than the
+screen refreshes, and the harness redraws flat out. So the render path is comfortably inside budget
+and is NOT the source of the jumpiness, and the harness cannot tell a smooth resize from a rough one.
+
+THE HARNESS IS THE WRONG INSTRUMENT and that is worth remembering before building another one: a
+synthetic resize loop measures the presentation ceiling, not the drag. What it did prove is where the
+time is NOT, which is what stopped a third round of guessing at the renderer.
+
+REAL DEFECT FOUND AND FIXED, in the geometry negotiation rather than the drawing: checkSizeConstraint
+took whichever dimension had changed MORE. `width`/`height` only advance when onSize() arrives, which
+for many hosts is when the drag ENDS, so the comparison runs against the pre-drag size and on a corner
+drag near the diagonal a few pixels of wobble flips which dimension wins. Each flip is a different
+answer for the same pointer position. It now asks only whether the width is moving, which has no tie
+to break.
+
+STILL OPEN. Kept because they are right, not because they were shown to help: the timer standing down
+during a live resize, and draw+present sharing one CATransaction so the layer cannot show its new
+geometry with the previous frame's pixels. One structural difference from G2-Edit remains unexplored -
+gPresentInTransaction is TRUE for a plug-in (attached to a VIEW) and FALSE for the app (attached to an
+NSWindow), so the plug-in takes the synchronous commit/waitUntilScheduled/present path and G2-Edit,
+the thing being compared against, does not. That wait sits inside AppKit's drag loop.
+
+
+2026-09-01  RESIZE, THIRD PASS - "resizes randomly and restores" MID-DRAG
+--------------------------------------------------------------------------
+Much better after the measured pass, but CT then reported the whole plug-in WINDOW occasionally
+jumping to another size and back, while dragging.
+
+A window changing size is something ASKING the host for a size. Only two things here can:
+plugFrame->resizeView(), which runs once in attached() and so is ruled out by "while dragging"; and
+checkSizeConstraint(), whose answer the host applies.
+
+checkSizeConstraint() was made HISTORY-FREE. Both previous versions consulted the size the plug-in
+believed it was at - and `width`/`height` only advance when onSize() arrives, and are themselves set
+from earlier answers - so the reply to a given rect depended on what had come before it. A host that
+asks twice about one pointer position, or proposes the pointer's raw rect whose unmoved dimension
+still holds the pre-drag value, could get two different answers and apply both. The rule is now the
+average of the two candidate widths: idempotent, so feeding an answer back returns it unchanged and
+the size cannot oscillate; continuous, so there is no branch to flip and no tie to break.
+
+CT reports the oscillation gone after this change. That is the outcome wanted, and it is still not
+proof of the mechanism: the fault was intermittent, so an absence over one session is weak evidence,
+and no log of a failing drag was ever captured to say what the host was actually asking for.
+
+DO NOT RECORD THIS AS THE FIX. The mechanism above is a plausible story, not a demonstrated one. The
+regression checks added to vst3check PASS WITH BOTH OF THE OLD RULES, so they do not reproduce the
+fault - that is now the THIRD test in this area built on a guess at the host's behaviour and unable
+to tell right from wrong. The pattern is clear enough to name: resize is negotiated between host and
+plug-in over a sequence of calls that cannot be inferred from the code, and reasoning about it in the
+armchair has been wrong every single time.
+
+WHAT TO DO NEXT, AND IT IS NOT ANOTHER GUESS. gb_editor_log() now records every checkSizeConstraint
+in/out and every onSize, behind the same /tmp/genbridge-log gate as the processor. Reproduce the jump
+with the gate on and read the sequence. The answer is in that log; it has never been in the source.

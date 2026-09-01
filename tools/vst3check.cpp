@@ -49,6 +49,7 @@
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
+#include "pluginterfaces/gui/iplugview.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 #include "pluginterfaces/vst/ivstmessage.h"
 #include "pluginterfaces/vst/ivsthostapplication.h"
@@ -528,6 +529,73 @@ int main(int argc, char ** argv) {
 
         factory->createInstance(processorCid, IComponent::iid, (void **)&fresh);
         fresh->initialize(nullptr);
+
+        // RESIZE MUST NOT OSCILLATE. A host negotiates a resize by proposing a rect and applying
+        // what comes back, over and over through a drag, so checkSizeConstraint() has to be a
+        // FUNCTION of the rect it is given and of nothing else.
+        //
+        // HONEST LIMIT: these guard the property, they do NOT reproduce the reported fault. CT saw
+        // the whole window jump and snap back mid-drag; the two history-dependent versions of
+        // checkSizeConstraint() that preceded this one BOTH PASS these checks, because reproducing
+        // them needs the host's real sequence of calls - how many times it asks per pointer move,
+        // which rect it proposes, and when onSize() lands between them - and that was guessed at
+        // twice, wrongly. gb_editor_log() in gbEditor.mm records the real sequence; until a log from
+        // a host that shows the fault exists, do not trust a test here to have caught it.
+        {
+            IPlugView * sizer = controller->createView(ViewType::kEditor);
+
+            if (sizer != nullptr) {
+                bool idempotent = true;
+                bool settles    = true;
+
+                // Feeding an answer straight back must return it unchanged, at every size in range.
+                for (int32 w = 380; w <= 1050; w += 7) {
+                    ViewRect once = { 0, 0, w, (int32)(w * 556 / 520) };
+
+                    sizer->checkSizeConstraint(&once);
+
+                    ViewRect twice = once;
+
+                    sizer->checkSizeConstraint(&twice);
+
+                    if ((twice.right != once.right) || (twice.bottom != once.bottom)) {
+                        idempotent = false;
+                    }
+                }
+
+                check("a constrained size is stable when fed back", idempotent);
+
+                // A DRAG OF ONE EDGE. The host proposes the pointer's rect, in which the dimension
+                // the user is NOT dragging still holds its old value - the shape that made the
+                // window snap back. Repeat it and the answer must converge, never alternate.
+                ViewRect at = { 0, 0, 520, 556 };
+
+                sizer->checkSizeConstraint(&at);
+
+                int32 prevW  = at.right;
+                int32 prevW2 = -1;
+
+                for (int step = 0; step < 40; step++) {
+                    // Bottom edge dragged to 800 and held: width stays whatever we last returned.
+                    ViewRect proposal = { 0, 0, at.right, 800 };
+
+                    sizer->checkSizeConstraint(&proposal);
+                    at = proposal;
+
+                    // Alternating between two values is the failure - A, B, A, B round a two-cycle.
+                    if ((step > 6) && (at.right == prevW2) && (at.right != prevW)) {
+                        settles = false;
+                    }
+                    prevW2 = prevW;
+                    prevW  = at.right;
+                }
+
+                check("a held drag converges instead of alternating", settles);
+                check("a held drag reaches the size asked for", (at.bottom > 790) && (at.bottom <= 800));
+
+                sizer->release();
+            }
+        }
 
         // THE CONTROLLER'S state, not the component's: the editor size lives there, and both halves
         // of it were stubs that returned kResultOk without touching the stream, so every session
