@@ -97,6 +97,20 @@ uint32_t device_latency_frames(AudioObjectID id, bool isInput);
 bool     device_open(tDeviceStream * stream, AudioObjectID id, bool isInput,
                      uint32_t firstChannel, uint32_t channels,
                      uint32_t maxFrames, tDeviceCallback callback, void * user);
+// Told when a device is plugged in, unplugged, or otherwise appears or vanishes.
+//
+// NOTHING NOTICED HOT-PLUG BEFORE THIS. The device list is enumerated when something asks for it and
+// the plug-in only asks when a parameter changes, so a USB interface switched on after a project was
+// opened stayed invisible until the user touched a control - which is precisely the case the
+// "waiting for a saved device" state exists to serve, and it would have waited for ever.
+//
+// The callback comes from a CoreAudio thread, so it must do no more than set a flag and wake
+// somebody. Registering the same `user` twice replaces the first entry rather than adding a second.
+typedef void (*tDeviceListChanged)(void * user);
+
+bool     device_watch_list(tDeviceListChanged callback, void * user);
+void     device_unwatch_list(void * user);
+
 bool     device_start(tDeviceStream * stream);
 void     device_stop(tDeviceStream * stream);
 void     device_close(tDeviceStream * stream);

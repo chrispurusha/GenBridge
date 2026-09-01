@@ -1,0 +1,71 @@
+GenBridge FINDINGS
+
+Completed work, measurements, and the traps that cost real time.
+
+
+2026-09-01  ABSENT SAVED DEVICE FELL THROUGH TO A MICROPHONE
+------------------------------------------------------------
+Reported by CT: a project whose USB interface is not plugged in came up passing microphone audio.
+
+The controller was the visible half - gbVst3.cpp setComponentState() resolved the saved UID with
+gb_slot_for_uid(), and on -1 the `if (slot >= 0)` simply skipped, leaving `device` at its member
+default of 0.0, which is slot 0, the first device with inputs. But that was only the near cause. The
+real one is that A HOST SAVES THE DEVICE PARAMETER AS A SLOT INDEX, and an index is a position in a
+list whose shape changes the moment something is unplugged - so even a correctly saved index names a
+different device on reload. Fixing only the controller default would have left that second route open.
+
+The processor was never at fault: reconfigure() already refused to open anything on an unresolved
+UID, with a comment recording why. It was being overridden by the parameter.
+
+FIX, and it is NOT the plan todo.txt carried. That plan had the controller hold a waitingForUid and
+send the processor a hold message over IConnectionPoint, with a separate signal to tell a genuine
+user choice from a host restore. None of that was needed. The processor can tell them apart on its
+own: THE FIRST DEVICE PARAMETER TO ARRIVE AFTER A STATE RESTORE IS THE HOST'S, EVERY LATER ONE IS THE
+USER'S OR AUTOMATION'S, and both of those are deliberate. deviceParamSeen.exchange(true) is the whole
+test. So the saved UID wins exactly once, and no new message, no controller state, and no second
+selector had to exist - which also keeps the "the parameter is the only selector" decision intact.
+
+Option A - adding a "none" step to the device parameter and shifting devices to 1..N - was rejected:
+it changes what a saved `device` value means, so every project already saved reopens on the wrong
+device. A worse bug than the one being fixed.
+
+NOTHING NOTICED HOT-PLUG. The device list is enumerated on demand and the plug-in only asked when a
+parameter changed, so a device switched on after the project opened stayed invisible until the user
+touched a control - and a plug-in waiting for its saved device would have waited for ever. Added
+device_watch_list() in poc/device.c: one CoreAudio kAudioHardwarePropertyDevices listener for the
+whole process, fanned out to however many instances are loaded, callbacks copied out under the lock
+and called outside it.
+
+The saved state had no device NAME, only UIDs, so a waiting panel could only have shown a CoreAudio
+UID. Added an `activename=` key - a new KEY, not a version bump, since the format already skips what
+it does not recognise.
+
+TRAP, and it cost the most time here: THE FIRST TWO VERSIONS OF THE REGRESSION TEST PASSED WITH THE
+FIX DISABLED. On this machine no audio device opens at all under vst3check - every one is already
+claimed - so getLatencySamples() reads zero whether the plug-in tried the microphone or refused to,
+and active= only changes on a successful open, so it reads the same both ways. The second version
+also swept slots 1-5, which are LATER changes and are meant to be honoured, so it was testing the
+opposite of the case. The check now asserts on the plug-in's own log, which is the one place the
+DECISION is recorded rather than the outcome, and delivers a single repeated value the way a host
+does. Verified as a discriminator: 2 failures with the fix disabled, all pass with it.
+
+
+2026-09-01  EDITOR RESIZE
+-------------------------
+checkSizeConstraint() read only the width, so a bottom-edge drag had its requested height discarded
+and recomputed from a width that had not changed - the window snapped back and fought the drag. It
+now compares both against the current size to see which edge moved. Truncations became lround(): a
+host asks repeatedly during a drag and feeds each answer back, so a truncation is a step taken every
+time, not a one-off half pixel.
+
+The view repainted only on the 30 Hz meter timer while the host moved the frame at display rate, so
+content lagged the window edge - the whole of "not as smooth as G2-Edit", which redraws on demand in
+its own loop. -setFrameSize: now redraws immediately.
+
+attached() set NSViewWidthSizable|NSViewHeightSizable AND onSize() setFrame:d, in no guaranteed
+order, so every resize passed through a frame of wrong geometry. The mask is now NSViewNotSizable and
+onSize() is the only authority - the host is required to call it.
+
+plugFrame was stored and never used. attached() now uses it to ASK for the remembered size when the
+host handed over a parent that is not that size, which is the case editor-size persistence would
+otherwise still lose. Once, not in a loop.

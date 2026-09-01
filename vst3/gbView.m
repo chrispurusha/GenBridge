@@ -169,6 +169,16 @@
     return YES;
 }
 
+// IN STEP WITH THE RESIZE. The 30 Hz timer is fine for meters and hopeless for a drag: the host moves
+// the frame at display rate, so the content arrived up to a thirtieth of a second behind the window
+// edge and visibly lagged it. G2-Edit redraws on demand inside its own loop and so never shows this;
+// repainting here is the plug-in's equivalent of that. The backend reallocates its render targets
+// from the new size on the next gb_draw_frame(), so there is nothing else to tell.
+- (void)setFrameSize:(NSSize)newSize {
+    [super setFrameSize:newSize];
+    [self redraw];
+}
+
 - (void)tick:(NSTimer *)timer {
     (void)timer;
     [self redraw];

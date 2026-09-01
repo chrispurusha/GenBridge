@@ -49,6 +49,16 @@ extern "C" {
 typedef struct {
     atomic_bool     active;
     char            deviceName[128];
+
+    // The saved device is named in the project but is not plugged in. Distinct from "nothing
+    // selected": one is a plug-in waiting for hardware it has been told to use, the other is one
+    // that has never been told anything, and answering the first with the second is what let a
+    // missing USB interface fall through to whatever sat at slot 0 - a microphone.
+    //
+    // waitingName is written once, before the flag is raised, and read only while it is up, so it
+    // needs no more protection than deviceName above.
+    atomic_int      waitingForDevice;
+    char            waitingName[128];
     atomic_int      deviceRate;
     atomic_int      deviceFrames;
     atomic_int      latencySamples;

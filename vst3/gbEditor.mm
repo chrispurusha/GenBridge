@@ -30,6 +30,7 @@
 #import <Cocoa/Cocoa.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstring>
 
 #include "pluginterfaces/base/funknown.h"
@@ -112,11 +113,33 @@ public:
 
         NSView * ours = (__bridge NSView *)view;
 
+        // NOT AUTORESIZING. With NSViewWidthSizable|NSViewHeightSizable set, AppKit applies its own
+        // proportional adjustment when the host resizes the parent and onSize() then overwrites it,
+        // in an order nobody guarantees - a frame of wrong geometry on every resize, which is a good
+        // part of what made this feel erratic next to G2-Edit. The host is required to call onSize(),
+        // so onSize() is the single authority on where this view sits.
         [ours setFrame:NSMakeRect(0.0, 0.0, width, height)];
-        [ours setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
+        [ours setAutoresizingMask:NSViewNotSizable];
         [host addSubview:ours];
 
         push_values();
+
+        // ASK, if the host did not take the remembered size. Most hosts call getSize() before
+        // attaching and hand over a parent of exactly that size, and for those this does nothing.
+        // A host that attached a default-sized parent instead is the case the size persistence was
+        // built for and would otherwise still lose it, and resizeView() is the only way to say so -
+        // which is what plugFrame has been sitting here for. Once, not in a loop: if the host
+        // declines, the view stays the size it was given.
+        if (plugFrame != nullptr) {
+            NSRect parent = [host bounds];
+
+            if (  (fabs(parent.size.width - width) > 1.0)
+               || (fabs(parent.size.height - height) > 1.0)) {
+                ViewRect want = { 0, 0, (int32)lround(width), (int32)lround(height) };
+
+                plugFrame->resizeView(this, &want);
+            }
+        }
 
         return kResultOk;
     }
@@ -188,12 +211,25 @@ public:
 
     // The panel is a fixed logical canvas that simply scales, so any size works as long as the
     // aspect is kept - otherwise the layout stretches and the text goes with it.
+    //
+    // DRIVEN BY WHICHEVER EDGE THE USER ACTUALLY MOVED, which is the whole of a bug worth
+    // remembering. This used to read the width and nothing else, so dragging the BOTTOM edge had its
+    // requested height thrown away and replaced by one derived from a width that had not changed:
+    // the window snapped straight back and fought the drag vertically. Comparing both against the
+    // size we are currently at says which edge moved; a corner drag moves both and either answer is
+    // right, so width wins the tie by being the one tested second.
     tresult PLUGIN_API checkSizeConstraint(ViewRect * rect) SMTG_OVERRIDE {
         if (rect == nullptr) {
             return kInvalidArgument;
         }
 
-        double wanted = (double)(rect->right - rect->left);
+        double wantW  = (double)(rect->right - rect->left);
+        double wantH  = (double)(rect->bottom - rect->top);
+        double aspect = GB_CANVAS_H / GB_CANVAS_W;
+
+        // The height converted into the width that would produce it, so the clamp below has one
+        // number to work on however the drag arrived.
+        double wanted = (fabs(wantH - height) > fabs(wantW - width)) ? (wantH / aspect) : wantW;
 
         if (wanted < (GB_CANVAS_W * 0.75)) {
             wanted = GB_CANVAS_W * 0.75;
@@ -201,8 +237,11 @@ public:
             wanted = GB_CANVAS_W * 2.0;
         }
 
-        rect->right  = rect->left + (int32)wanted;
-        rect->bottom = rect->top + (int32)(wanted * (GB_CANVAS_H / GB_CANVAS_W));
+        // ROUNDED, NOT TRUNCATED. A host asks this repeatedly as a drag proceeds and feeds each
+        // answer back in, so a truncation is not a one-off half-pixel - it is a step the window
+        // takes every time it is asked, and the size creeps a pixel at a time.
+        rect->right  = rect->left + (int32)lround(wanted);
+        rect->bottom = rect->top + (int32)lround(wanted * aspect);
 
         return kResultTrue;
     }

@@ -425,6 +425,11 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
     } else if ((status != NULL) && atomic_load(&status->active)) {
         set_rgb_colour((tRgb){ 0.45, 0.75, 0.50 });
         snprintf(buffer, sizeof(buffer), "capturing %s", status->deviceName);
+    } else if ((status != NULL) && (atomic_load(&status->waitingForDevice) != 0)) {
+        // NAMED, not just "no device". The whole point of the wait is that the plug-in knows exactly
+        // what it is waiting for, and a user who sees the name knows what to plug in.
+        set_rgb_colour((tRgb){ 0.85, 0.60, 0.25 });
+        snprintf(buffer, sizeof(buffer), "waiting for %s", status->waitingName);
     } else {
         // Amber rather than grey: a plug-in that has failed to open a device looks exactly like one
         // whose device happens to be silent, and the two want very different responses.
@@ -439,7 +444,17 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
     render_text(mainArea, (tRectangle){ { 20.0, 38.0 }, { 0.0, 11.0 } }, buffer);
 
     // ---- the three steppers ----
-    gb_input_device_name(gb_device_slot(gDevice), buffer, sizeof(buffer));
+    //
+    // THE SAVED DEVICE WHILE WAITING FOR IT, not whatever the parameter's slot index happens to name
+    // now. The index was recorded when the device list had a different shape, so with the device
+    // unplugged it points at a stranger - and the row would calmly name a microphone underneath a
+    // header saying we are waiting for an interface. The processor is honouring the saved device, so
+    // the row shows the saved device.
+    if ((status != NULL) && (atomic_load(&status->waitingForDevice) != 0)) {
+        snprintf(buffer, sizeof(buffer), "%s", status->waitingName);
+    } else {
+        gb_input_device_name(gb_device_slot(gDevice), buffer, sizeof(buffer));
+    }
     stepper(0, "Device", buffer);
 
     snprintf(buffer, sizeof(buffer), "%.0f Hz",

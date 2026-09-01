@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <pthread.h>
 #include <unistd.h>
 
 #pragma clang diagnostic push
@@ -250,6 +251,118 @@ uint32_t device_enumerate(tDeviceInfo * list, uint32_t max) {
     free(ids);
 
     return found;
+}
+
+// ---- Hot-plug ----------------------------------------------------------------------------------
+//
+// ONE CoreAudio LISTENER FOR THE WHOLE PROCESS, fanned out to however many plug-in instances are
+// loaded. A listener per instance would work too, but a host with a dozen GenBridges in a set would
+// then hold a dozen registrations for one property, and CoreAudio would call all of them anyway.
+
+#define DEVICE_WATCH_MAX    (64)
+
+typedef struct {
+    tDeviceListChanged callback;
+    void *             user;
+} tDeviceWatcher;
+
+static tDeviceWatcher  gWatchers[DEVICE_WATCH_MAX];
+static uint32_t        gWatcherCount    = 0;
+static bool            gListenerFitted  = false;
+static pthread_mutex_t gWatchLock       = PTHREAD_MUTEX_INITIALIZER;
+
+static AudioObjectPropertyAddress device_list_address(void) {
+    AudioObjectPropertyAddress address = { kAudioHardwarePropertyDevices,
+                                           kAudioObjectPropertyScopeGlobal,
+                                           kAudioObjectPropertyElementMain };
+
+    return address;
+}
+
+static OSStatus device_list_changed(AudioObjectID id, UInt32 count,
+                                    const AudioObjectPropertyAddress * addresses, void * user) {
+    (void)id;
+    (void)count;
+    (void)addresses;
+    (void)user;
+
+    // COPIED OUT UNDER THE LOCK AND CALLED OUTSIDE IT. A callback is entitled to unregister itself,
+    // which would deadlock on a mutex still held, and is entitled to take its own locks, which is
+    // how two locks get taken in two orders by two threads.
+    tDeviceWatcher snapshot[DEVICE_WATCH_MAX];
+    uint32_t       taken = 0;
+
+    pthread_mutex_lock(&gWatchLock);
+
+    for (uint32_t i = 0; i < gWatcherCount; i++) {
+        snapshot[taken++] = gWatchers[i];
+    }
+    pthread_mutex_unlock(&gWatchLock);
+
+    for (uint32_t i = 0; i < taken; i++) {
+        if (snapshot[i].callback != NULL) {
+            snapshot[i].callback(snapshot[i].user);
+        }
+    }
+
+    return noErr;
+}
+
+bool device_watch_list(tDeviceListChanged callback, void * user) {
+    if (callback == NULL) {
+        return false;
+    }
+    bool ok = true;
+
+    pthread_mutex_lock(&gWatchLock);
+
+    uint32_t at = gWatcherCount;
+
+    for (uint32_t i = 0; i < gWatcherCount; i++) {
+        if (gWatchers[i].user == user) {
+            at = i;
+            break;
+        }
+    }
+
+    if (at == DEVICE_WATCH_MAX) {
+        ok = false;
+    } else {
+        gWatchers[at].callback = callback;
+        gWatchers[at].user     = user;
+
+        if (at == gWatcherCount) {
+            gWatcherCount++;
+        }
+
+        if (!gListenerFitted) {
+            AudioObjectPropertyAddress address = device_list_address();
+
+            gListenerFitted = (AudioObjectAddPropertyListener(kAudioObjectSystemObject, &address,
+                                                              device_list_changed, NULL) == noErr);
+            ok              = gListenerFitted;
+        }
+    }
+    pthread_mutex_unlock(&gWatchLock);
+
+    return ok;
+}
+
+void device_unwatch_list(void * user) {
+    pthread_mutex_lock(&gWatchLock);
+
+    for (uint32_t i = 0; i < gWatcherCount; i++) {
+        if (gWatchers[i].user == user) {
+            gWatchers[i] = gWatchers[gWatcherCount - 1];
+            gWatcherCount--;
+            break;
+        }
+    }
+
+    // The CoreAudio registration is DELIBERATELY LEFT IN PLACE once the last watcher goes. A host
+    // unloads and reloads plug-ins freely, so removing and refitting it would be constant churn for
+    // a callback that costs nothing when the table is empty.
+    pthread_mutex_unlock(&gWatchLock);
 }
 
 bool device_find(const char * needle, bool needInput, tDeviceInfo * found) {

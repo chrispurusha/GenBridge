@@ -3,6 +3,11 @@ GenBridge TO TEST
 Finished code that is built but not yet checked against a real host or real hardware.
 Confirmed -> delete the line. Check failed -> move it to todo.txt.
 
-- Editor stops repainting when it cannot be seen (gbView.m): timer started/stopped from viewDidMoveToWindow, viewDidHide/Unhide and NSWindowDidChangeOcclusionStateNotification. The start/stop plumbing was traced under tools/vst3host; the OCCLUSION TRANSITION itself was never scripted - minimise the plug-in window in a real host and watch Activity Monitor
-- Editor size remembered across sessions (controller getState/setState, gbVst3.cpp): round-trips in tools/vst3check, but hosts differ over WHEN they call controller setState/getState and some manage plug-in window size themselves - needs a real Ableton session, closed and reopened
-- editorView use-after-free fixed (gbVst3.cpp editor_gone callback): the close path runs clean under tools/vst3host, but the crash it prevents was in the status/parameter-notify paths after the editor closes - open the editor, close it, leave the set running and change a device
+- Absent saved device now waits instead of opening slot 0 - verified in vst3check against the plug-in's log, but NEVER on real hardware: open a project that uses the USB interface with it unplugged, confirm silence and a "waiting for <name>" header, then plug it in and confirm it connects on its own without touching a control
+- Hot-plug watcher (device_watch_list, poc/device.c) - never exercised with a device actually appearing or vanishing; also confirm several GenBridge instances in one set all react
+- Panel "waiting for <name>" header and the Device row showing the saved name - the code path was never rendered, since no absent-device state was reachable in vst3host
+- Editor resize: bottom-edge drag should no longer fight back, and the content should track the window edge - only checked at fixed sizes (520x556, 640x684, 700x748) via vst3host, never with a live drag
+- attached() asking for the remembered size through plugFrame->resizeView() - does nothing in a host that honours getSize(), so it needs a host that does not
+- Editor stops repainting when it cannot be seen (gbView.m): start/stop plumbing traced under vst3host, but the OCCLUSION TRANSITION itself was never scripted - minimise the plug-in window in a real host and watch Activity Monitor
+- Editor size remembered across sessions - round-trips in vst3check, but hosts differ over when they call controller setState/getState and some manage window size themselves; needs a real Ableton session closed and reopened
+- editorView use-after-free fix (editor_gone callback) - close path runs clean under vst3host, but the crash it prevents was in the status/parameter-notify paths after the editor closes; open the editor, close it, leave the set running and change a device

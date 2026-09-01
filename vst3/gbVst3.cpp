@@ -490,10 +490,23 @@ public:
             context->queryInterface(IHostApplication::iid, (void **)&host);
         }
 
+        // Hot-plug. Nothing noticed a device appearing before this, so a plug-in waiting for a saved
+        // interface would have waited until the user touched a control - see device_watch_list().
+        device_watch_list(device_list_changed, this);
+
         return kResultOk;
     }
 
+    // From a CoreAudio thread: drop the cached list and wake the worker, nothing more.
+    static void device_list_changed(void * user) {
+        GenBridgePlugin * self = (GenBridgePlugin *)user;
+
+        gb_device_list_invalidate();
+        self->request_device();
+    }
+
     tresult PLUGIN_API terminate(void) SMTG_OVERRIDE {
+        device_unwatch_list(this);
         close_capture();
 
         if (host != nullptr) {
@@ -676,6 +689,20 @@ public:
         std::string blob = "GENBRIDGE3\n";
 
         blob += "active=" + deviceSelector + "\n";
+
+        // A NEW KEY, not a version bump: the format skips what it does not recognise, so an older
+        // build reading this simply does not get a name to show.
+        {
+            tGbStatus * status = gb_status(statusSlot);
+
+            if ((status != NULL) && (status->deviceName[0] != '\0')) {
+                savedDeviceName = status->deviceName;
+            }
+
+            if (!savedDeviceName.empty()) {
+                blob += "activename=" + savedDeviceName + "\n";
+            }
+        }
 
         // BY NAME, not by index. The MIDI list shifts whenever a device is powered on or off, so an
         // index saved on Monday names something else on Tuesday - the same reasoning that keeps the
@@ -1417,6 +1444,17 @@ private:
                 int wanted = gb_device_slot(value);
 
                 if (wanted != wantedDevice.load()) {
+                    // THE FIRST ONE AFTER A RESTORE IS THE HOST'S, NOT THE USER'S, and that
+                    // distinction is the whole fix. A host saves this parameter as a SLOT INDEX, and
+                    // an index is a position in a list that changes shape the moment a device is
+                    // unplugged - so the value restored with the project names whatever has moved
+                    // into that position, which on this machine is a Continuity microphone. Honour
+                    // the saved UID for that first value and let every later change through: a
+                    // later change can only have come from the user or from automation, and both
+                    // are deliberate.
+                    if (deviceParamSeen.exchange(true) == true) {
+                        savedDevicePending.store(false);
+                    }
                     wantedDevice.store(wanted);
                     request_device();       // signals the worker; opens nothing on this thread
                 }
@@ -1537,6 +1575,23 @@ private:
         wake_worker();
     }
 
+    // The panel reads this out of the shared block rather than being messaged, like every other live
+    // figure - see gbStatus.h.
+    void publish_waiting(bool waiting, const char * name) {
+        tGbStatus * status = gb_status(statusSlot);
+
+        if (status == NULL) {
+            return;
+        }
+
+        // NAME FIRST, FLAG SECOND. The panel only reads the name while the flag is up, so writing
+        // them in this order means it can never show "waiting for" against a stale name.
+        if (waiting && (name != NULL)) {
+            snprintf(status->waitingName, sizeof(status->waitingName), "%s", name);
+        }
+        atomic_store(&status->waitingForDevice, waiting ? 1 : 0);
+    }
+
     static void * worker_entry(void * arg) {
         ((GenBridgePlugin *)arg)->worker_loop();
         return nullptr;
@@ -1606,7 +1661,34 @@ private:
         // The UID is still stored, and still keys the per-device settings - it is simply no longer
         // allowed to decide WHICH device. One selector, one answer, and the panel cannot be wrong
         // about it.
-        if (index >= 0) {
+        // THE SAVED DEVICE FIRST while a restore is still pending, whatever slot the parameter
+        // names. Resolving it also puts the parameter right, so the panel and the host stop
+        // disagreeing with what is actually open.
+        if (savedDevicePending.load() && !deviceSelector.empty()) {
+            found = device_find(deviceSelector.c_str(), true, &chosen);
+
+            if (found) {
+                savedDevicePending.store(false);
+                publish_waiting(false, nullptr);
+
+                int slot = gb_slot_for_uid(chosen.uid);
+
+                if (slot >= 0) {
+                    wantedDevice.store(slot);
+                    index = slot;
+                    send_message("gbDeviceSlot", slot);
+                }
+                log_line("saved device '%s' present - opening it", chosen.name);
+            } else {
+                // AND NOTHING ELSE IS OPENED. Falling back to a slot index here is exactly what put
+                // a microphone into a project that asked for a USB interface.
+                publish_waiting(true, savedDeviceName.empty() ? deviceSelector.c_str()
+                                                              : savedDeviceName.c_str());
+                log_line("saved device '%s' not present - waiting for it",
+                         savedDeviceName.empty() ? deviceSelector.c_str() : savedDeviceName.c_str());
+            }
+        } else if (index >= 0) {
+            publish_waiting(false, nullptr);
             found = resolve_slot(list, count, index, &chosen);
         }
 
@@ -2348,6 +2430,13 @@ private:
         rememberedCount = 0;
         measuredCount   = 0;
         deviceSelector.clear();
+        savedDeviceName.clear();
+
+        // A RESTORE IS NOT A CHOICE. Everything after this point until the user actually picks
+        // something is the project being reopened, and the saved UID - not the saved slot index -
+        // is what says which device that was. See the device parameter in process() and reconfigure().
+        savedDevicePending.store(false);
+        deviceParamSeen.store(false);
 
         // Defaults for a blob that predates these keys, so loading an older session zeroes the
         // correction rather than leaving whatever the previous project in this instance had. The
@@ -2377,6 +2466,11 @@ private:
                 }
             } else if (line.compare(0, 7, "midich=") == 0) {
                 midiChannel.store(atoi(line.substr(7).c_str()));
+            } else if (line.compare(0, 11, "activename=") == 0) {
+                // Written purely so the panel can NAME what it is waiting for. The device is absent
+                // by definition in that state, so its name cannot be looked up - a UID is all there
+                // would otherwise be to show, and a CoreAudio UID is not something to hand a user.
+                savedDeviceName = line.substr(11);
             } else if (line.compare(0, 7, "active=") == 0) {
                 deviceSelector = line.substr(7);
             } else if (line.compare(0, 4, "dev=") == 0) {
@@ -2392,6 +2486,11 @@ private:
             // rather than misread. meas= carried SAMPLES where hw= carries milliseconds, so reusing
             // the name would have loaded a 221-sample reading as 221 ms.
         }
+
+        // A device was named in the project, so it - and not a slot index recorded when the device
+        // list had a different shape - decides what gets opened, until it either turns up or the
+        // user chooses something else.
+        savedDevicePending.store(!deviceSelector.empty());
 
         return true;
     }
@@ -2561,6 +2660,9 @@ private:
     std::atomic<int>   resyncs{0};       // how often the ring had to be snapped back; 0 is healthy
     std::atomic<bool>  workerQuit{false};
     std::atomic<int>   wantedDevice{-1};
+    std::atomic<bool>  savedDevicePending{false};    // a project named a device; honour it, not a slot
+    std::atomic<bool>  deviceParamSeen{false};       // the host's restored value has been and gone
+    std::string        savedDeviceName;              // for the panel, since an absent device has no name
     std::atomic<double> wantedRate{0.0};
     std::atomic<int>   wantedFrames{0};
     std::atomic<int>   wantedChannels{0};
@@ -2690,6 +2792,25 @@ public:
 
                 if (editorView != nullptr) {
                     gb_editor_set_status_slot(editorView, statusSlot);
+                }
+            }
+        } else if (strcmp(id, "gbDeviceSlot") == 0) {
+            // The processor opened the device the PROJECT named, which is not the slot the restored
+            // parameter pointed at - the list had a different shape when that index was saved. Put
+            // the parameter right so the panel, the host and the open device finally agree.
+            int64 slot = -1;
+
+            if ((message->getAttributes()->getInt("value", slot) == kResultOk) && (slot >= 0)) {
+                device = gb_device_normalized((int)slot);
+
+                if (componentHandler != nullptr) {
+                    componentHandler->beginEdit(kParamDevice);
+                    componentHandler->performEdit(kParamDevice, device);
+                    componentHandler->endEdit(kParamDevice);
+                }
+
+                if (editorView != nullptr) {
+                    gb_editor_refresh_values(editorView);
                 }
             }
         } else if (strcmp(id, "gbOffset") == 0) {

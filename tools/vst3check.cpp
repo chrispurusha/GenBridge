@@ -561,6 +561,119 @@ int main(int argc, char ** argv) {
                   afterAbsurd.buf.find("editor=700,748") != std::string::npos);
         }
 
+        // THE MICROPHONE BUG. A project naming a device that is not plugged in must open NOTHING.
+        // The host restores its saved DEVICE PARAMETER too, and that is a slot INDEX recorded when
+        // the device list had a different shape - so slot 0 arrives here exactly as a host delivers
+        // it, and slot 0 on a Mac is generally a built-in or Continuity microphone.
+        //
+        // ASSERTED ON THE PLUG-IN'S OWN LOG, which is not where a check would rather look. The
+        // obvious signals do not work: getLatencySamples() only moves when a device actually OPENS,
+        // and on a developer machine every device is already claimed by something, so it reads zero
+        // whether the plug-in tried the microphone or refused to. active= only changes on a
+        // successful open, for the same reason. The log is the one place the plug-in records the
+        // decision rather than the outcome, and the decision is what is on trial.
+        //
+        // ONE parameter value, repeated. A host restoring a project sends one, and it is precisely
+        // the FIRST one after a state restore that must not be believed; later changes are the user
+        // choosing, and are meant to be honoured.
+        {
+            bool hadGate = (access("/tmp/genbridge-log", F_OK) == 0);
+
+            if (!hadGate) {
+                FILE * gate = fopen("/tmp/genbridge-log", "w");
+
+                if (gate != nullptr) {
+                    fclose(gate);
+                }
+            }
+            FILE * truncate = fopen("/tmp/genbridge.log", "w");
+
+            if (truncate != nullptr) {
+                fclose(truncate);
+            }
+
+            IComponent * absentee = nullptr;
+
+            factory->createInstance(processorCid, IComponent::iid, (void **)&absentee);
+            absentee->initialize(nullptr);
+
+            MemStream absent;
+
+            absent.buf = "GENBRIDGE3\nactive=NO-SUCH-DEVICE-UID-12345\nactivename=Phantom Interface\n";
+            absentee->setState(&absent);
+
+            IAudioProcessor * ap = nullptr;
+
+            absentee->queryInterface(IAudioProcessor::iid, (void **)&ap);
+            absentee->setActive(true);
+
+            float   left[128]   = { 0.0f };
+            float   right[128]  = { 0.0f };
+            float * channels[2] = { left, right };
+
+            for (int block = 0; block < 6; block++) {
+                OneChange       toSlotZero(0, 0.0);
+                ProcessData     data;
+                AudioBusBuffers outBus;
+
+                memset(&data, 0, sizeof(data));
+                memset(&outBus, 0, sizeof(outBus));
+
+                outBus.numChannels         = 2;
+                outBus.channelBuffers32    = channels;
+                data.numSamples            = 128;
+                data.numOutputs            = 1;
+                data.outputs               = &outBus;
+                data.symbolicSampleSize    = kSample32;
+                data.processMode           = kRealtime;
+                data.inputParameterChanges = &toSlotZero;
+
+                ap->process(data);
+
+                for (int k = 0; k < 4; k++) {
+                    usleep(100000);
+                }
+            }
+
+            std::string log;
+            FILE *      readback = fopen("/tmp/genbridge.log", "r");
+
+            if (readback != nullptr) {
+                char line[512];
+
+                while (fgets(line, (int)sizeof(line), readback) != nullptr) {
+                    log += line;
+                }
+                fclose(readback);
+            }
+
+            check("an absent saved device is waited for",
+                  log.find("not present - waiting for it") != std::string::npos);
+
+            // The discriminator. Before the fix this read "slot 0 -> 'Chris' Phone Microphone'" -
+            // the plug-in resolving the stale index and going on to open whatever it named.
+            check("an absent saved device never resolves a slot",
+                  log.find("slot 0 -> '") == std::string::npos);
+
+            MemStream afterAbsent;
+
+            absentee->getState(&afterAbsent);
+
+            check("an absent saved device is not replaced by slot 0",
+                  afterAbsent.buf.find("active=NO-SUCH-DEVICE-UID-12345") != std::string::npos);
+            check("the saved device name is kept for the panel",
+                  afterAbsent.buf.find("activename=Phantom Interface") != std::string::npos);
+
+            absentee->setActive(false);
+            ap->release();
+            absentee->terminate();
+            absentee->release();
+
+            if (!hadGate) {
+                unlink("/tmp/genbridge-log");    // left exactly as it was found
+            }
+        }
+
         check("loads state with comma-bearing UIDs", fresh->setState(&tricky) == kResultOk);
 
         MemStream saved;
