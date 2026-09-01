@@ -645,7 +645,12 @@ int main(int argc, char ** argv) {
         // the FIRST one after a state restore that must not be believed; later changes are the user
         // choosing, and are meant to be honoured.
         {
-            bool hadGate = (access("/tmp/genbridge-log", F_OK) == 0);
+            // THE LOG IS NOT OURS TO CLEAR. An earlier version of this opened it "w" - which would
+            // have wiped a resize capture in progress, and capturing one is exactly what the notes
+            // tell the next person to do. Take the length now and read only what gets appended.
+            bool        hadGate  = (access("/tmp/genbridge-log", F_OK) == 0);
+            bool        hadLog   = (access("/tmp/genbridge.log", F_OK) == 0);
+            long        logFrom  = 0;
 
             if (!hadGate) {
                 FILE * gate = fopen("/tmp/genbridge-log", "w");
@@ -654,10 +659,14 @@ int main(int argc, char ** argv) {
                     fclose(gate);
                 }
             }
-            FILE * truncate = fopen("/tmp/genbridge.log", "w");
+            {
+                FILE * existing = fopen("/tmp/genbridge.log", "r");
 
-            if (truncate != nullptr) {
-                fclose(truncate);
+                if (existing != nullptr) {
+                    fseek(existing, 0, SEEK_END);
+                    logFrom = ftell(existing);
+                    fclose(existing);
+                }
             }
 
             IComponent * absentee = nullptr;
@@ -709,6 +718,8 @@ int main(int argc, char ** argv) {
             if (readback != nullptr) {
                 char line[512];
 
+                fseek(readback, logFrom, SEEK_SET);    // only what this instance appended
+
                 while (fgets(line, (int)sizeof(line), readback) != nullptr) {
                     log += line;
                 }
@@ -737,8 +748,14 @@ int main(int argc, char ** argv) {
             absentee->terminate();
             absentee->release();
 
+            // Left exactly as it was found, log included: a gate this did not set is not this to
+            // clear, and a log file that did not exist before should not exist after.
             if (!hadGate) {
-                unlink("/tmp/genbridge-log");    // left exactly as it was found
+                unlink("/tmp/genbridge-log");
+            }
+
+            if (!hadLog) {
+                unlink("/tmp/genbridge.log");
             }
         }
 

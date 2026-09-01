@@ -4,5 +4,4 @@ Things to do. ONE LINE PER ITEM - keep it that way.
 Measurements, reasoning and completed-work narrative go in findings.txt, NOT here.
 Built-but-unchecked work goes in to-test.txt.
 
-(Nothing outstanding - the resize and device-selection items were done on 2026-09-01, see
-findings.txt for what was built and to-test.txt for what still needs a real host.)
+- FX variation doesn't allow for recording on that track in Ableton. One of the attributes we're presenting to host maybe wrong?
