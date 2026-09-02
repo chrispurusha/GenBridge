@@ -3,6 +3,75 @@ GenBridge FINDINGS
 Completed work, measurements, and the traps that cost real time.
 
 
+2026-09-02  WHAT A DEVICE DROP-DOWN WOULD ACTUALLY COST
+------------------------------------------------------------
+gbDraw.c's own comment says steppers were chosen because "pulling it in means linking the popup,
+menu-bar and click-region machinery for three settings". THAT IS NO LONGER TRUE and the comment
+should be corrected by whoever does this work:
+
+  - SynthLib/src/contextMenu.c includes NOTHING beyond synthlibDefs.h, geometry.h, utilsGraphics.h,
+    synthlibHost.h, synthlibGlobals.h and utils.h - all of which gbDraw.c already includes. No popup
+    coordinator, no menu bar, no click-region registry.
+  - clickRegion.c and inputState.c are ALREADY in do-vst3's source list.
+  - So the build cost is one line in do-vst3: SynthLib/src/contextMenu.c.
+
+Two things the steppers never needed, and they are the real work:
+
+  - synthlib_host_init() is never called anywhere in the plug-in. contextMenu.c calls
+    synthlib_host_mouse_coord() rather than declaring its own extern, so the host struct
+    (synthlibHost.h) has to be filled in. synthlib_request_redraw() is already stubbed in
+    gbAppStubs.c, so only the mouse-coord half is missing.
+  - gbView.m handles mouseDown: and mouseDragged: ONLY - there is no mouseMoved: and no
+    NSTrackingArea, because a stepper never needed to know where the pointer was. Without one the
+    menu still opens and its items are still clickable; they just never highlight under the cursor.
+    Adding tracking is about ten lines and the existing 30 Hz timer already covers the repaint, but
+    it touches the editor view, which is where every unresolved resize/occlusion caveat in
+    to-test.txt already lives.
+
+The menu itself is small: tMenuItem is {label, colour, action(int index), ...}, so a flat device list
+needs no submenus, no flyouts and no hover-dwell timer. Labels come from gb_input_device_name(), and
+the action records the chosen slot for gb_draw_click() to return as its request.
+
+Worth doing for rate and frames too, for the reason the debounce already addresses from the other
+end: a stepper walks THROUGH every value on the way to the one you want.
+
+HOW LONG A LIST FITS, since a scrolling menu was raised as a possible need. contextMenu.c has NO
+scrolling of any kind, and clamp_menu_to_screen() only MOVES a menu up to fit - when the menu is
+taller than the canvas it lands at y=0 and the surplus runs off the bottom, undrawn and unreachable.
+So the ceiling is real rather than merely ugly. The arithmetic:
+
+  cell height  = STANDARD_TEXT_HEIGHT + 5*2 = 22
+  usable       = GB_CANVAS_H 556 - SCROLLBAR_WIDTH ~= 541
+  one column   = ~24 items
+  two columns  = ~48 items
+
+open_context_menu() already takes a `columns` argument, so multi-column costs nothing to use. Two is
+the practical maximum at this canvas width: menu_cell_width() sizes to the widest label and a name
+like "CalDigit Thunderbolt 3 Audio" runs about 180px at 12px text, so two columns is ~400 of the 520
+available and three would not fit without capping cellWidth and truncating names. The editor is
+resizable, so a taller window only helps.
+
+BUT DO NOT SIZE THIS AGAINST THIS RIG. The first draft of this note reasoned from 7 input-capable
+devices here and DEVICE_MAX's 64, and concluded multi-column was enough - CT's objection was that
+nobody can predict how many inputs a studio has, and that is right. Dante, AVB, aggregates and
+virtual drivers all enumerate as CoreAudio devices, and 64 is a constant WE chose, not a fact about
+the world: device_enumerate()'s loop is `(i < count) && (found < max)`, so past 64 it simply stops,
+silently.
+
+That turns the ceiling from cosmetic into a REGRESSION RISK, and it is the thing to weigh before
+replacing the stepper at all. Whatever else is wrong with a stepper, it can reach every entry in the
+list. A menu that cannot show everything makes the tail of the list unreachable - so swapping one for
+the other would trade a slow control for an incomplete one.
+
+So if the drop-down is built, an overflow strategy is IN SCOPE, not a later nicety. In cost order:
+  - `columns` costs nothing and buys ~48. Use it regardless, but do not treat it as the answer.
+  - Capping cellWidth and truncating names buys a third column, ~72. Still an arbitrary ceiling.
+  - Scrolling in contextMenu.c has no ceiling. It is a change to SHARED code, so G2-Edit and
+    SynthEdit inherit it - which is an argument FOR doing it there rather than against.
+  - Or keep the arrows ALONGSIDE the menu, so nothing is ever unreachable however long the list runs.
+    Cheapest way to make the regression impossible, and it composes with any of the above.
+
+
 2026-09-02  RECORDING THE FX ON ITS OWN ABLETON TRACK: NOT AN ATTRIBUTE
 ------------------------------------------------------------
 The todo suspected an attribute presented to the host. Three were checked and eliminated.
