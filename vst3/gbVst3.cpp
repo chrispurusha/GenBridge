@@ -2290,6 +2290,10 @@ private:
             running = false;
         }
 
+        observedMaxFrames = 0;
+        observedFrames = 0;
+        retuneState.store(eRetuneWatching);
+
         free(pullBuffer);
         free(interleaved);
         free(widen);
