@@ -6,6 +6,8 @@ Built-but-unchecked work goes in to-test.txt.
 
 Bugs
 
+- Tell the host kParamTitlesChanged when the device list changes - hot-plug currently updates our cache only, so the host's generic panel keeps the old names; see findings 2026-09-02
+- Expose a kIsBypass parameter, as JUCE always does - nothing is broken without one, but the host should be able to hand bypass to us
 - device_enumerate() silently stops at DEVICE_MAX (64) and the device parameter is normalised across that same constant, so raising it re-scales every saved project - see findings 2026-09-02
 - FX output can't be recorded on its own Ableton audio track - attributes now cleared as the cause (see findings 2026-09-02), so the question is whether to document the routing workaround or build a virtual driver
 - On Cubase, helix audio is playing when Kronox is selected. Says capturing Helix, but Kronos actually selected. Seems OK on Ableton as-is.

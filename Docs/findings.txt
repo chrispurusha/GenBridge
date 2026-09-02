@@ -3,6 +3,41 @@ GenBridge FINDINGS
 Completed work, measurements, and the traps that cost real time.
 
 
+2026-09-02  ARCHITECTURAL REVIEW AGAINST JUCE - WHAT IT DOES THAT WE DO NOT
+------------------------------------------------------------
+Read for MECHANISM only. JUCE 8 is AGPLv3 (see the note in G2-Edit's vst3/plugin-gui-notes.md), so
+nothing may be copied into this GPLv3 project - ideas are not copyrightable, expression is.
+
+ALREADY COVERED, checked rather than assumed:
+  - ParameterInfo::kIsList is set on every list parameter (device, rate, frames, mode, midi dest),
+    so a host's own generic panel already renders them as menus rather than sliders.
+  - IMidiMapping on the instrument, the two-class factory, OnlyRT, kInfiniteTail - all present.
+
+GAP 1 - THE HOST IS NEVER TOLD THE DEVICE NAMES CHANGED. This is the real find.
+  device_list_changed() (gbVst3.cpp:530) fires from a CoreAudio thread on hot-plug and does two
+  things: drops OUR cached list and wakes the worker. It never tells the HOST. But the device
+  parameter's displayed strings ARE the device names, and a host caches those - so plug an interface
+  in or pull one out and the host's generic panel, and any automation lane showing value names, go on
+  listing the devices that were there when the plug-in loaded.
+  JUCE's answer is Vst::kParamTitlesChanged (juce_audio_plugin_client_VST3.cpp:1514): when a
+  parameter's display strings change it re-reads them and calls restartComponent with that flag. We
+  already call restartComponent for kLatencyChanged, so the machinery is in place - it is one more
+  flag from the worker after a device-list change.
+
+GAP 2 - NO BYPASS PARAMETER. JUCE always exposes one flagged kIsBypass; we expose none. For an Fx a
+  host will bypass us its own way, so nothing is broken today, but a plug-in that declares its bypass
+  lets the host hand the decision to the plug-in and keep it in automation. Cheap, and the VST3
+  guidance asks for it.
+
+CONSIDERED AND JUDGED NOT TO APPLY, so nobody re-raises them:
+  - ScopedNoDenormals. JUCE sets FTZ/DAZ around every process() call and we set nothing. But the
+    denormal hazard is IIR feedback decaying toward zero, and this plug-in's audio path is a 64-tap
+    FIR resampler and a gain multiply - fed exact silence it produces exact zeros. The PI controller
+    in drift.c works in ppm-scale doubles that never approach denormal range. Cheap insurance if ever
+    wanted, but it is insurance against a hazard this DSP does not have.
+  - JUCE's AudioIODeviceCombiner as a model for the bridge itself: it has no drift compensation at
+    all (see reference note) and xruns on a fixed schedule. We are ahead of it there.
+
 2026-09-02  THE SELECTOR IS THE MOST REUSABLE THING HERE - WHAT WOULD GO TO SYNTHLIB
 ------------------------------------------------------------
 CT's call: adapt this into the siblings, and push whatever is generic down into SynthLib. NOT done in
