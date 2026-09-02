@@ -40,6 +40,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <string>
+#include <vector>
+#include <CoreAudio/CoreAudio.h>
 #include <dlfcn.h>
 #include <unistd.h>
 
@@ -285,6 +287,100 @@ public:
     }
     tresult PLUGIN_API addPoint(int32, ParamValue, int32 &) override { return kResultFalse; }
 };
+
+// THE UID OF A DEVICE THAT IS ACTUALLY ON THIS MACHINE, looked up by the display name the plug-in
+// itself reports for a slot.
+//
+// The saved state used to name a hardcoded Line 6 Helix. That is a real device the author had
+// plugged in, and the check passed for exactly as long as it stayed plugged in - after which the
+// harness reported a product failure every run for an absent cable. Worse, it reported it for the
+// one thing it was built to catch: with the device gone the plug-in correctly waits rather than
+// resolving, so the test could no longer distinguish correct waiting from the silent default it
+// exists to detect.
+//
+// Matching on NAME rather than replicating the plug-in's slot ordering is deliberate: the ordering
+// is the plug-in's business and duplicating it here would be a second copy to keep in step, which
+// is the bug class the plug-in's own notes already record twice.
+static std::string uid_for_device_name(const std::string & wanted) {
+    AudioObjectPropertyAddress listAddress = { kAudioHardwarePropertyDevices,
+                                               kAudioObjectPropertyScopeGlobal,
+                                               kAudioObjectPropertyElementMain };
+    UInt32                     size        = 0;
+
+    if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &listAddress, 0, nullptr, &size) != noErr) {
+        return {};
+    }
+    std::vector<AudioObjectID> ids(size / sizeof(AudioObjectID));
+
+    if (ids.empty()) {
+        return {};
+    }
+
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &listAddress, 0, nullptr, &size, ids.data()) != noErr) {
+        return {};
+    }
+
+    for (AudioObjectID id : ids) {
+        CFStringRef                name        = nullptr;
+        UInt32                     nameSize    = sizeof(name);
+        AudioObjectPropertyAddress nameAddress = { kAudioObjectPropertyName,
+                                                   kAudioObjectPropertyScopeGlobal,
+                                                   kAudioObjectPropertyElementMain };
+
+        if (AudioObjectGetPropertyData(id, &nameAddress, 0, nullptr, &nameSize, &name) != noErr || name == nullptr) {
+            continue;
+        }
+        char nameBuf[256] = {0};
+        CFStringGetCString(name, nameBuf, sizeof(nameBuf), kCFStringEncodingUTF8);
+        CFRelease(name);
+
+        if (wanted != nameBuf) {
+            continue;
+        }
+        // INPUT-CAPABLE ONLY, because that is the list the plug-in shows (gbVst3.cpp skips a device
+        // with no input channels). Two devices can share a display name and differ only in
+        // direction - this rig has an output-only and an input-only "CalDigit Thunderbolt 3 Audio" -
+        // so matching on name alone picked the one the plug-in does not list, produced a UID it
+        // could not resolve, and again looked like the silent-default bug rather than a harness that
+        // had named the wrong device.
+        AudioObjectPropertyAddress cfgAddress = { kAudioDevicePropertyStreamConfiguration,
+                                                  kAudioObjectPropertyScopeInput,
+                                                  kAudioObjectPropertyElementMain };
+        UInt32                     cfgSize    = 0;
+        UInt32                     inputs     = 0;
+
+        if (AudioObjectGetPropertyDataSize(id, &cfgAddress, 0, nullptr, &cfgSize) == noErr && cfgSize > 0) {
+            std::vector<char> raw(cfgSize);
+            auto *            lists = reinterpret_cast<AudioBufferList *>(raw.data());
+
+            if (AudioObjectGetPropertyData(id, &cfgAddress, 0, nullptr, &cfgSize, lists) == noErr) {
+                for (UInt32 b = 0; b < lists->mNumberBuffers; b++) {
+                    inputs += lists->mBuffers[b].mNumberChannels;
+                }
+            }
+        }
+
+        if (inputs == 0) {
+            continue;
+        }
+        CFStringRef                uid        = nullptr;
+        UInt32                     uidSize    = sizeof(uid);
+        AudioObjectPropertyAddress uidAddress = { kAudioDevicePropertyDeviceUID,
+                                                  kAudioObjectPropertyScopeGlobal,
+                                                  kAudioObjectPropertyElementMain };
+
+        if (AudioObjectGetPropertyData(id, &uidAddress, 0, nullptr, &uidSize, &uid) != noErr || uid == nullptr) {
+            continue;
+        }
+        char uidBuf[512] = {0};
+        CFStringGetCString(uid, uidBuf, sizeof(uidBuf), kCFStringEncodingUTF8);
+        CFRelease(uid);
+
+        return std::string(uidBuf);
+    }
+
+    return {};
+}
 
 static std::string to_ascii(const char16 * src) {
     std::string out;
@@ -726,8 +822,11 @@ int main(int argc, char ** argv) {
                 fclose(readback);
             }
 
+            // Matched on the stable half of the sentence. The full message used to end "waiting for
+            // it" and now ends "waiting (not modifying deviceSelector)"; asserting on the whole
+            // thing meant a reworded log line reported itself as a behaviour regression.
             check("an absent saved device is waited for",
-                  log.find("not present - waiting for it") != std::string::npos);
+                  log.find("not present - waiting") != std::string::npos);
 
             // The discriminator. Before the fix this read "slot 0 -> 'Chris' Phone Microphone'" -
             // the plug-in resolving the stale index and going on to open whatever it named.
@@ -1235,11 +1334,24 @@ int main(int argc, char ** argv) {
 
         printf("    slot 0 = %s, slot 2 = %s\n", to_ascii(slot0).c_str(), to_ascii(slot2).c_str());
 
-        MemStream saved;
-        saved.buf =
-            "GENBRIDGE3\n"
-            "active=AppleUSBAudioEngine:LINE 6:HELIX:   2933118:2,3\n"
-            "dev=256,48000.0,30.000,2,1,0.6000,AppleUSBAudioEngine:LINE 6:HELIX:   2933118:2,3\n";
+        std::string slot2Name = to_ascii(slot2);
+        std::string slot2Uid   = uid_for_device_name(slot2Name);
+
+        if (slot2Uid.empty()) {
+            printf("    no UID for '%s' - skipping the restore check\n", slot2Name.c_str());
+        }
+        MemStream   saved;
+        // NO SUFFIX ON THE UID. The literal this replaced ended ",3" and it looked like a trailing
+        // field; it is not - Apple's USB UIDs embed a comma themselves
+        // ("AppleUSBAudioEngine:Allen&Heath Ltd:QU-24:111000:2,3"), so the whole string including it
+        // IS the UID. Appending another one produced a UID that matched nothing, and the plug-in
+        // correctly declining to resolve it looked exactly like the silent-default bug this check
+        // exists to catch.
+        std::string savedText = "GENBRIDGE3\n"
+                                "active=" + slot2Uid + "\n"
+                                "dev=256,48000.0,30.000,2,1,0.6000," + slot2Uid + "\n";
+
+        saved.buf = savedText;
 
         IEditController * fresh = nullptr;
         factory->createInstance(controllerCid, IEditController::iid, (void **)&fresh);
@@ -1250,8 +1362,15 @@ int main(int argc, char ** argv) {
         String128 restored;
         fresh->getParamStringByValue(0, fresh->getParamNormalized(0), restored);
         printf("    device parameter restored as: %s\n", to_ascii(restored).c_str());
-        check("device restored from the saved UID, not the default",
-              to_ascii(restored).find("HELIX") != std::string::npos);
+        // Skipped rather than failed when the machine could not supply a UID at all - a harness that
+        // cannot set the test up has not found a defect, and saying so is the difference between a
+        // red run that means something and one that gets ignored.
+        if (!slot2Uid.empty()) {
+            check("device restored from the saved UID, not the default",
+                  to_ascii(restored) == slot2Name);
+        } else {
+            printf("  device restored from the saved UID, not the default  SKIPPED\n");
+        }
 
         String128 framesText;
         fresh->getParamStringByValue(3, fresh->getParamNormalized(3), framesText);

@@ -842,7 +842,16 @@ public:
     // pieces. Nothing in here can fix that; the flag exists so the panel can say so afterwards
     // rather than leaving a silent bounce to be puzzled over.
     tresult PLUGIN_API setupProcessing(ProcessSetup & setup) SMTG_OVERRIDE {
-        hostRate      = setup.sampleRate;
+        hostRate = setup.sampleRate;
+
+        // A DIFFERENT DECLARED MAXIMUM INVALIDATES THE OBSERVATION, and nothing else does. What was
+        // learned about one host block size says nothing about another, so this is the one place
+        // that forgets it - see close_capture_locked(), which used to.
+        if ((uint32)setup.maxSamplesPerBlock != hostMaxFrames) {
+            observedMaxFrames = 0;
+            observedFrames    = 0;
+            retuneState.store(eRetuneWatching);
+        }
         hostMaxFrames = (uint32)setup.maxSamplesPerBlock;
 
         bool offline  = (setup.processMode == kOffline);
@@ -1730,6 +1739,7 @@ private:
                 deviceSelector = chosen.uid;
                 appliedDevice  = index;
             } else {
+                running = false;
                 log_line("open failed - selection unchanged, staying closed");
             }
         }
@@ -2315,9 +2325,15 @@ private:
             running = false;
         }
 
-        observedMaxFrames = 0;
+        // observedMaxFrames DELIBERATELY SURVIVES A CLOSE. The largest block the host has actually
+        // asked for is a property of the HOST, not of the device being closed - so a device change,
+        // or the reactivation that telling the host about a latency change itself provokes, must not
+        // throw the observation away. Resetting it here is what made a reopen go straight back to
+        // the conservative setpoint and re-learn from scratch, which vst3check catches as "a reopen
+        // keeps the tuned setpoint". It is cleared in setupProcessing() instead, and only when the
+        // host declares a different maximum.
         observedFrames = 0;
-        retuneState.store(eRetuneWatching);
+        retuneState.store((observedMaxFrames > 0) ? eRetuneSettled : eRetuneWatching);
 
         free(pullBuffer);
         free(interleaved);
