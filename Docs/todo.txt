@@ -10,5 +10,4 @@ Bugs
 - On Cubase, helix audio is playing when Kronox is selected. Says capturing Helix, but Kronos actually selected. Seems OK on Ableton as-is.
 - Ideally should be able to freeze / bounce when we're using GenBridge as an instrument. Although, Elektron OverBridge doesn't do that, so not high priority.
 - Only seen once. When dragging GenBridge onto Ableton session screen, audio track was created which didn't send to main.
-- Not currently dealing with host buffer size change.
 - Locking-up if I select a QU24 input with a frame size less than 64.

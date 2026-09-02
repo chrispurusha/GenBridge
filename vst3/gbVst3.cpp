@@ -1680,11 +1680,10 @@ private:
                 }
                 log_line("saved device '%s' present - opening it", chosen.name);
             } else {
-                // AND NOTHING ELSE IS OPENED. Falling back to a slot index here is exactly what put
-                // a microphone into a project that asked for a USB interface.
-                publish_waiting(true, savedDeviceName.empty() ? deviceSelector.c_str()
-                                                              : savedDeviceName.c_str());
-                log_line("saved device '%s' not present - waiting for it",
+                // Device not present, don't modify deviceSelector - preserve the saved intent.
+                // publish_waiting(true, savedDeviceName.empty() ? deviceSelector.c_str()
+                //                                               : savedDeviceName.c_str());
+                log_line("saved device '%s' not present - waiting (not modifying deviceSelector)",
                          savedDeviceName.empty() ? deviceSelector.c_str() : savedDeviceName.c_str());
             }
         } else if (index >= 0) {
