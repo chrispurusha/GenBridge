@@ -3,6 +3,45 @@ GenBridge FINDINGS
 Completed work, measurements, and the traps that cost real time.
 
 
+2026-09-02  THE SELECTOR IS THE MOST REUSABLE THING HERE - WHAT WOULD GO TO SYNTHLIB
+------------------------------------------------------------
+CT's call: adapt this into the siblings, and push whatever is generic down into SynthLib. NOT done in
+this session - this is the survey so it does not have to be redone.
+
+WHAT EACH SIBLING HAS TODAY
+  G2-Edit    Audio Device and MIDI Input as menu FLYOUTS (appMenuBar.c:902 and :1035), built ad hoc
+             from a CoreAudio/CoreMIDI enumeration. Works, but has no per-device memory, no channel
+             limits, and no way to select nothing.
+  SynthEdit  No device UI at all. The destination is a NAME in a layout file (midiPort) resolved by
+             three fallbacks. That is precisely what made 2026-09-02's unpowered Thru box hard to
+             place: nothing on screen said which port was in use or whether anything answered on it.
+  EmuUtility Scan Devices, and the app locks onto whatever answers an identity broadcast. The
+             wrong-destination bug fixed this morning was silent for exactly that reason.
+
+GENERIC, AND THE STRONGEST CANDIDATES - in rough order of how cleanly they lift:
+  1. poc/device.c/.h (18 functions). CoreAudio enumeration, name/UID, input and output channel
+     counts, nominal rate and buffer get/set, the FOUR latency terms, hot-plug watching, and
+     device_is_running_somewhere(). Nothing in it is GenBridge-specific; it is a CoreAudio device
+     layer that happens to live in a bridge. This is the biggest single win and the easiest.
+  2. The MIDI destination half of vst3/gbMidi.c/.h - enumeration, name lookup, slot-for-name.
+     SynthLib already owns the SEND primitive (synthlibMidi.c), so this is the missing half of a file
+     that already exists there, which is the neatest possible fit.
+  3. The per-device remembered-settings table keyed by UID (tDeviceSettings and find/ensure_settings
+     in gbVst3.cpp). Every one of the four apps wants "remember how this device was set up"; only
+     this one has it.
+  4. The selector ROW itself - label, full-width value, drop-down, with each row listing only what is
+     reachable on the current device. Generic now that contextMenu.c is shared and scrolls, and it is
+     the same three-or-four-row shape in every app.
+
+WHAT SHOULD NOT MOVE
+  The drift loop, the ring, the resampler and the setpoint arithmetic. They are what a BRIDGE is, and
+  no sibling has a use for them.
+
+WATCH OUT FOR: device.c currently returns tDeviceInfo with a fixed DEVICE_MAX of 64 and truncates
+silently past it (its own todo item). Moving it to SynthLib is the moment to decide whether that cap
+stays, because at that point four apps inherit it rather than one.
+
+
 2026-09-02  RACE CONDITION REVIEW - SEVEN FIXED, TWO LEFT AS ASSUMPTIONS
 ------------------------------------------------------------
 Method: enumerate every member of the processor, then for each one list the functions that touch it
