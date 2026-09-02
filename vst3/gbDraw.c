@@ -271,6 +271,38 @@ int gb_input_device_count(void) {
     return (found > 0) ? found : 1;
 }
 
+// HOW MANY INPUT CHANNELS THE DEVICE IN THIS SLOT ACTUALLY HAS.
+//
+// The first-channel parameter is normalised across a FIXED 32, because a VST3 parameter's range
+// cannot depend on which device happens to be selected without re-scaling every value already saved
+// in a project. So the range stays 32 and the ARROWS are limited instead - exactly what the device
+// stepper already does with gb_input_device_count().
+//
+// Without it, a 2-channel synth let the arrows walk to "channel 17", the open clamped it back to 1,
+// and the panel went on displaying 17: the plug-in and its own display disagreeing about what was
+// being captured, which is the failure this editor exists to avoid.
+//
+// 0 means "no such slot, or nothing input-capable there" - callers treat that as "no limit known"
+// rather than as zero channels, so an empty cache never locks the control at channel 1.
+int gb_input_device_channels(int index) {
+    uint32_t            count = 0;
+    const tDeviceInfo * list  = device_list(&count);
+    int                 seen  = 0;
+
+    for (uint32_t i = 0; i < count; i++) {
+        if (list[i].inputChannels == 0) {
+            continue;
+        }
+
+        if (seen == index) {
+            return (int)list[i].inputChannels;
+        }
+        seen++;
+    }
+
+    return 0;
+}
+
 void gb_input_device_name(int index, char * out, unsigned long len) {
     uint32_t            count = 0;
     const tDeviceInfo * list  = device_list(&count);
@@ -759,6 +791,30 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
             }
 
             request->normalized = gb_device_normalized(slot);
+        } else if (rows[row].which == eGbEditFirstChannel) {
+            // Limited to what the SELECTED device has, and to what the current mode will take from
+            // it: a stereo pair needs two channels, so the last usable start is one lower.
+            int channels = gb_input_device_channels(gb_device_slot(gDevice));
+            int width    = (gMode < 0.5) ? 1 : 2;
+            int first    = (int)((gFirst * (double)(GB_MAX_FIRST_CHANNEL - 1)) + 0.5) + delta;
+            int limit    = GB_MAX_FIRST_CHANNEL - 1;
+
+            // A channel count of 0 means the cache could not say, so the fixed range stands rather
+            // than the control seizing at channel 1 on a device it simply has not seen yet.
+            if (channels > 0) {
+                limit = channels - width;
+            }
+
+            if (limit < 0) {
+                limit = 0;      // a mono-only device in stereo mode: channel 1 is all there is
+            }
+
+            if (first < 0) {
+                first = 0;
+            } else if (first > limit) {
+                first = limit;
+            }
+            request->normalized = (double)first / (double)(GB_MAX_FIRST_CHANNEL - 1);
         } else {
             request->normalized = step(*rows[row].value, rows[row].count, delta);
         }

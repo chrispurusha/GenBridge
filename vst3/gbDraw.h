@@ -74,6 +74,7 @@ typedef struct {
 int    gb_device_slot(double normalized);           // normalised -> slot index
 double gb_device_normalized(int slot);              // slot index -> normalised
 int    gb_input_device_count(void);                 // how many slots point at something real
+int    gb_input_device_channels(int index);        // input channels on that slot; 0 = not known
 void   gb_input_device_name(int slot, char * out, unsigned long len);
 int    gb_slot_for_uid(const char * uid);           // -1 when the device is not present
 void   gb_device_list_invalidate(void);             // after a change, so the next read is fresh

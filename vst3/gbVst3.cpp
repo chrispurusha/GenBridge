@@ -701,6 +701,16 @@ public:
             return kResultFalse;
         }
 
+        // UNDER THE LOCK, and this is the one that could actually crash rather than merely report a
+        // wrong number. deviceSelector is a std::string that reconfigure() ASSIGNS under configLock,
+        // and capture_live_settings() walks the remembered[] table the same worker appends to. A
+        // concurrent read of a std::string being reassigned is not a stale value, it is a pointer
+        // that may already have been freed.
+        //
+        // Blocking is fine here in a way it never is in process(): getState() is called by the host
+        // on its own thread when it saves, and the worst wait is one device swap.
+        pthread_mutex_lock(&configLock);
+
         capture_live_settings();
 
         std::string blob = "GENBRIDGE3\n";
@@ -763,6 +773,9 @@ public:
                      (double)d->trim, d->uid);
             blob += line;
         }
+        // Released before write(): the blob is a private copy by now, and state->write() calls back
+        // into the host - which must never happen with this lock held.
+        pthread_mutex_unlock(&configLock);
 
         int32 written = 0;
 
@@ -825,6 +838,38 @@ public:
     // every re-measure came back short by whatever correction was already in force, so the value
     // walked towards zero the more times it was run. Only ever grows out of the ring and the
     // converters, so it is the honest thing to net off.
+    // Call with configLock HELD, after any change to the four fields below. One place, so a new
+    // writer cannot forget half of them.
+    void publish_config_snapshot(void) {
+        snapHostRate.store(hostRate);
+        snapRatio.store(nominalRatio);
+        snapSetpoint.store(setpointFrames);
+        snapDeviceLatency.store(deviceLatency);
+    }
+
+    // The snapshot's version of internal_latency_frames(). Safe from any thread; never touches a
+    // field the worker can be rewriting.
+    double snapshot_latency_frames(void) const {
+        double ratio = snapRatio.load();
+
+        if (ratio <= 0.0) {
+            return 0.0;    // mid-swap, or nothing open: no latency to report rather than inf
+        }
+
+        return (snapSetpoint.load() + resampler_latency_frames() + (double)snapDeviceLatency.load())
+               / ratio;
+    }
+
+    uint32 snapshot_latency(void) const {
+        double total = snapshot_latency_frames();
+
+        if (instrument) {
+            total += (offsetMs.load() / 1000.0) * snapHostRate.load();
+        }
+
+        return (total > 0.0) ? (uint32)total : 0;
+    }
+
     double internal_latency_frames(void) const {
         double inputFrames = setpointFrames + resampler_latency_frames() + (double)deviceLatency;
 
@@ -1506,7 +1551,10 @@ private:
                 offsetMs.store(GB_OFFSET_MIN_MS + (value * (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS)));
 
                 // The correction is part of the reported figure, so the host has to be told.
-                uint32 nowLatency = running ? report_latency() : 0;
+                // From the snapshot: this runs BEFORE the trylock below, so it may not read a
+                // field the worker could be rewriting. snapshot_latency() reports 0 while nothing
+                // is open, which is what `running` was being consulted for.
+                uint32 nowLatency = snapshot_latency();
 
                 if (nowLatency != reportedLatency) {
                     reportedLatency = nowLatency;
@@ -1846,6 +1894,7 @@ private:
         setpointFrames = minimum_setpoint_for(observedMaxFrames) * GB_AUTO_MARGIN;
 
         drift_set_setpoint(&drift, setpointFrames);
+        publish_config_snapshot();
         publish_latency_breakdown();
 
         // The ring holds more than the new setpoint wants, so snap it down rather than waiting for
@@ -2057,6 +2106,10 @@ private:
         }
     }
 
+    // No configLock here, and it must stay that way - it is called from the worker's idle path and
+    // from store_measurement() after that has released the lock. So it publishes only what the
+    // snapshot already holds; the snapshot itself is refreshed by whoever changed the config, under
+    // the lock they were already holding.
     void publish_measurement(void) {
         publish_latency_breakdown();
     }
@@ -2070,14 +2123,22 @@ private:
             return;
         }
 
-        double ratio = (nominalRatio > 0.0) ? nominalRatio : 1.0;
+        // FROM THE SNAPSHOT, not the fields. This is called both with configLock held (from the
+        // open and from retune) and without it (from the worker's idle publish), so it cannot take
+        // the lock and must not read anything the lock protects.
+        double setpoint = snapSetpoint.load();
+        double ratio    = snapRatio.load();
 
-        atomic_store(&status->ringSamples, (int)(setpointFrames / ratio));
-        atomic_store(&status->deviceSamples, (int)((double)deviceLatency / ratio));
+        if (ratio <= 0.0) {
+            ratio = 1.0;
+        }
+
+        atomic_store(&status->ringSamples, (int)(setpoint / ratio));
+        atomic_store(&status->deviceSamples, (int)((double)snapDeviceLatency.load() / ratio));
         atomic_store(&status->filterSamples, (int)(resampler_latency_frames() / ratio));
         atomic_store(&status->measuredSamples, (int)hardwareSamples);
-        atomic_store(&status->offsetSamples, (int)((offsetMs.load() / 1000.0) * hostRate));
-        atomic_store(&status->latencySamples, (int)(running ? report_latency() : 0));
+        atomic_store(&status->offsetSamples, (int)((offsetMs.load() / 1000.0) * snapHostRate.load()));
+        atomic_store(&status->latencySamples, (int)snapshot_latency());
         atomic_store(&status->recommendedFrames, recommendedSetpoint);
     }
 
@@ -2168,6 +2229,17 @@ private:
             wantCount = available - first;      // at least 1, since first < available
             log_line("only %u channel(s) available from %u - capturing %u",
                      available - first, first + 1, wantCount);
+        }
+
+        // SAY SO IF THE REQUEST WAS TRIMMED. The clamp above is the right behaviour - capturing the
+        // nearest thing that exists beats refusing to open - but on its own it left the panel and
+        // the host showing a channel the device does not have while a different one was being
+        // captured. The editor's arrows cannot reach an impossible value any more; a DEVICE CHANGE
+        // still can, because the parameter is global to the instance while the channel setting is
+        // per device. Same message the device slot already uses on the same kind of mismatch.
+        if (first != settings->firstChannel) {
+            settings->firstChannel = first;
+            send_message("gbFirstChannel", (int)first);
         }
 
         captureChannels = wantCount;
@@ -2386,6 +2458,7 @@ private:
         atomic_store(&status->setpointFrames, setpointFrames);
         atomic_store(&status->active, true);
 
+        publish_config_snapshot();
         publish_latency_breakdown();
 
         return true;
@@ -2422,6 +2495,13 @@ private:
         // confirmation: we are on our way out, nothing here depends on it having landed, and the
         // wait costs up to 800 ms of the caller's time - which on this path is a device change the
         // user is waiting on.
+        // The snapshot describes a device that is now gone. Cleared here so nothing reports the
+        // latency of a bridge that is no longer running.
+        nominalRatio   = 0.0;
+        setpointFrames = 0.0;
+        deviceLatency  = 0;
+        publish_config_snapshot();
+
         if (restoreDevice != 0) {
             if (restoreFrames > 0) {
                 device_set_buffer_frames(restoreDevice, restoreFrames);
@@ -2769,6 +2849,23 @@ private:
     // see its comment. Atomic because those are genuinely different threads, not for ordering.
     std::atomic<uint32> reportedLatency{0};
 
+    // ---- THE PUBLISHED SNAPSHOT --------------------------------------------------------------
+    //
+    // hostRate, nominalRatio, setpointFrames and deviceLatency are plain fields, written by the
+    // worker under configLock while it swaps a device. Several readers need them and CANNOT take
+    // that lock: process() must never block, and the panel publisher is called from paths that
+    // already hold it. Reading the raw fields from there is a data race, and not a harmless one -
+    // nominalRatio is a divisor, so observing the 0 it briefly holds mid-swap yields inf or NaN.
+    //
+    // Making `running` atomic fixed the FLAG and not the state it gates, which is the more dangerous
+    // shape: the obvious warning sign disappears while the composite read stays broken. So the
+    // derived values get published as atomics, once, by the thread that changed them - and every
+    // lock-free reader uses these and never the fields behind them.
+    std::atomic<double> snapHostRate{0.0};
+    std::atomic<double> snapRatio{1.0};
+    std::atomic<double> snapSetpoint{0.0};
+    std::atomic<uint32> snapDeviceLatency{0};
+
     // The block-size observation, and where it has got to.
     enum tRetuneState { eRetuneWatching = 0, eRetuneRequested, eRetuneSettled, eRetuneBlocked };
 
@@ -2967,6 +3064,26 @@ public:
 
                 if (editorView != nullptr) {
                     gb_editor_set_status_slot(editorView, statusSlot);
+                }
+            }
+        } else if (strcmp(id, "gbFirstChannel") == 0) {
+            // The device could not give the channel that was asked for and the open used another -
+            // see the clamp in open_capture_locked(). Without this the panel goes on naming a
+            // channel nothing is being captured from, which is the same class of disagreement
+            // gbDeviceSlot below exists to settle.
+            int64 channel = -1;
+
+            if ((message->getAttributes()->getInt("value", channel) == kResultOk) && (channel >= 0)) {
+                firstChannel = (double)channel / (double)(GB_MAX_FIRST_CHANNEL - 1);
+
+                if (componentHandler != nullptr) {
+                    componentHandler->beginEdit(kParamFirstChannel);
+                    componentHandler->performEdit(kParamFirstChannel, firstChannel);
+                    componentHandler->endEdit(kParamFirstChannel);
+                }
+
+                if (editorView != nullptr) {
+                    gb_editor_refresh_values(editorView);
                 }
             }
         } else if (strcmp(id, "gbDeviceSlot") == 0) {
