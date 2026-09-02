@@ -58,6 +58,13 @@ virtual drivers all enumerate as CoreAudio devices, and 64 is a constant WE chos
 the world: device_enumerate()'s loop is `(i < count) && (found < max)`, so past 64 it simply stops,
 silently.
 
+AND DEVICE_MAX CANNOT SIMPLY BE RAISED. GB_DEVICE_SLOTS is defined as DEVICE_MAX, and the device
+parameter is normalised across it - gb_device_slot() and gb_device_normalized() both divide by
+GB_DEVICE_SLOTS - 1. So changing 64 re-scales the value saved in every existing project, and a
+session reopens pointing at a different device. That is the same trap the offset control's own
+comment records for its +/-100 ms range. Whatever the fix is, it has to either keep the divisor at 64
+for old states or carry a state version that says which divisor a project was written with.
+
 That turns the ceiling from cosmetic into a REGRESSION RISK, and it is the thing to weigh before
 replacing the stepper at all. Whatever else is wrong with a stepper, it can reach every entry in the
 list. A menu that cannot show everything makes the tail of the list unreachable - so swapping one for
