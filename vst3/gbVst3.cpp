@@ -555,7 +555,7 @@ public:
     tresult PLUGIN_API connect(IConnectionPoint * other) SMTG_OVERRIDE {
         peer = other;
         send_slot();
-        log_line("connected to controller, published status slot %d", statusSlot);
+        log_line("connected to controller, published status slot %d", statusSlot.load());
         return kResultOk;
     }
 
@@ -705,7 +705,21 @@ public:
             }
         }
 
-        return parse_state(blob) ? kResultOk : kResultFalse;
+        // UNDER THE LOCK, the mirror of getState() above. parse_state() clears and rewrites almost
+        // every piece of configuration the worker reads - deviceSelector and savedDeviceName (both
+        // std::string, so a concurrent read is a possibly-freed pointer rather than a stale value),
+        // the remembered[] and measured[] tables, and the offset pair. A host may call this while
+        // the plug-in is loaded and the worker is mid-reconfigure.
+        //
+        // The read loop above is deliberately OUTSIDE the lock: state->read() calls back into the
+        // host, which must never happen with this held.
+        pthread_mutex_lock(&configLock);
+
+        bool ok = parse_state(blob);
+
+        pthread_mutex_unlock(&configLock);
+
+        return ok ? kResultOk : kResultFalse;
     }
 
     tresult PLUGIN_API getState(IBStream * state) SMTG_OVERRIDE {
@@ -748,7 +762,10 @@ public:
         // audio device stored as a UID. Ableton was not forgetting the destination; nothing was ever
         // writing it down.
         if (instrument) {
-            blob += "midi=" + std::string(midiName) + "\n";
+            char midiNameNow[GB_MIDI_NAME_LEN] = {0};
+
+            current_midi_name(midiNameNow, sizeof(midiNameNow));
+            blob += "midi=" + std::string(midiNameNow) + "\n";
             blob += "midich=" + std::to_string(midiChannel.load()) + "\n";
 
             // THE MANUAL TRIM, AND THE MEASUREMENTS IT TRIMS. Neither belongs on a dev= line: the
@@ -938,6 +955,13 @@ public:
     // pieces. Nothing in here can fix that; the flag exists so the panel can say so afterwards
     // rather than leaving a silent bounce to be puzzled over.
     tresult PLUGIN_API setupProcessing(ProcessSetup & setup) SMTG_OVERRIDE {
+        // UNDER THE LOCK. hostRate, hostMaxFrames, observedMaxFrames and observedFrames are all read
+        // by the worker while it holds this - minimum_setpoint_for() is built on the first two and
+        // retune() on the second two - and the worker is running by the time a host calls this. VST3
+        // guarantees the AUDIO thread is stopped here, which is why the same fields are safe to touch
+        // from observe_block(); it guarantees nothing about a thread of the plug-in's own.
+        pthread_mutex_lock(&configLock);
+
         hostRate = setup.sampleRate;
 
         // A DIFFERENT DECLARED MAXIMUM INVALIDATES THE OBSERVATION, and nothing else does. What was
@@ -949,6 +973,8 @@ public:
             retuneState.store(eRetuneWatching);
         }
         hostMaxFrames = (uint32)setup.maxSamplesPerBlock;
+
+        pthread_mutex_unlock(&configLock);
 
         bool offline  = (setup.processMode == kOffline);
 
@@ -1567,7 +1593,11 @@ private:
                 int wanted = (int)(value * (double)(GB_MIDI_SLOTS - 1) + 0.5);
 
                 midiDestination.store(wanted);
-                gb_midi_destination_name(wanted, midiName, sizeof(midiName));
+                // NO SHARED BUFFER. This used to snprintf the destination's name into a member
+                // char array - on the AUDIO THREAD - which getState() then read from the host's
+                // thread and parse_state() wrote from it. The name is derivable from the atomic
+                // above wherever it is actually wanted (current_midi_name()), so the buffer that
+                // was being raced over simply does not need to exist.
             } else if (q->getParameterId() == kParamMidiChannel) {
                 midiChannel.store((int)(value * (double)(GB_CHANNEL_SLOTS - 1) + 0.5));
             } else if (q->getParameterId() == kParamOffsetMs) {
@@ -2450,7 +2480,8 @@ private:
 
         if (!device_open(&capture, info.id, true, first, captureChannels,
                          deviceFrames * 4, capture_callback, this)) {
-            log_line("device_open failed for '%s' (%u ch from %u)", info.name, captureChannels, first + 1);
+            log_line("device_open failed for '%s' (%u ch from %u)", info.name, captureChannels.load(),
+                     first + 1);
             return false;
         }
 
@@ -2765,9 +2796,7 @@ private:
             if (line.compare(0, 5, "midi=") == 0) {
                 std::string wanted = line.substr(5);
 
-                snprintf(midiName, sizeof(midiName), "%s", wanted.c_str());
-
-                int slot = gb_midi_slot_for_name(midiName);
+                int slot = gb_midi_slot_for_name(wanted.c_str());
 
                 if (slot >= 0) {
                     midiDestination.store(slot);
@@ -2915,7 +2944,9 @@ private:
     std::atomic<int32>  refCount;
     IHostApplication *  host{nullptr};
     IConnectionPoint *  peer{nullptr};
-    int                 statusSlot{-1};
+    // Assigned when the host connects the two ends (its own thread) and read from the audio thread
+    // by publish_status() on every block.
+    std::atomic<int>    statusSlot{-1};
     // Written by whichever thread last told the host, read by getLatencySamples() on any thread -
     // see its comment. Atomic because those are genuinely different threads, not for ordering.
     std::atomic<uint32> reportedLatency{0};
@@ -2951,7 +2982,6 @@ private:
     std::atomic<bool>   offlineRender{false};
     std::atomic<double> offsetMs{0.0};
     std::atomic<int>    midiChannel{0};        // 0 = whatever the note arrived on
-    char                midiName[GB_MIDI_NAME_LEN]{};
 
     enum tMeasureState { eMeasureIdle = 0, eMeasureSettle, eMeasureFloor, eMeasureListening };
 
@@ -2974,8 +3004,11 @@ private:
     std::atomic<int>    measureOurs{0};
     std::atomic<float>  measureTriggerPeak{0.0f};
     std::atomic<float>  measureFloorSeen{0.0f};
-    uint32_t            measureUnderrunsAtStart{0};
-    int                 measureResyncsAtStart{0};
+    // Written by start_measurement() on the AUDIO thread (it runs from the parameter pass, before
+    // process() takes its trylock) and read by store_measurement() on the worker, which subtracts
+    // them to decide whether a measurement was clean. Two threads, so not plain ints.
+    std::atomic<uint32_t> measureUnderrunsAtStart{0};
+    std::atomic<int>      measureResyncsAtStart{0};
 
     tMeasured           measured[GB_MAX_MEASURED];
     uint32_t            measuredCount{0};
@@ -2987,7 +3020,10 @@ private:
     // so reopening the same device leaves the value exactly where the user put it.
     char                offsetUid[DEVICE_UID_LEN]{0};
     char                offsetDest[GB_MIDI_NAME_LEN]{0};
-    uint32_t            hardwareSamples{0};    // in force for the current device/destination pair
+    // In force for the current device/destination pair. Written by the worker (store_measurement and
+    // the open), read by publish_latency_breakdown() - which is called both with configLock held and
+    // without it, so it can take neither and this has to carry its own guarantee.
+    std::atomic<uint32_t> hardwareSamples{0};
     uint32_t            observedMaxFrames{0};
     uint64_t            observedFrames{0};
     uint32_t            openDeviceFrames{0};
@@ -3015,7 +3051,10 @@ private:
     std::atomic<int>   wantedFrames{0};
     std::atomic<int>   wantedChannels{0};
     std::atomic<int>   wantedFirstChannel{-1};
-    uint32_t           captureChannels{GB_CHANNELS};
+    // Written by the worker under configLock, read by the CoreAudio IO thread (capture_callback,
+    // which takes no lock and must not) and by the audio thread's pre-trylock parameter pass. Three
+    // threads, so it cannot be a plain int whatever the practical consequence of a torn read is.
+    std::atomic<uint32_t> captureChannels{GB_CHANNELS};
 
     // Set by the last successful open; read by the parameter handlers. Plain members rather than
     // atomics: only the worker writes them, and only under configLock, which process() holds

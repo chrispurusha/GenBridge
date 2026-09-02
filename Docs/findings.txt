@@ -3,6 +3,57 @@ GenBridge FINDINGS
 Completed work, measurements, and the traps that cost real time.
 
 
+2026-09-02  RACE CONDITION REVIEW - SEVEN FIXED, TWO LEFT AS ASSUMPTIONS
+------------------------------------------------------------
+Method: enumerate every member of the processor, then for each one list the functions that touch it
+and which thread each of those runs on. There are five: the host's audio thread (process, and
+apply_parameter_changes which deliberately runs BEFORE the trylock so parameter changes are seen
+during a device swap), the CoreAudio IO thread (capture_callback, which takes no lock and must not),
+the plug-in's own worker, the host's main thread (setState/getState/setupProcessing/connect), and the
+editor's draw timer.
+
+FIXED:
+ 1. setState() rewrote the whole configuration with no lock. parse_state() clears and reassigns
+    deviceSelector and savedDeviceName - both std::string, so a concurrent read by the worker is a
+    possibly-freed pointer, not a stale value - plus the remembered[] and measured[] tables and the
+    offset pair. reconfigure() reads deviceSelector and savedDeviceName BEFORE it takes configLock.
+    Now locked, mirroring the getState() fix; the state->read() loop stays outside, because it calls
+    back into the host.
+ 2. midiName was a member char buffer WRITTEN ON THE AUDIO THREAD (snprintf in the parameter pass),
+    read by getState on the host thread and rewritten by parse_state. Deleted outright: the name is
+    derivable from the midiDestination atomic wherever it is wanted (current_midi_name()), so the
+    buffer being raced over did not need to exist.
+ 3. captureChannels - plain uint32_t written by the worker under the lock and read by BOTH the
+    CoreAudio callback and the audio thread's pre-trylock pass. Now atomic.
+ 4. hardwareSamples - written by the worker, read by publish_latency_breakdown(), which is called
+    both with the lock held and without it and so can take neither. Now atomic.
+ 5. statusSlot - assigned when the host connects the two ends, read by publish_status() on every
+    audio block. Now atomic.
+ 6. setupProcessing() wrote hostRate, hostMaxFrames, observedMaxFrames and observedFrames with no
+    lock. VST3 guarantees the AUDIO thread is stopped there - which is why observe_block() may touch
+    the same fields - but it guarantees nothing about the plug-in's OWN worker, which reads all four
+    under configLock. Now locked.
+ 7. measureUnderrunsAtStart / measureResyncsAtStart - written by start_measurement() on the audio
+    thread, read by store_measurement() on the worker to decide whether a measurement was clean.
+    Now atomic.
+
+CHECKED AND NOT A RACE, so nobody re-fixes them:
+  - measureState and the rest of the measure* machine are touched ONLY by the audio thread
+    (start_measurement before the trylock, run_measurement after it). Inconsistent lock discipline,
+    but one thread, so no race.
+  - remembered[] and measured[]: every reader and writer now holds configLock, after fixes 1 above
+    and the getState fix earlier in the day.
+
+LEFT AS DOCUMENTED ASSUMPTIONS, both in the same place:
+  - capture_callback() reads ring and widen with no lock while close_capture_locked() frees them.
+    Correctness rests entirely on AudioDeviceStop() guaranteeing no IOProc is in flight when it
+    returns. The ordering is right (device_close before any free), so this is an assumption rather
+    than a defect - but it is the only thing standing between a device change and a use-after-free.
+    Hardening it costs a callbackActive flag the closer spins on, or simply never freeing the ring
+    and reallocating only on a size change.
+  - start_measurement() reads ring.underflows unlocked, which is the same assumption in miniature.
+
+
 2026-09-02  SCROLLING MENUS, AND WHY THE HOVER-EDGE FORM WAS CHOSEN
 ------------------------------------------------------------
 Removing the stepper arrows put the whole burden of reachability on the drop-downs, so a menu that
