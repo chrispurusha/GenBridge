@@ -258,6 +258,7 @@
     // other control worked.
     gb_draw_set_status_slot(self.statusSlot);
     gb_draw_set_instrument(self.isInstrument ? true : false);
+    gb_draw_set_mouse(x, y);        // a click is a position too, and a trackpad tap sends no move
 
     tGbEditRequest request;
 
@@ -266,6 +267,42 @@
     }
 
     [self redraw];
+}
+
+// THE POINTER POSITION, for an open drop-down to highlight under. A stepper never needed this, which
+// is why the view tracked nothing but clicks until the menus arrived.
+//
+// NSTrackingInVisibleRect means AppKit maintains the region itself as the view is resized, so this
+// does not have to be torn down and rebuilt on every geometry change - which matters here, where the
+// host owns the window and resizing is already the fiddliest part of this view.
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+
+    for (NSTrackingArea * area in [self trackingAreas]) {
+        [self removeTrackingArea:area];
+    }
+    NSTrackingArea * area =
+        [[NSTrackingArea alloc] initWithRect:[self bounds]
+                                     options:(NSTrackingMouseMoved | NSTrackingActiveInActiveApp |
+                                              NSTrackingInVisibleRect)
+                                       owner:self
+                                    userInfo:nil];
+
+    [self addTrackingArea:area];
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+    NSPoint local = [self convertPoint:[event locationInWindow] fromView:nil];
+    double  scale = [self bounds].size.width / GB_CANVAS_W;
+
+    gb_draw_set_mouse(local.x / scale, ([self bounds].size.height - local.y) / scale);
+
+    // ONLY WHILE A MENU IS OPEN. Nothing else in this panel responds to a bare mouse move, and
+    // repainting on every one would put a 60-plus Hz redraw under the host's cursor for no visible
+    // change. The 30 Hz timer covers everything else.
+    if (gb_draw_menu_active()) {
+        [self redraw];
+    }
 }
 
 - (void)mouseDragged:(NSEvent *)event {

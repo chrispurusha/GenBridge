@@ -94,6 +94,13 @@ void gb_draw_frame(int pixelWidth, int pixelHeight);
 // should be told.
 bool gb_draw_click(double x, double y, tGbEditRequest * request);
 
+// Where the pointer is, in canvas coordinates. Fed by the view on every move so an open drop-down
+// can highlight the item under it; harmless to call when no menu is open.
+void gb_draw_set_mouse(double x, double y);
+
+// Is a drop-down open? The view uses it to decide whether a plain mouse move needs a repaint.
+bool gb_draw_menu_active(void);
+
 // Current parameter values, so the editor draws what the host believes rather than its own idea.
 void gb_draw_set_values(double device, double rate, double frames, double trim,
                         double mode, double firstChannel, double midiDest, double offset,

@@ -3,6 +3,49 @@ GenBridge FINDINGS
 Completed work, measurements, and the traps that cost real time.
 
 
+2026-09-02  SCROLLING MENUS, AND WHY THE HOVER-EDGE FORM WAS CHOSEN
+------------------------------------------------------------
+Removing the stepper arrows put the whole burden of reachability on the drop-downs, so a menu that
+could not show every item stopped being untidy and became a way to make a device unreachable. Before
+this, clamp_menu_to_screen() only MOVED a menu up to fit; once it was taller than the window it
+landed at the top and the surplus ran off the bottom, drawn nowhere and clickable never.
+
+TWO STANDARD FORMS, and the choice between them was decided by what this code already has:
+
+  - A DRAGGED SCROLLBAR is SynthLib's own idiom - render_list_scrollbar() and the
+    list_scrollbar_mouse_down/drag/up helpers in utilsGraphics.h, used by fileBrowser.cpp and
+    bankBrowser.cpp. Rejected because it needs mouse-UP delivered to the menu to end a drag, and no
+    app routes that to contextMenu.c today. Adding it would have meant touching three apps' input
+    plumbing for a menu feature.
+  - HOVER-EDGE AUTO-SCROLL is what a macOS menu does when it outgrows the screen, and it needs
+    nothing but the pointer position - which update_context_menu_hover() is already handed every
+    frame by every app. Chosen.
+
+WHAT WAS BUILT, in SynthLib/src/contextMenu.c so all three apps inherit it:
+  - tMenuFrame gains visibleRows and scrollRow. A frame that fits has visibleRows == its total rows
+    and never scrolls, so nothing changes for the menus G2-Edit and SynthEdit already open.
+  - clamp_menu_to_screen() still MOVES the menu up first and only caps what still will not fit -
+    sliding costs the user nothing, scrolling costs a gesture.
+  - Hovering the top or bottom edge scrolls continuously (MENU_SCROLL_ROWS_PER_SEC), and CLICKING a
+    strip pages by visibleRows-1 rather than choosing an item. The click half matters for a
+    trackpad, where a tap reports a position and no motion.
+  - A chevron marks each live strip, drawn over the first/last visible row - the macOS placement.
+    Overdrawing loses nothing: a strip is only live while there is more in that direction, so at the
+    end of the list the strip goes inactive and the row beneath it is clickable again.
+  - context_menu_scroll() is exposed for an app that routes a scroll wheel. An app that never calls
+    it still reaches every item by the edges.
+
+A SECOND AND THIRD COPY OF THE GEOMETRY were found while doing it: render_menu_frame() recomputed
+each cell rectangle inline, twice, rather than calling menu_item_rect(). Three copies would all have
+had to learn about scrolling together or the menu would have drawn in one place and been clickable in
+another - the same shape as the three normalized-to-slot mappings that once disagreed. Both passes
+now call the one function.
+
+NOTE FOR THE OTHER TWO PROJECTS: each has its own SynthLib checkout pinned to its own commit, so
+G2-Edit and SynthEdit are untouched until their pins move. When they do, their menus get scrolling
+for free and should be re-checked - particularly G2-Edit's, which is the only one using submenus.
+
+
 2026-09-02  WHAT A DEVICE DROP-DOWN WOULD ACTUALLY COST
 ------------------------------------------------------------
 gbDraw.c's own comment says steppers were chosen because "pulling it in means linking the popup,

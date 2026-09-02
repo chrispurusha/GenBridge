@@ -117,6 +117,18 @@ using namespace Steinberg::Vst;
 // panel's own arrows walking the list, but the host's generic panel and any automation lane can
 // still sweep the parameter, and they reach this code by the same path.
 #define GB_DEVICE_SETTLE_MS  (250.0)
+
+// HOW LONG THE OFFSET MUST STAND STILL BEFORE THE HOST IS TOLD.
+//
+// Telling the host its latency moved makes it redo delay compensation across the whole session, and
+// in Ableton that is a visible hitch - so it is the one thing that must not happen once per click.
+// The offset steps 0.1 ms at a time and is dialled in by ear, which means a dozen or more clicks in
+// quick succession: exactly the shape that turns a cheap control into a stuttering one.
+//
+// The VALUE still moves immediately, so the readout follows the pointer and nothing feels laggy.
+// Only the notification waits. Slightly longer than the device settle because this is a control
+// someone nudges repeatedly while listening, rather than one they set once.
+#define GB_OFFSET_SETTLE_MS  (400.0)
 #define GB_RETUNE_MIN_GAIN   (64.0)      // frames
 
 // TEMPORARY, until the editor exists. With no way to pick a device from inside a host, a fresh
@@ -1561,17 +1573,17 @@ private:
             } else if (q->getParameterId() == kParamOffsetMs) {
                 offsetMs.store(GB_OFFSET_MIN_MS + (value * (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS)));
 
-                // The correction is part of the reported figure, so the host has to be told.
-                // From the snapshot: this runs BEFORE the trylock below, so it may not read a
-                // field the worker could be rewriting. snapshot_latency() reports 0 while nothing
-                // is open, which is what `running` was being consulted for.
-                uint32 nowLatency = snapshot_latency();
-
-                if (nowLatency != reportedLatency) {
-                    reportedLatency = nowLatency;
-                    latencyDirty.store(true);
-                    wake_worker();
-                }
+                // The correction is part of the reported figure, so the host has to be told - but
+                // NOT on this click. See GB_OFFSET_SETTLE_MS: the worker waits for the value to stop
+                // moving and then tells it once, because each telling costs the host a full delay
+                // compensation pass and this control is dialled in a dozen clicks at a time.
+                //
+                // Nothing is computed here. What the latency becomes depends on state the worker
+                // owns, and this runs on the audio thread before process() has even taken its
+                // trylock, so the whole decision belongs on the other side of the queue.
+                lastOffsetChangeMs.store(now_ms());
+                offsetDirty.store(true);
+                wake_worker();
             } else if (q->getParameterId() == kParamRate) {
                 int index = (int)(value * (double)(gGbRateCount - 1) + 0.5);
 
@@ -1748,6 +1760,28 @@ private:
                 store_measurement();
             }
 
+            // SETTLE THE OFFSET BEFORE ACTING ON IT, the same shape as the device debounce above and
+            // for the same reason: a burst of clicks should cost the host one delay-compensation
+            // pass, not one per click. offsetDirty is not consumed until the wait is over, so a
+            // click arriving mid-wait pushes the deadline out instead of being lost.
+            while (offsetDirty.load() && !workerQuit.load()) {
+                double waited = now_ms() - lastOffsetChangeMs.load();
+
+                if (waited >= GB_OFFSET_SETTLE_MS) {
+                    break;
+                }
+                usleep((useconds_t)((GB_OFFSET_SETTLE_MS - waited) * 1000.0));
+            }
+
+            if (!workerQuit.load() && offsetDirty.exchange(false)) {
+                uint32 nowLatency = snapshot_latency();
+
+                if (nowLatency != reportedLatency) {
+                    reportedLatency = nowLatency;
+                    latencyDirty.store(true);
+                }
+            }
+
             if (latencyDirty.exchange(false)) {
                 // BEFORE send_latency_changed(), deliberately. That call is what makes the host
                 // reactivate us and reopen the device, and reconfigure() decides on reopen whether
@@ -1870,8 +1904,27 @@ private:
 
     // Slot to device, skipping anything with no inputs - the same filter, in the same order, that
     // the editor and the controller use. One function so the three cannot drift apart again.
+    // SLOT 0 IS "NONE", and every real device sits one higher.
+    //
+    // Before this there was no way to express "nothing", which made two different states share one
+    // value: a fresh instance that had chosen nothing and an instance that had chosen the first
+    // device both read 0. The panel showed that as the first device's name while its own header said
+    // "no device selected" - the plug-in contradicting itself in two lines of the same window - and
+    // there was no way back to nothing once a device had been picked.
+    //
+    // Devices moved UP by one rather than "None" being bolted on at the end, because 0 is the value
+    // a VST3 parameter defaults to and the value a host restores when a project names no device. It
+    // costs nothing on load: setComponentState() resolves a saved project by its device UID and
+    // recomputes the parameter from that, so a saved set still reopens on the device it named. What
+    // does shift is a recorded AUTOMATION lane of the device parameter, which would now name the
+    // device one place earlier - accepted deliberately at v0.1.0 for a setup control nobody
+    // automates.
     static bool resolve_slot(const tDeviceInfo * list, uint32_t count, int slot, tDeviceInfo * out) {
-        uint32_t seen = 0;
+        uint32_t seen = 1;      // slot 0 is None, so the first real device is slot 1
+
+        if (slot <= 0) {
+            return false;       // None: nothing to open, and reconfigure() closes what is open
+        }
 
         for (uint32_t i = 0; i < count; i++) {
             if (list[i].inputChannels == 0) {
@@ -2912,6 +2965,11 @@ private:
     std::atomic<int>    measureLatency{0};
     std::atomic<bool>   measureStore{false};
     std::atomic<bool>   latencyDirty{false};
+
+    // The offset moved and the host has not been told yet, and when it last moved - see
+    // GB_OFFSET_SETTLE_MS.
+    std::atomic<bool>   offsetDirty{false};
+    std::atomic<double> lastOffsetChangeMs{0.0};
     std::atomic<int>    measureOnset{0};
     std::atomic<int>    measureOurs{0};
     std::atomic<float>  measureTriggerPeak{0.0f};

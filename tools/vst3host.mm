@@ -108,7 +108,10 @@ public:
 
 static void usage(void) {
     fprintf(stderr,
-            "usage: vst3host <plugin.vst3> [--seconds N] [--shot out.png] [--size WxH]\n"
+            "usage: vst3host <plugin.vst3> [--seconds N] [--shot out.png] [--size WxH] [--click X,Y]\n"
+            "  --audio N     which audio class to load when the plug-in registers several (default 0)\n"
+            "  --click X,Y   send a mouse-down to the plug-in's view at canvas point X,Y before the\n"
+            "                shot, so a drop-down or other click-driven state can be captured\n"
             "  --seconds N   quit after N seconds (default: run until the window is closed)\n"
             "  --shot PATH   screenshot the window just before quitting; implies --seconds\n"
             "  --size WxH    ask the view for this size in points before attaching\n");
@@ -122,6 +125,18 @@ int main(int argc, const char ** argv) {
     const char * bundlePath = argv[1];
     const char * shotPath   = nullptr;
     double       seconds    = 0.0;
+
+    // WHERE TO CLICK BEFORE THE SHOT. A drop-down only exists after a click, and driving that with
+    // a screen-coordinate clicker means guessing which window is under the pointer - which, tried
+    // once, put a click into an unrelated application. Posting the event to the plug-in's own view
+    // cannot miss, needs no window to be frontmost, and works with the screen locked.
+    // Up to four, applied in order half a second apart - enough to open a drop-down and then choose
+    // from it, which is the only way to test that a menu selection reaches the parameter at all.
+    int          audioIndex = 0;    // which audio class to load, in registration order
+    int          audioSeen   = 0;
+    double       clickX[4]  = { -1.0, -1.0, -1.0, -1.0 };
+    double       clickY[4]  = { -1.0, -1.0, -1.0, -1.0 };
+    int          clicks     = 0;
     int          wantW      = 0;
     int          wantH      = 0;
 
@@ -130,6 +145,15 @@ int main(int argc, const char ** argv) {
             seconds = atof(argv[++i]);
         } else if ((strcmp(argv[i], "--shot") == 0) && ((i + 1) < argc)) {
             shotPath = argv[++i];
+
+            if (seconds <= 0.0) {
+                seconds = 3.0;
+            }
+        } else if ((strcmp(argv[i], "--audio") == 0) && ((i + 1) < argc)) {
+            audioIndex = atoi(argv[++i]);
+        } else if ((strcmp(argv[i], "--click") == 0) && ((i + 1) < argc) && (clicks < 4)) {
+            sscanf(argv[++i], "%lf,%lf", &clickX[clicks], &clickY[clicks]);
+            clicks++;
 
             if (seconds <= 0.0) {
                 seconds = 3.0;
@@ -208,8 +232,16 @@ int main(int argc, const char ** argv) {
                 memcpy(controllerCid, info.cid, sizeof(TUID));
                 haveController = true;
             } else if (strcmp(info.category, kVstAudioEffectClass) == 0) {
-                memcpy(componentCid, info.cid, sizeof(TUID));
-                haveComponent = true;
+                // A PLUG-IN CAN REGISTER MORE THAN ONE. This one registers an effect and an
+                // instrument, and taking whichever came first meant the instrument's own rows - and
+                // therefore its longest menus - could not be looked at from here at all. --audio N
+                // picks by position among the audio classes; the default of 0 keeps the old
+                // behaviour of taking the first.
+                if (audioIndex == audioSeen) {
+                    memcpy(componentCid, info.cid, sizeof(TUID));
+                    haveComponent = true;
+                }
+                audioSeen++;
             }
         }
 
@@ -298,6 +330,42 @@ int main(int argc, const char ** argv) {
         }
         [window makeKeyAndOrderFront:nil];
         [NSApp activateIgnoringOtherApps:YES];
+
+        // Half a second in, so the editor has drawn at least one frame and knows its own size before
+        // being asked where the click landed.
+        for (int c = 0; c < clicks; c++) {
+            double cx = clickX[c];
+            double cy = clickY[c];
+
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((0.5 + (0.5 * c)) * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                NSView * target = [[container subviews] firstObject];
+
+                if (target == nil) {
+                    fprintf(stderr, "no plug-in view to click\n");
+                    return;
+                }
+                // The plug-in's view flips y itself (its canvas origin is top left), so the point
+                // handed over here is in AppKit's bottom-left space - the same space a real event
+                // would arrive in.
+                double  scale = [target bounds].size.width / 520.0;
+                NSPoint local = NSMakePoint(cx * scale,
+                                            [target bounds].size.height - (cy * scale));
+                NSEvent * down =
+                    [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                                       location:[target convertPoint:local toView:nil]
+                                  modifierFlags:0
+                                      timestamp:[[NSProcessInfo processInfo] systemUptime]
+                                   windowNumber:[window windowNumber]
+                                        context:nil
+                                    eventNumber:0
+                                     clickCount:1
+                                       pressure:1.0];
+
+                [target mouseDown:down];
+                fprintf(stdout, "clicked the plug-in view at canvas %.0f,%.0f\n", cx, cy);
+            });
+        }
 
         if (seconds > 0.0) {
             // STOPPING NEEDS AN EVENT TO LAND ON, which is the whole of a bug that made this

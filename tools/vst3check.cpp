@@ -1553,7 +1553,18 @@ int main(int argc, char ** argv) {
 
                 processor->process(data);
 
-                for (int k = 0; (k < 30); k++) {
+                // POLL UNTIL IT OPENS, rather than sleeping a fixed three seconds and hoping.
+                //
+                // How long an open takes is a property of the DEVICE, not of the plug-in: a USB
+                // interface that is already awake answers in well under a second, while slot 1 on
+                // this machine became an iPhone Continuity microphone - which has to wake a phone
+                // first, and does not reliably manage it inside three seconds. A fixed sleep turned
+                // that into an intermittent failure of "a selection opens a device", which reads as
+                // a plug-in fault and is not one.
+                //
+                // Ten seconds is a ceiling, not a wait: the loop leaves as soon as the latency goes
+                // non-zero, so a normal device costs no more than it did before.
+                for (int k = 0; (k < 100) && (processor->getLatencySamples() == 0); k++) {
                     usleep(100000);
                 }
 

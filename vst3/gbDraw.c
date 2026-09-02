@@ -21,10 +21,18 @@
 // render_rectangle() and draw_button() - the same calls the three sibling applications draw with -
 // so the panel cannot drift away from their look without the change showing up in all of them.
 //
-// STEPPERS RATHER THAN DROP-DOWNS, deliberately. SynthLib has a context-menu system and it works in
-// a plug-in, but pulling it in means linking the popup, menu-bar and click-region machinery for
-// three settings. A pair of arrows either side of a value needs none of it, and the editor's whole
-// job at this stage is to make the plug-in usable without the host's generic panel.
+// DROP-DOWNS FOR THE LONG LISTS, STEPPERS FOR THE SHORT ONES. Device, Rate and Buffer open a menu
+// and have no arrows; everything below them keeps its arrows and has no menu.
+//
+// This comment used to say the opposite - that steppers were chosen because a drop-down "means
+// linking the popup, menu-bar and click-region machinery". That was measured and found untrue:
+// SynthLib's contextMenu.c includes nothing beyond the headers this file already uses, and
+// clickRegion.c was already in do-vst3's list. The build cost was one line.
+//
+// What decided it was not cost but behaviour. A stepper walks THROUGH every value on the way to the
+// one you want, and each step here is a real device change - so stepping past a device opened it,
+// which is exactly what "nothing opens until explicitly chosen" exists to prevent. On this machine
+// that meant stepping down from a mixer woke an iPhone Continuity microphone in passing.
 //
 // EVERY CONTROL IS A VST3 PARAMETER, and a click returns a request rather than acting. The host has
 // to be told through beginEdit/performEdit/endEdit or its automation and its saved state end up
@@ -45,6 +53,8 @@
 #include "synthlibHost.h"
 #include "synthlibTypes.h"
 #include "utilsGraphics.h"
+#include "contextMenu.h"
+#include "synthlibTypes.h"
 
 #define FONT_PATH             "/System/Library/Fonts/Supplemental/Arial.ttf"
 #define FONT_PRELOAD_SIZE     (16.0)
@@ -65,6 +75,90 @@ const int    gGbRateCount  = (int)(sizeof(gGbRates) / sizeof(gGbRates[0]));
 const int    gGbFrameCount = (int)(sizeof(gGbFrames) / sizeof(gGbFrames[0]));
 
 static bool   gFontReady  = false;
+
+// ── THE DROP-DOWNS ──────────────────────────────────────────────────────────────────────────────
+//
+// The steppers stay. That is not indecision: a menu can only show as many entries as fit the canvas
+// (contextMenu.c has no scrolling, and clamp_menu_to_screen() only MOVES a menu that is too tall, so
+// the surplus runs off the bottom undrawn), while a pair of arrows can always reach every entry
+// however long the list runs. Replacing them would trade a slow control for an incomplete one on a
+// rig nobody can predict the size of. So the menu is the fast path and the arrows are the exhaustive
+// one, and no list length can make a device unreachable.
+//
+// Where the pointer is, in the same logical space the menu is opened in. contextMenu.c asks for this
+// through synthlib_host_init() rather than declaring an extern, so the view feeds it in.
+// NOT RGB_GREY_3, which is what the sibling apps' menus use. In this panel's palette that macro and
+// RGB_BACKGROUND_GREY are the SAME value, {0.30, 0.30, 0.30} - so items painted with it vanished into
+// the panel and the menu appeared as text floating over the controls behind it. Darker than the
+// background and lighter than the control boxes ({0.16, 0.16, 0.18}), so it reads as sitting above
+// both. contrasting_text_colour() picks the label colour from this, so it only has to be right once.
+#define GB_MENU_BG    ((tRgb){ 0.22, 0.22, 0.24 })
+
+static tCoord gMouse      = { 0.0, 0.0 };
+
+static void gb_mouse_coord(tCoord * coord) {
+    if (coord != NULL) {
+        *coord = gMouse;
+    }
+}
+
+void gb_draw_set_mouse(double x, double y) {
+    gMouse.x = x;
+    gMouse.y = y;
+}
+
+bool gb_draw_menu_active(void) {
+    return gContextMenu.active;
+}
+
+// What a menu selection produced, picked up by gb_draw_click() on the click that made it. The action
+// callback carries only an index, so the menu that is open has to be recorded alongside it - the
+// same "keep it in your own app-local struct" arrangement contextMenu.h describes for G2-Edit.
+static tGbEdit gMenuFor      = eGbEditNone;
+static int     gMenuChoice   = -1;
+
+// Labels must outlive the click that opens the menu: tMenuItem holds a const char *, it does not
+// copy. One buffer per slot, filled when the menu is built.
+#define GB_MENU_MAX      (GB_DEVICE_SLOTS + 1)
+#define GB_MENU_LABEL    (64)
+
+static char       gMenuLabels[GB_MENU_MAX][GB_MENU_LABEL];
+static tMenuItem  gMenuItems[GB_MENU_MAX];
+
+static void gb_menu_action(int index) {
+    gMenuChoice = index;
+}
+
+// A menu wide enough for the longest name it holds would swallow the panel, so the cell width is
+// capped and long names are simply truncated by the renderer's own clipping. Two columns is what
+// fits GB_CANVAS_W at that width; beyond what two columns hold, the arrows remain the way through.
+static void gb_open_menu(tGbEdit which, int count, tRectangle anchor) {
+    int columns = 1;
+
+    if (count > GB_MENU_MAX - 1) {
+        count = GB_MENU_MAX - 1;
+    }
+
+    for (int i = 0; i < count; i++) {
+        gMenuItems[i].label           = gMenuLabels[i];
+        gMenuItems[i].colour          = GB_MENU_BG;
+        gMenuItems[i].action          = gb_menu_action;
+        gMenuItems[i].param           = (uint32_t)i;
+        gMenuItems[i].subMenu         = NULL;
+        gMenuItems[i].subMenuColumns  = 0;
+        gMenuItems[i].subMenuCellWidth = 0.0;
+    }
+    gMenuItems[count].label  = NULL;
+    gMenuItems[count].action = NULL;
+
+    // 22 px a row (STANDARD_TEXT_HEIGHT + 5*2). Two columns once one would not fit the canvas.
+    if ((count * 22) > (int)(GB_CANVAS_H - 40.0)) {
+        columns = 2;
+    }
+    gMenuFor    = which;
+    gMenuChoice = -1;
+    open_context_menu(below_rect(anchor), gMenuItems, (uint32_t)columns, 210.0);
+}
 
 // Set by the view before every frame rather than once at creation: like the status slot, one editor
 // must not answer for another's. With an effect and an instrument both open, whichever drew last
@@ -126,6 +220,18 @@ static double telemetry_y(void) { return (gInstrument ? offset_y() : level_y()) 
 
 #define GB_MAX_FIRST_CHANNEL    (32)
 
+// ROWS 0-2 ARE DROP-DOWNS AND HAVE NO ARROWS. Two controls for one setting is clutter, and a menu
+// that lists every choice at once makes stepping past them pointless.
+//
+// It does put the whole burden of reachability on the menu, which the arrows used to carry: whatever
+// the list length, the menu must be able to show all of it. That is what the column split in
+// gb_open_menu() is for, and it is why the count it can hold is worth keeping an eye on rather than
+// treating as settled - see the note there.
+static bool row_is_menu(int row) {
+    (void)row;
+    return true;    // every stepper row is a drop-down; the offset below them keeps its arrows
+}
+
 static tRectangle row_prev(int row) {
     return (tRectangle){ { LABEL_W, row_y(row) }, { ARROW_W, ROW_H - 6.0 } };
 }
@@ -135,9 +241,10 @@ static tRectangle row_next(int row) {
 }
 
 static tRectangle row_value(int row) {
-    double x = LABEL_W + ARROW_W + 6.0;
+    double x     = row_is_menu(row) ? LABEL_W : (LABEL_W + ARROW_W + 6.0);
+    double right = row_is_menu(row) ? (GB_CANVAS_W - 30.0) : (GB_CANVAS_W - 36.0 - ARROW_W);
 
-    return (tRectangle){ { x, row_y(row) }, { (GB_CANVAS_W - 36.0 - ARROW_W) - x, ROW_H - 6.0 } };
+    return (tRectangle){ { x, row_y(row) }, { right - x, ROW_H - 6.0 } };
 }
 
 #define RIGHT_GUTTER    (74.0)     // room for the trim readout, which sits outside the track
@@ -218,7 +325,7 @@ void gb_device_list_invalidate(void) {
 int gb_slot_for_uid(const char * uid) {
     uint32_t            count = 0;
     const tDeviceInfo * list  = device_list(&count);
-    int                 seen  = 0;
+    int                 seen  = 1;      // slot 0 is None - see resolve_slot() in gbVst3.cpp
 
     if ((uid == NULL) || (uid[0] == '\0')) {
         return -1;
@@ -260,7 +367,7 @@ double gb_device_normalized(int slot) {
 int gb_input_device_count(void) {
     uint32_t            count = 0;
     const tDeviceInfo * list  = device_list(&count);
-    int                 found = 0;
+    int                 found = 1;      // None is always selectable, so it always counts
 
     for (uint32_t i = 0; i < count; i++) {
         if (list[i].inputChannels > 0) {
@@ -268,7 +375,7 @@ int gb_input_device_count(void) {
         }
     }
 
-    return (found > 0) ? found : 1;
+    return found;
 }
 
 // HOW MANY INPUT CHANNELS THE DEVICE IN THIS SLOT ACTUALLY HAS.
@@ -287,7 +394,11 @@ int gb_input_device_count(void) {
 int gb_input_device_channels(int index) {
     uint32_t            count = 0;
     const tDeviceInfo * list  = device_list(&count);
-    int                 seen  = 0;
+    int                 seen  = 1;      // slot 0 is None - see resolve_slot() in gbVst3.cpp
+
+    if (index <= 0) {
+        return 0;       // None has no channels, and 0 means "unknown" to the callers, which is right
+    }
 
     for (uint32_t i = 0; i < count; i++) {
         if (list[i].inputChannels == 0) {
@@ -306,9 +417,13 @@ int gb_input_device_channels(int index) {
 void gb_input_device_name(int index, char * out, unsigned long len) {
     uint32_t            count = 0;
     const tDeviceInfo * list  = device_list(&count);
-    int                 seen  = 0;
+    int                 seen  = 1;      // slot 0 is None - see resolve_slot() in gbVst3.cpp
 
-    snprintf(out, len, "%s", "-");
+    snprintf(out, len, "%s", "None");
+
+    if (index <= 0) {
+        return;
+    }
 
     for (uint32_t i = 0; i < count; i++) {
         if (list[i].inputChannels == 0) {
@@ -353,6 +468,11 @@ void gb_draw_init(void) {
         .backgroundGrey = (tRgb)RGB_BACKGROUND_GREY,
     });
 
+    // contextMenu.c reaches back for the pointer position through this rather than declaring its own
+    // extern - see synthlibHost.h. The redraw half is already covered by gbAppStubs.c. No
+    // pointerCaptured predicate: this panel never hides the pointer for a drag.
+    synthlib_host_init((tSynthLibHost){ .mouseCoord = gb_mouse_coord, .pointerCaptured = NULL });
+
     gFontReady = preload_glyph_textures(FONT_PATH, FONT_PRELOAD_SIZE);
 }
 
@@ -374,8 +494,10 @@ static void value_box(int row, const char * text) {
 static void stepper(int row, const char * labelText, const char * valueText) {
     label(20.0, row_y(row) + 5.0, labelText);
 
-    draw_button(mainArea, row_prev(row), "<", (tRgb){ 0.30, 0.30, 0.33 });
-    draw_button(mainArea, row_next(row), ">", (tRgb){ 0.30, 0.30, 0.33 });
+    if (!row_is_menu(row)) {
+        draw_button(mainArea, row_prev(row), "<", (tRgb){ 0.30, 0.30, 0.33 });
+        draw_button(mainArea, row_next(row), ">", (tRgb){ 0.30, 0.30, 0.33 });
+    }
 
     value_box(row, valueText);
 }
@@ -728,6 +850,11 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
     snprintf(buffer, sizeof(buffer), "%d", (status != NULL) ? atomic_load(&status->resyncs) : 0);
     stat(kCol[3], y, "resync", buffer);
 
+    // LAST, so it draws over everything - and the hover update goes here rather than in the click
+    // path because the highlight has to follow the pointer while no button is down.
+    update_context_menu_hover();
+    render_context_menu();
+
     render_backend_flush();
 }
 
@@ -762,8 +889,179 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
 
     request->which = eGbEditNone;
 
+    // THE MENU GETS FIRST REFUSAL, and a click anywhere while it is open belongs to it - either
+    // choosing an item or dismissing it. Letting the click fall through to the rows underneath would
+    // mean dismissing the menu and working a control in the same gesture.
+    if (gContextMenu.active) {
+        gMenuChoice = -1;
+        handle_context_menu_click((tCoord){ x, y });
+
+        if ((gMenuChoice >= 0) && (gMenuFor != eGbEditNone)) {
+            int    choice = gMenuChoice;
+            tGbEdit which = gMenuFor;
+
+            gMenuChoice    = -1;
+            gMenuFor       = eGbEditNone;
+            request->which = which;
+
+            switch (which) {
+                case eGbEditDevice:
+                    request->normalized = gb_device_normalized(choice);
+                    break;
+
+                case eGbEditRate:
+                    request->normalized = (double)choice / (double)(gGbRateCount - 1);
+                    break;
+
+                case eGbEditFrames:
+                    request->normalized = (double)choice / (double)(gGbFrameCount - 1);
+                    break;
+
+                case eGbEditMode:
+                    request->normalized = (double)choice;       // 0 mono, 1 stereo
+                    break;
+
+                case eGbEditFirstChannel:
+                    request->normalized = (double)choice / (double)(GB_MAX_FIRST_CHANNEL - 1);
+                    break;
+
+                case eGbEditMidiDest:
+                    request->normalized = (double)choice / (double)(GB_MIDI_MAX_DEST - 1);
+                    break;
+
+                case eGbEditMidiChannel:
+                    request->normalized = (double)choice / (double)(GB_CHANNEL_SLOTS - 1);
+                    break;
+
+                default:
+                    request->which = eGbEditNone;
+                    return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    // The VALUE between the arrows opens a menu; the arrows themselves still step. Both reach the
+    // same parameter, so nothing is lost either way - see the note on gMouse above for why both.
+    {
+        struct { tGbEdit which; int row; } menus[] = {
+            { eGbEditDevice,       0 }, { eGbEditRate,        1 }, { eGbEditFrames,  2 },
+            { eGbEditMode,         3 }, { eGbEditFirstChannel, 4 }, { eGbEditMidiDest, 5 },
+            { eGbEditMidiChannel,  6 },
+        };
+        // Each row lists only what can actually be chosen on the CURRENT device, so the limits that
+        // used to be enforced by clamping the arrows are now expressed by the list simply not
+        // offering the impossible - which is the better place for them, because a control that never
+        // offers a bad value never has to explain why it refused one.
+        int channels = gb_input_device_channels(gb_device_slot(gDevice));
+
+        for (unsigned m = 0; m < (sizeof(menus) / sizeof(menus[0])); m++) {
+            if ((menus[m].row >= row_count()) || !hit(row_value(menus[m].row), x, y)) {
+                continue;
+            }
+            int count = 0;
+
+            switch (menus[m].which) {
+                case eGbEditDevice:
+                    count = gb_input_device_count();
+
+                    for (int i = 0; (i < count) && (i < GB_MENU_MAX - 1); i++) {
+                        gb_input_device_name(i, gMenuLabels[i], sizeof(gMenuLabels[i]));
+                    }
+                    break;
+
+                case eGbEditRate:
+                    count = gGbRateCount;
+
+                    for (int i = 0; i < count; i++) {
+                        snprintf(gMenuLabels[i], sizeof(gMenuLabels[i]), "%.0f Hz", gGbRates[i]);
+                    }
+                    break;
+
+                case eGbEditFrames:
+                    count = gGbFrameCount;
+
+                    for (int i = 0; i < count; i++) {
+                        snprintf(gMenuLabels[i], sizeof(gMenuLabels[i]), "%d samples", gGbFrames[i]);
+                    }
+                    break;
+
+                case eGbEditMode:
+                    // Stereo is not offered by a device that has one input to give.
+                    count = (channels == 1) ? 1 : 2;
+                    snprintf(gMenuLabels[0], sizeof(gMenuLabels[0]), "%s", "Mono");
+
+                    if (count > 1) {
+                        snprintf(gMenuLabels[1], sizeof(gMenuLabels[1]), "%s", "Stereo");
+                    }
+                    break;
+
+                case eGbEditFirstChannel: {
+                    int width = (gMode < 0.5) ? 1 : 2;
+
+                    // The WIDTH comes off either way. With a device known the list ends at the last
+                    // start a pair still fits; with none known the fixed 32 is the bound instead -
+                    // and taking the width off that too is what stops a stereo list ending "32 - 33",
+                    // naming a channel no device can have.
+                    count = ((channels > 0) ? channels : GB_MAX_FIRST_CHANNEL) - width + 1;
+
+                    if (count < 1) {
+                        count = 1;
+                    }
+
+                    if (count > GB_MAX_FIRST_CHANNEL) {
+                        count = GB_MAX_FIRST_CHANNEL;
+                    }
+
+                    for (int i = 0; i < count; i++) {
+                        if (width == 1) {
+                            snprintf(gMenuLabels[i], sizeof(gMenuLabels[i]), "%d", i + 1);
+                        } else {
+                            snprintf(gMenuLabels[i], sizeof(gMenuLabels[i]), "%d - %d", i + 1, i + 2);
+                        }
+                    }
+                    break;
+                }
+
+                case eGbEditMidiDest:
+                    count = GB_MIDI_MAX_DEST;
+
+                    if (count > GB_MENU_MAX - 1) {
+                        count = GB_MENU_MAX - 1;
+                    }
+
+                    for (int i = 0; i < count; i++) {
+                        gb_midi_destination_name(i, gMenuLabels[i], sizeof(gMenuLabels[i]));
+                    }
+                    break;
+
+                case eGbEditMidiChannel:
+                    count = GB_CHANNEL_SLOTS;
+                    snprintf(gMenuLabels[0], sizeof(gMenuLabels[0]), "%s", "Source (as the DAW sends)");
+
+                    for (int i = 1; i < count; i++) {
+                        snprintf(gMenuLabels[i], sizeof(gMenuLabels[i]), "%d", i);
+                    }
+                    break;
+
+                default:
+                    break;
+            }
+
+            if (count > 0) {
+                gb_open_menu(menus[m].which, count, row_value(menus[m].row));
+            }
+            return false;
+        }
+    }
+
     for (int row = 0; row < row_count(); row++) {
         int delta = 0;
+
+        if (row_is_menu(row)) {
+            continue;   // its whole width is the menu, handled above
+        }
 
         if (hit(row_prev(row), x, y)) {
             delta = -1;

@@ -45,6 +45,7 @@ C_SOURCES=(
     "$HERE/SynthLib/src/utils.c"
     "$HERE/SynthLib/src/synthlibHost.c"
     "$HERE/SynthLib/src/synthlibMidi.c"
+    "$HERE/SynthLib/src/contextMenu.c"
     "$HERE/SynthLib/src/clickRegion.c"
     "$HERE/SynthLib/src/inputState.c"
     "$HERE/SynthLib/src/synthlibVersion.c"
