@@ -6,8 +6,8 @@ Built-but-unchecked work goes in to-test.txt.
 
 Bugs
 
-- The current FX variation doesn't allow for recording on the host audio track in Ableton. One of the attributes we're presenting to host maybe wrong?
+- FX output can't be recorded on its own Ableton audio track - attributes now cleared as the cause (see findings 2026-09-02), so the question is whether to document the routing workaround or build a virtual driver
 - On Cubase, helix audio is playing when Kronox is selected. Says capturing Helix, but Kronos actually selected. Seems OK on Ableton as-is.
 - Ideally should be able to freeze / bounce when we're using GenBridge as an instrument. Although, Elektron OverBridge doesn't do that, so not high priority.
 - Only seen once. When dragging GenBridge onto Ableton session screen, audio track was created which didn't send to main.
-- Locking-up if I select a QU24 input with a frame size less than 64.
+- Locking-up if I select a QU24 input with a frame size less than 64 - shared-device guard, restore-on-close and the reconfigure debounce all landed 2026-09-02, so RETEST before chasing further

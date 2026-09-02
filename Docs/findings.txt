@@ -3,6 +3,49 @@ GenBridge FINDINGS
 Completed work, measurements, and the traps that cost real time.
 
 
+2026-09-02  RECORDING THE FX ON ITS OWN ABLETON TRACK: NOT AN ATTRIBUTE
+------------------------------------------------------------
+The todo suspected an attribute presented to the host. Three were checked and eliminated.
+
+silenceFlags - NOT the cause, and worth writing down because it looks like one. The plug-in never
+sets outputs[0].silenceFlags, and an FX on a track with no input gets all-silent INPUT flags, so
+"host propagates the silence" is a tempting story. JUCE's VST3 wrapper
+(juce_audio_plugin_client_VST3.cpp) never touches silenceFlags either, and it ships in thousands of
+plug-ins that record in Live. Do not spend time here.
+
+Load-time class/bus attributes - NOT the cause. Live 12.4.5's own log shows both variants restoring
+clean: "VST3: plugin processor successfully loaded ... VST3: Restored: GenBridge", no warnings. This
+is runtime behaviour, not the class-category rejection G2-Edit hit.
+
+getTailSamples - genuinely WRONG, now fixed, and NOT the cause. It returned a plain 0, i.e.
+Vst::kNoTail, which promises that nothing comes out once the input goes silent. True of a reverb,
+false of a bridge whose audio arrives from hardware and never came from the input bus - and the FX is
+used on a track with nothing feeding it, exactly the state where a host may stop processing a chain
+that has promised silence. Now kInfiniteTail for both variants, matching how JUCE maps a generator's
+tail, and asserted in vst3check. CT tested: "doesn't work, but also doesn't seem to break anything" -
+so it stays as the honest declaration, and it is one variable permanently eliminated.
+
+WHAT IS ACTUALLY LEFT is Live's recording model rather than anything the plug-in declares: an audio
+track records its INPUT, not the output of its own device chain. That is why Resampling exists as an
+input source. So no attribute can make an effect print onto the track it sits on.
+
+Two routes, and they are a product decision rather than a bug:
+  - Document the routing: put GenBridge on track 1, set track 2's "Audio From" to track 1 Post FX,
+    arm and record track 2. Or use Resampling. One step, no code.
+  - Build a virtual CoreAudio driver, which is what AudioMovers Inject does - "Inject IO" appears as
+    a real input and Live records it directly. That is the only way the audio reaches a track input,
+    and it is a large piece of work (AudioServerPlugIn), not an attribute change.
+
+DECISIVE TEST if it is ever revisited: watch the panel meters while an armed track records. Audio
+moving in the plug-in with an empty recorded clip proves the plug-in is fine and the host is not
+capturing device output. Silence in the plug-in too would mean something else entirely.
+
+Related: "freeze / bounce as an instrument" in the todo is the same root from the other end -
+OnlyRT in "Fx|NoOfflineProcess|OnlyRT|Tools" excludes the plug-in from everything Live does faster
+than realtime, deliberately, because a kOffline bounce cannot work when the ring fills at one second
+per second.
+
+
 2026-09-01  ABSENT SAVED DEVICE FELL THROUGH TO A MICROPHONE
 ------------------------------------------------------------
 Reported by CT: a project whose USB interface is not plugged in came up passing microphone audio.

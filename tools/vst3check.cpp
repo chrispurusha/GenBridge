@@ -607,6 +607,17 @@ int main(int argc, char ** argv) {
 
         printf("    declaring maxSamplesPerBlock %d\n", maxBlock);
         check("setupProcessing accepted", processor->setupProcessing(setup) == kResultOk);
+
+        // THE TAIL IS A PROMISE ABOUT SILENCE, and this plug-in must not make the usual one. kNoTail
+        // says "nothing comes out once my input goes quiet" - true of a reverb, false of a bridge
+        // whose audio arrives from hardware and never came from the input bus at all. The effect is
+        // used on a track with nothing feeding it, which is precisely when a host may stop
+        // processing a chain that has promised to be silent.
+        uint32 tail = processor->getTailSamples();
+
+        printf("    tail: %u (%s)\n", tail,
+               (tail == kInfiniteTail) ? "infinite" : ((tail == kNoTail) ? "none" : "finite"));
+        check("declares an infinite tail, not kNoTail", tail == kInfiniteTail);
     }
 
     // A UID containing commas and spaces is the case that breaks a naive parser, and both are real:

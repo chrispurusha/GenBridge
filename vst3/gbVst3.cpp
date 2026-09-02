@@ -810,8 +810,19 @@ public:
         return (symbolicSize == kSample32) ? kResultTrue : kResultFalse;
     }
 
+    // INFINITE, and for both variants.
+    //
+    // kNoTail - which is what a plain 0 means - is a promise that nothing comes out once the input
+    // goes silent. That is true of a reverb with its input muted and false of everything this
+    // plug-in does: the audio arrives from a piece of hardware and has no relationship to the input
+    // bus at all. The effect is USED on a track with nothing feeding it, which is exactly the state
+    // in which a host is entitled to stop processing a chain that has promised to be silent.
+    //
+    // JUCE draws the same distinction from the other side: its wrapper maps a plug-in's tail length
+    // onto kNoTail or kInfiniteTail, so any JUCE generator reports infinite where this reported
+    // none (juce_audio_plugin_client_VST3.cpp, getTailSamples).
     uint32 PLUGIN_API getTailSamples(void) SMTG_OVERRIDE {
-        return 0;
+        return kInfiniteTail;
     }
 
     // Everything between the device's converters and this plug-in's output, so the host can line
