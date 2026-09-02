@@ -186,6 +186,51 @@ bool device_set_buffer_frames(AudioObjectID id, uint32_t frames) {
     return AudioObjectSetPropertyData(id, &address, 0, NULL, sizeof(value), &value) == noErr;
 }
 
+// THE STREAM'S OWN LATENCY, which is a fourth term and not the device's.
+//
+// kAudioDevicePropertyLatency is what the DEVICE reports; a stream within it can declare more on top
+// - format conversion, DSP in the path - and CoreAudio reports that separately, on the stream object
+// rather than the device. Measured on this rig: zero on every USB and Thunderbolt interface, and
+// 2399 frames (50 ms at 48 kHz) on the built-in microphone, 690 on the built-in speakers.
+//
+// That distribution is exactly why it went unnoticed - it is zero on the devices a bridge is
+// actually pointed at, and only the built-in hardware pays it. Left out, the host is told a figure
+// 50 ms short and its delay compensation is wrong by that much.
+static uint32_t stream_latency_frames(AudioObjectID id, bool isInput) {
+    AudioObjectPropertyAddress address = address_of(kAudioDevicePropertyStreams, isInput);
+    UInt32                     size    = 0;
+
+    if (AudioObjectGetPropertyDataSize(id, &address, 0, NULL, &size) != noErr) {
+        return 0;
+    }
+
+    if (size < sizeof(AudioStreamID)) {
+        return 0;
+    }
+    AudioStreamID streams[16];
+
+    if (size > sizeof(streams)) {
+        size = sizeof(streams);
+    }
+
+    if (AudioObjectGetPropertyData(id, &address, 0, NULL, &size, streams) != noErr) {
+        return 0;
+    }
+    // The FIRST stream in scope, as JUCE does. A device with several streams in one direction can in
+    // principle declare a different latency on each, but the channels this bridge takes all come
+    // from one of them, and there is no meaningful way to report two numbers to a host that wants
+    // one.
+    AudioObjectPropertyAddress latencyAddress = address_of(kAudioStreamPropertyLatency, isInput);
+    UInt32                     value          = 0;
+    UInt32                     valueSize      = sizeof(value);
+
+    if (AudioObjectGetPropertyData(streams[0], &latencyAddress, 0, NULL, &valueSize, &value) != noErr) {
+        return 0;
+    }
+
+    return (uint32_t)value;
+}
+
 uint32_t device_latency_frames(AudioObjectID id, bool isInput) {
     uint32_t total = device_buffer_frames(id);
     UInt32   value = 0;
@@ -203,6 +248,8 @@ uint32_t device_latency_frames(AudioObjectID id, bool isInput) {
     if (AudioObjectGetPropertyData(id, &address, 0, NULL, &size, &value) == noErr) {
         total += value;
     }
+
+    total += stream_latency_frames(id, isInput);
 
     return total;
 }

@@ -2016,6 +2016,7 @@ private:
         atomic_store(&status->measuredSamples, (int)hardwareSamples);
         atomic_store(&status->offsetSamples, (int)((offsetMs.load() / 1000.0) * hostRate));
         atomic_store(&status->latencySamples, (int)(running ? report_latency() : 0));
+        atomic_store(&status->recommendedFrames, recommendedSetpoint);
     }
 
     // Put the conservative floor back after a retune turned out to be too tight.
@@ -2146,7 +2147,8 @@ private:
 
         nominalRatio   = deviceRate / hostRate;
         deviceLatency  = device_latency_frames(info.id, true);
-        setpointFrames = (settings->targetMs > 0.0)
+        manualSetpoint = (settings->targetMs > 0.0);
+        setpointFrames = manualSetpoint
                          ? ((settings->targetMs / 1000.0) * deviceRate)
                          : 0.0;
         trimGain.store(settings->trim);
@@ -2154,10 +2156,28 @@ private:
         uint32_t effectiveHostFrames = (observedMaxFrames > 0) ? observedMaxFrames : hostMaxFrames;
         double   minimum              = minimum_setpoint_for(effectiveHostFrames, deviceFrames);
 
+        // THE FLOOR IS ADVICE, NOT A LIMIT — for a setting the user typed. Auto still takes it, and
+        // still adds the margin; an explicit target is now honoured as given, however low.
+        //
+        // It is advice because the floor is deliberately conservative and cannot be otherwise: it
+        // covers the WORST phase alignment between two unrelated clocks and the LARGEST block the
+        // host says it may ever ask for, neither of which is what a given session actually does. A
+        // number that pessimistic is worth showing and wrong to impose — clamping silently replaced
+        // what the user asked for with a figure they could not see, which reads as the control not
+        // working.
+        //
+        // Safe to allow because the failure is bounded and visible. ring_read() hands the device
+        // silence on an underrun and does NOT advance the read cursor, so the loop still sees the
+        // true depth and pulls to refill; nothing is corrupted and nothing runs away. The panel
+        // already shows fill/setpoint, underruns and resyncs, so too tight a setting reports itself
+        // in the one place the user is looking while they choose it.
+        recommendedSetpoint = minimum * GB_AUTO_MARGIN;
+
         if (setpointFrames <= 0.0) {
-            setpointFrames = minimum * GB_AUTO_MARGIN;      // auto
+            setpointFrames = recommendedSetpoint;           // auto
         } else if (setpointFrames < minimum) {
-            setpointFrames = minimum;                       // an override, clamped to what is safe
+            log_line("setpoint %.0f is below the %.0f frame floor (recommended %.0f) — honouring it;"
+                     " watch the underrun count", setpointFrames, minimum, recommendedSetpoint);
         }
 
         log_line("open %s rate %.0f frames %u ratio %.6f floor %.0f setpoint %.0f devlat %u"
@@ -2256,7 +2276,13 @@ private:
         // known and the correct setpoint is used from the first frame. Nothing then changes after
         // activation, so nothing asks the host to restart anything.
         observedFrames = 0;
-        retuneState.store((observedMaxFrames > 0) ? eRetuneSettled : eRetuneWatching);
+
+        // NOT ARMED FOR A MANUAL SETPOINT. Retuning exists to claw back latency the host's declared
+        // block size overstates, and it does that by REPLACING the setpoint. Against a figure the
+        // user typed that is not a saving, it is the plug-in overruling them a couple of seconds
+        // after they set it — the same silent overrule the clamp above used to do, arriving late.
+        retuneState.store(((observedMaxFrames > 0) || manualSetpoint)
+                          ? eRetuneSettled : eRetuneWatching);
 
         tGbStatus * status = gb_status(statusSlot);
 
@@ -2619,6 +2645,11 @@ private:
 
     std::atomic<tRetuneState> retuneState{eRetuneSettled};
     std::atomic<bool>   revertWanted{false};
+
+    // What the conservative floor would have picked, and whether the setpoint in force came from
+    // the user rather than from it. Both are written under configLock on the open path.
+    double              recommendedSetpoint{0.0};
+    bool                manualSetpoint{false};
     std::atomic<int>    midiDestination{0};
     std::atomic<bool>   offlineRender{false};
     std::atomic<double> offsetMs{0.0};

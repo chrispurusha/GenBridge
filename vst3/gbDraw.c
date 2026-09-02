@@ -669,9 +669,22 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
 
     y += 20.0;
 
-    snprintf(buffer, sizeof(buffer), "%.0f/%.0f",
-             (status != NULL) ? atomic_load(&status->fillFrames) : 0.0,
-             (status != NULL) ? atomic_load(&status->setpointFrames) : 0.0);
+    // fill/setpoint, and the recommended setpoint after it WHEN THE TWO DIFFER. The floor is advice
+    // rather than a limit (see the clamp note in gbVst3.cpp), and advice nobody can read is just a
+    // silent override with extra steps — so a setpoint below the recommendation says so here, in
+    // the same row as the underrun count that tells the user whether it is working.
+    {
+        double setpoint    = (status != NULL) ? atomic_load(&status->setpointFrames) : 0.0;
+        double recommended = (status != NULL) ? atomic_load(&status->recommendedFrames) : 0.0;
+
+        if ((recommended > 0.0) && ((setpoint + 1.0) < recommended)) {
+            snprintf(buffer, sizeof(buffer), "%.0f/%.0f (rec %.0f)",
+                     (status != NULL) ? atomic_load(&status->fillFrames) : 0.0, setpoint, recommended);
+        } else {
+            snprintf(buffer, sizeof(buffer), "%.0f/%.0f",
+                     (status != NULL) ? atomic_load(&status->fillFrames) : 0.0, setpoint);
+        }
+    }
     stat(kCol[0], y, "fill", buffer);
 
     snprintf(buffer, sizeof(buffer), "%+.2f", (status != NULL) ? atomic_load(&status->driftPpm) : 0.0);

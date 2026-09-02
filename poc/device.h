@@ -88,8 +88,10 @@ bool     device_set_buffer_frames(AudioObjectID id, uint32_t frames);
 // refusal is indistinguishable from a device that changed its mind - so ask first.
 bool     device_buffer_frame_range(AudioObjectID id, uint32_t * minFrames, uint32_t * maxFrames);
 
-// deviceLatency + safetyOffset + bufferFrames, the three parts AudioMovers' feeder logs
-// separately and which together are what a host must be told about.
+// deviceLatency + safetyOffset + bufferFrames + streamLatency. The first three are what AudioMovers'
+// feeder logs separately; the fourth is declared on the STREAM rather than the device and is zero on
+// every USB and Thunderbolt interface here - but 2399 frames on the built-in microphone, which is
+// how it stayed missing. Together they are what a host must be told about.
 uint32_t device_latency_frames(AudioObjectID id, bool isInput);
 
 // firstChannel is the device channel the first returned channel comes from, so a stereo pair can

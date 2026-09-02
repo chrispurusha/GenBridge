@@ -77,6 +77,11 @@ typedef struct {
 
     _Atomic double  fillFrames;
     _Atomic double  setpointFrames;
+
+    // The setpoint the conservative floor would have chosen, whether or not that is what is in
+    // force. Published so the panel can show a manual setting ALONGSIDE the recommendation instead
+    // of the plug-in quietly overruling one with the other — see the clamp note in gbVst3.cpp.
+    _Atomic double  recommendedFrames;
     _Atomic double  driftPpm;
 
     _Atomic float   peakLeft;
