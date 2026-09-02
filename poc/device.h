@@ -88,6 +88,11 @@ bool     device_set_buffer_frames(AudioObjectID id, uint32_t frames);
 // refusal is indistinguishable from a device that changed its mind - so ask first.
 bool     device_buffer_frame_range(AudioObjectID id, uint32_t * minFrames, uint32_t * maxFrames);
 
+// True while another client has the device running. Rate and buffer size are global to the device,
+// so a true here means changing either would reach into whatever else is using it - see the note on
+// the definition.
+bool     device_is_running_somewhere(AudioObjectID id);
+
 // deviceLatency + safetyOffset + bufferFrames + streamLatency. The first three are what AudioMovers'
 // feeder logs separately; the fourth is declared on the STREAM rather than the device and is zero on
 // every USB and Thunderbolt interface here - but 2399 frames on the built-in microphone, which is

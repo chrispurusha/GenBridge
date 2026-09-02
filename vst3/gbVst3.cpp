@@ -100,6 +100,23 @@ using namespace Steinberg::Vst;
 // How long to watch the host's real block size before trusting it, and how much has to be on the
 // table before disturbing the host's delay compensation to claim it.
 #define GB_SETTLE_SECONDS    (2.0)
+
+// HOW LONG A DEVICE/RATE/FRAMES CHANGE MUST STAND STILL BEFORE IT IS ACTED ON.
+//
+// Every one of those settings is a stepper, so moving two places sends two values, and each value
+// used to mean a full teardown and rebuild - closing the device, opening whatever slot was passed
+// over, then closing it again on the next press. Stepping past a device OPENED it, which is the very
+// thing "nothing opens until explicitly chosen" exists to prevent; on this rig slot 0 is an iPhone
+// Continuity microphone, so stepping down from a mixer woke it in passing.
+//
+// A quarter of a second is longer than a person's gap between arrow presses and far shorter than the
+// open it defers - an open can spend 800 ms in device_set_sample_rate_and_wait() alone - so a burst
+// collapses to one device change and a single deliberate change is not perceptibly slower.
+//
+// This lives in the PROCESSOR rather than in the editor on purpose. A drop-down would stop the
+// panel's own arrows walking the list, but the host's generic panel and any automation lane can
+// still sweep the parameter, and they reach this code by the same path.
+#define GB_DEVICE_SETTLE_MS  (250.0)
 #define GB_RETUNE_MIN_GAIN   (64.0)      // frames
 
 // TEMPORARY, until the editor exists. With no way to pick a device from inside a host, a fresh
@@ -787,8 +804,19 @@ public:
     // Everything between the device's converters and this plug-in's output, so the host can line
     // the track up against the rest of the session. Getting this wrong is the kind of bug people
     // live with for months without noticing: the audio is simply, quietly, in the wrong place.
+    // THE PUBLISHED FIGURE, not a fresh computation.
+    //
+    // A host may call this at any time on any thread. Recomputing meant reading setpointFrames,
+    // deviceLatency and nominalRatio - all plain doubles the worker rewrites under configLock during
+    // a device swap - so the answer could be assembled from a half-updated set, and nominalRatio is
+    // a DIVISOR in internal_latency_frames(): observed as 0 mid-swap it yields inf or NaN, handed
+    // straight to the host as a latency.
+    //
+    // Making `running` atomic fixed the flag and not the payload it gates. One atomic snapshot,
+    // written by the worker once a swap has finished, removes the composite read entirely - and it
+    // is the right value by definition, because it is exactly what the host was last told.
     uint32 PLUGIN_API getLatencySamples(void) SMTG_OVERRIDE {
-        return running ? report_latency() : 0;
+        return reportedLatency.load();
     }
 
     // WHAT THE PLUG-IN ITSELF ADDS, with no hardware correction in it. Split out of
@@ -1579,7 +1607,15 @@ private:
         pthread_mutex_unlock(&wakeMutex);
     }
 
+    static double now_ms(void) {
+        struct timespec ts;
+
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return ((double)ts.tv_sec * 1000.0) + ((double)ts.tv_nsec / 1.0e6);
+    }
+
     void request_device(void) {
+        lastDeviceRequestMs.store(now_ms());
         deviceDirty.store(true);
         wake_worker();
     }
@@ -1621,7 +1657,23 @@ private:
                 break;
             }
 
-            if (deviceDirty.exchange(false)) {
+            // SETTLE BEFORE ACTING - see GB_DEVICE_SETTLE_MS. Waiting here rather than in the
+            // parameter handler keeps every route to a device change on one path: the panel's
+            // arrows, the host's generic control and an automation lane all arrive as
+            // request_device(), and all of them get coalesced by the same clock.
+            //
+            // deviceDirty is not consumed until the wait is over, so a request arriving mid-wait
+            // simply pushes the deadline out rather than being lost or acted on twice.
+            while (deviceDirty.load() && !workerQuit.load()) {
+                double waited = now_ms() - lastDeviceRequestMs.load();
+
+                if (waited >= GB_DEVICE_SETTLE_MS) {
+                    break;
+                }
+                usleep((useconds_t)((GB_DEVICE_SETTLE_MS - waited) * 1000.0));
+            }
+
+            if (!workerQuit.load() && deviceDirty.exchange(false)) {
                 reconfigure();
             }
 
@@ -1813,7 +1865,8 @@ private:
         retuneState.store(eRetuneSettled);
 
         log_line("retuned: host declared %u but uses %u - setpoint %.0f -> %.0f, latency %u -> %u",
-                 hostMaxFrames, observedMaxFrames, before, setpointFrames, reportedLatency, nowLatency);
+                 hostMaxFrames, observedMaxFrames, before, setpointFrames, reportedLatency.load(),
+                 nowLatency);
 
         if (nowLatency != reportedLatency) {
             reportedLatency = nowLatency;
@@ -2119,13 +2172,41 @@ private:
 
         captureChannels = wantCount;
 
+        // LEAVE A DEVICE SOMEBODY ELSE IS DRIVING ALONE.
+        //
+        // Rate and buffer size are global to the device, so setting either reaches into every other
+        // client of it - the host included. The default has always been to touch neither, but that
+        // protection ended the moment a size was picked in the panel, and the case where it matters
+        // most is the easiest to walk into: a mixer serving as the host's OWN output and as this
+        // plug-in's capture source. There the device's buffer frame size IS the host's block size,
+        // so imposing one is the plug-in setting its own process() call rate on hardware it does not
+        // own - and the smaller the size, the harder every subsequent device change becomes.
+        //
+        // Probed BEFORE device_open() below, so what it reports is other clients and never our own
+        // stream. Reported rather than silently obeyed: the panel setting is still whatever the user
+        // chose, and the log says why the device did not take it.
+        bool deviceIsShared = device_is_running_somewhere(info.id);
+
+        if (deviceIsShared && ((settings->rate > 0.0) || (settings->frames > 0))) {
+            log_line("device '%s' is already running for another client - leaving its rate and"
+                     " buffer size alone (asked for %.0f Hz, %u frames)",
+                     info.name, settings->rate, settings->frames);
+        }
+
         // Rate before buffer size: changing the nominal rate can reset the buffer size on some
         // devices, so doing it the other way round silently loses the buffer setting.
-        if (settings->rate > 0.0) {
+        if (!deviceIsShared && (settings->rate > 0.0)) {
+            // WHAT IT WAS, so close_capture_locked() can hand the device back as it found it.
+            // Recorded only when we are actually about to change it, and only for the device we
+            // changed - restoring one we never touched would be its own kind of interference.
+            if (device_sample_rate(info.id) != settings->rate) {
+                restoreDevice = info.id;
+                restoreRate   = device_sample_rate(info.id);
+            }
             device_set_sample_rate_and_wait(info.id, settings->rate);
         }
 
-        if (settings->frames > 0) {
+        if (!deviceIsShared && (settings->frames > 0)) {
             uint32_t lowest  = 0;
             uint32_t highest = 0;
             uint32_t wanted  = settings->frames;
@@ -2143,6 +2224,10 @@ private:
                 }
             }
 
+            if (device_buffer_frames(info.id) != wanted) {
+                restoreDevice = info.id;
+                restoreFrames = device_buffer_frames(info.id);
+            }
             device_set_buffer_frames(info.id, wanted);
         }
 
@@ -2323,6 +2408,33 @@ private:
             ring_free(&ring);
             resampler_free(&resampler);
             running = false;
+        }
+
+        // HAND THE DEVICE BACK AS WE FOUND IT.
+        //
+        // Rate and buffer size are global to the device and nothing put them back, so a device this
+        // plug-in had merely PASSED THROUGH was left reconfigured for everything else on the machine
+        // - including, when it is the host's own device, the host. Switching away from it therefore
+        // did not release it in any meaningful sense.
+        //
+        // AFTER device_close(), so our own stream is already gone and the device is not being
+        // reconfigured underneath a running IOProc of ours. The rate is set without waiting for
+        // confirmation: we are on our way out, nothing here depends on it having landed, and the
+        // wait costs up to 800 ms of the caller's time - which on this path is a device change the
+        // user is waiting on.
+        if (restoreDevice != 0) {
+            if (restoreFrames > 0) {
+                device_set_buffer_frames(restoreDevice, restoreFrames);
+            }
+
+            if (restoreRate > 0.0) {
+                device_set_sample_rate(restoreDevice, restoreRate);
+            }
+            log_line("restored device settings: %u frames, %.0f Hz", restoreFrames, restoreRate);
+
+            restoreDevice = 0;
+            restoreFrames = 0;
+            restoreRate   = 0.0;
         }
 
         // observedMaxFrames DELIBERATELY SURVIVES A CLOSE. The largest block the host has actually
@@ -2653,7 +2765,9 @@ private:
     IHostApplication *  host{nullptr};
     IConnectionPoint *  peer{nullptr};
     int                 statusSlot{-1};
-    uint32              reportedLatency{0};
+    // Written by whichever thread last told the host, read by getLatencySamples() on any thread -
+    // see its comment. Atomic because those are genuinely different threads, not for ordering.
+    std::atomic<uint32> reportedLatency{0};
 
     // The block-size observation, and where it has got to.
     enum tRetuneState { eRetuneWatching = 0, eRetuneRequested, eRetuneSettled, eRetuneBlocked };
@@ -2707,6 +2821,17 @@ private:
     std::atomic<bool>  needResync{true};
     std::atomic<float> trimGain{1.0f};
     std::atomic<bool>  deviceDirty{false};
+
+    // When the last device/rate/frames request arrived, so a burst of them can settle into one
+    // device change - see GB_DEVICE_SETTLE_MS.
+    std::atomic<double> lastDeviceRequestMs{0.0};
+
+    // What the currently open device's rate and buffer size were before this plug-in changed them,
+    // and which device that was. Zero means "changed nothing, restore nothing". Worker thread only,
+    // written under configLock alongside the open and close they belong to.
+    AudioObjectID       restoreDevice{0};
+    uint32_t            restoreFrames{0};
+    double              restoreRate{0.0};
     std::atomic<int>   resyncs{0};       // how often the ring had to be snapped back; 0 is healthy
     std::atomic<bool>  workerQuit{false};
     std::atomic<int>   wantedDevice{-1};
@@ -2753,7 +2878,7 @@ private:
     uint32_t      pullCapacity{0};
     float *       pullBuffer{nullptr};
     float *       interleaved{nullptr};
-    bool          running{false};
+    std::atomic<bool> running{false};
     bool          primed{false};
     const bool    instrument;
 };

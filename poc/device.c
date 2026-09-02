@@ -231,6 +231,30 @@ static uint32_t stream_latency_frames(AudioObjectID id, bool isInput) {
     return (uint32_t)value;
 }
 
+// IS SOMEONE ELSE ALREADY DRIVING THIS DEVICE?
+//
+// Rate and buffer size are GLOBAL properties: setting either one changes it for every client of the
+// device at once, the host included. That is fine on a device nobody else has open and actively
+// harmful on one the host is running its own audio through - and the two cases are indistinguishable
+// without asking, which is what this asks.
+//
+// The case that motivates it: a mixer used as the host's own output AND as the bridge's capture
+// source. There, the device's buffer frame size IS the host's block size, so imposing one means the
+// plug-in setting its own process() call rate on hardware it does not own.
+bool device_is_running_somewhere(AudioObjectID id) {
+    AudioObjectPropertyAddress address = { kAudioDevicePropertyDeviceIsRunningSomewhere,
+                                           kAudioObjectPropertyScopeGlobal,
+                                           kAudioObjectPropertyElementMain };
+    UInt32                     value   = 0;
+    UInt32                     size    = sizeof(value);
+
+    if (AudioObjectGetPropertyData(id, &address, 0, NULL, &size, &value) != noErr) {
+        return false;   // cannot tell; treat as free rather than refusing to configure anything
+    }
+
+    return value != 0;
+}
+
 uint32_t device_latency_frames(AudioObjectID id, bool isInput) {
     uint32_t total = device_buffer_frames(id);
     UInt32   value = 0;
