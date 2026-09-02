@@ -2253,6 +2253,13 @@ private:
             send_message("gbFirstChannel", (int)first);
         }
 
+        // Same again for the width. A one-channel device cannot give a stereo pair, and the capture
+        // callback widens the single channel rather than failing - but the panel must not go on
+        // saying "Stereo" over a mono capture.
+        if (wantCount != settings->captureChannels) {
+            settings->captureChannels = wantCount;
+            send_message("gbMode", (int)((wantCount > 1) ? 1 : 0));
+        }
         captureChannels = wantCount;
 
         // LEAVE A DEVICE SOMEBODY ELSE IS DRIVING ALONE.
@@ -3075,6 +3082,25 @@ public:
 
                 if (editorView != nullptr) {
                     gb_editor_set_status_slot(editorView, statusSlot);
+                }
+            }
+        } else if (strcmp(id, "gbMode") == 0) {
+            // The device could not give a stereo pair and the open took what it had - see the clamp
+            // in open_capture_locked(). Mirrors gbFirstChannel below for the other half of the same
+            // request.
+            int64 stereo = -1;
+
+            if ((message->getAttributes()->getInt("value", stereo) == kResultOk) && (stereo >= 0)) {
+                mode = (stereo > 0) ? 1.0 : 0.0;
+
+                if (componentHandler != nullptr) {
+                    componentHandler->beginEdit(kParamMode);
+                    componentHandler->performEdit(kParamMode, mode);
+                    componentHandler->endEdit(kParamMode);
+                }
+
+                if (editorView != nullptr) {
+                    gb_editor_refresh_values(editorView);
                 }
             }
         } else if (strcmp(id, "gbFirstChannel") == 0) {

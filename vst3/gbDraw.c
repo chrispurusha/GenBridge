@@ -791,6 +791,24 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
             }
 
             request->normalized = gb_device_normalized(slot);
+        } else if (rows[row].which == eGbEditMode) {
+            // NO STEREO ON A ONE-CHANNEL DEVICE. The open already copes - it captures the single
+            // channel and widens it - but the panel then read "Stereo" over a mono capture, which is
+            // the same disagreement between the display and the device that the channel limit above
+            // exists to stop. A count of 0 means the cache cannot say, so both options stand.
+            int channels = gb_input_device_channels(gb_device_slot(gDevice));
+            int wanted   = (int)((gMode < 0.5) ? 0 : 1) + delta;
+
+            if (wanted < 0) {
+                wanted = 0;
+            } else if (wanted > 1) {
+                wanted = 1;
+            }
+
+            if ((channels == 1) && (wanted > 0)) {
+                wanted = 0;
+            }
+            request->normalized = (double)wanted;
         } else if (rows[row].which == eGbEditFirstChannel) {
             // Limited to what the SELECTED device has, and to what the current mode will take from
             // it: a stereo pair needs two channels, so the last usable start is one lower.
