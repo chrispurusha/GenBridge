@@ -11,7 +11,8 @@ set -e
 
 SDK="${VST3_SDK:-$HOME/Documents/vst3sdk}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-OUT="${GENBRIDGE_VST3_OUT:-$HERE/build/GenBridge.vst3}"
+DEFAULT_OUT="$HERE/build/GenBridge.vst3"
+OUT="${GENBRIDGE_VST3_OUT:-$DEFAULT_OUT}"
 BIN="$OUT/Contents/MacOS/GenBridge"
 
 if [[ ! -d "$SDK/pluginterfaces" ]]; then
@@ -209,10 +210,20 @@ print "Architectures: $(lipo -archs "$BIN")"
 INSTALL_DIR="${GENBRIDGE_VST3_INSTALL:-/Library/Audio/Plug-Ins/VST3}"
 INSTALLED="$INSTALL_DIR/$(basename "$OUT")"
 
+# A BUILD SENT SOMEWHERE ELSE IS NOT A BUILD TO INSTALL. Naming the output explicitly always means
+# "put it there, for a purpose of my own" - an A/B against an older revision, a release's own tree -
+# and installing it as well is never what was wanted. It is also actively harmful: the copy lands
+# under the OUTPUT's basename while declaring the SAME VST3 class ids as GenBridge.vst3, so a host
+# indexing by class id then has two bundles claiming to be this plug-in and may load either. That
+# exact mistake was made on the sibling project MidiSyncTool and cost real time to find.
 if [[ -n "$GENBRIDGE_NO_INSTALL" ]]; then
     print ""
     print "Not installed (GENBRIDGE_NO_INSTALL is set)."
     print "  cp -R \"$OUT\" \"$INSTALL_DIR/\""
+elif [[ "$OUT" != "$DEFAULT_OUT" ]]; then
+    print ""
+    print "Not installed: GENBRIDGE_VST3_OUT names a build of its own, not the working copy."
+    print "               (set GENBRIDGE_VST3_INSTALL if you really want it installed somewhere)"
 else
     if ! mkdir -p "$INSTALL_DIR" 2>/dev/null || [[ ! -w "$INSTALL_DIR" ]]; then
         print -u2 "error: cannot write to $INSTALL_DIR"
