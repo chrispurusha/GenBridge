@@ -55,7 +55,24 @@ cd ${0:a:h}
 
 VST3_NAME="GenBridge.vst3"
 VOL_NAME="GenBridge"
-DERIVED="build/release-tmp"
+
+# OUTSIDE THE PROJECT, AND REMOVED ON THE WAY OUT. Both halves matter, and the
+# reason is an afternoon lost on the sibling project MidiSyncTool.
+#
+# This used to build into build/release-tmp and leave it there. The result was a
+# SECOND GenBridge.vst3, correctly formed and identically named, sitting inside a
+# directory a host may well be scanning - and VST3 SCANNING RECURSES. The host
+# found both, loaded the stale one, and presented an old build with no indication
+# that anything was wrong. It reads exactly like a regression in the plug-in and
+# it is not: it is two bundles with one name.
+#
+# A temporary directory cannot be on any host's search path, and the trap removes
+# it whether the release succeeds, fails a check, or is interrupted. STAGE joins
+# the same trap further down rather than installing a second one on EXIT, which
+# would silently replace this one.
+DERIVED=$(mktemp -d)
+STAGE=""
+trap 'rm -rf "$DERIVED" "$STAGE"' EXIT
 
 # --- version -------------------------------------------------------------
 
@@ -163,18 +180,17 @@ VERSION_CLEAN="${VERSION#[Vv]}"
 
 echo "==> clean build, universal"
 
-# Always build from scratch, so a release can never pick up something left behind
-# by an earlier build.
-rm -rf $DERIVED
+# The derived path is a fresh temporary directory per run (see the note at the
+# top), so a release can never pick up something left behind by an earlier build.
 
-# BUILT INSIDE THE RELEASE'S OWN TREE, and NOT installed. do-vst3 normally drops
+# BUILT IN ITS OWN TEMPORARY TREE, and NOT installed. do-vst3 normally drops
 # the bundle straight into /Library/Audio/Plug-Ins/VST3, which is right for a
 # developer build and wrong here: cutting a release would silently replace the
 # copy you have been testing with, at a version you have not checked yet.
 # GENBRIDGE_NO_INSTALL keeps the two apart.
 if ! GENBRIDGE_VERSION="$VERSION_CLEAN" \
      GENBRIDGE_NO_INSTALL=1 \
-     GENBRIDGE_VST3_OUT="$PWD/$DERIVED/$VST3_NAME" \
+     GENBRIDGE_VST3_OUT="$DERIVED/$VST3_NAME" \
      ./do-vst3 >/dev/null; then
     echo "error: the VST3 build failed - run ./do-vst3 on its own for the reason" >&2
     echo "       (needs the VST3 SDK; set VST3_SDK if it is not in ~/Documents/vst3sdk)" >&2
@@ -254,8 +270,10 @@ codesign --verify --strict "$VST3_BUNDLE"
 
 echo "==> staging disk image contents"
 
+# NO NEW TRAP HERE. The one set beside DERIVED covers both, and a second trap on
+# EXIT would silently replace the first - leaving the build tree behind again,
+# which is the whole thing this is guarding against.
 STAGE=$(mktemp -d)
-trap "rm -rf $STAGE" EXIT
 
 cp -R "$VST3_BUNDLE" "$STAGE/"
 
