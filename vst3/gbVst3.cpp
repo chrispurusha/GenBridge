@@ -48,6 +48,11 @@
 #include <vector>
 #include <cmath>      // lround, for the offset pushed to the controller in thousandths
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Weverything"
+#include <CoreAudio/HostTime.h>    // AudioGetCurrentHostTime, to stamp an event at its own offset
+#pragma clang diagnostic pop
+
 #include "pluginterfaces/base/funknown.h"
 #include "pluginterfaces/base/ipluginbase.h"
 #include "pluginterfaces/base/ibstream.h"
@@ -910,11 +915,22 @@ public:
         return (total > 0.0) ? (uint32)total : 0;
     }
 
-    double internal_latency_frames(void) const {
-        double inputFrames = setpointFrames + resampler_latency_frames() + (double)deviceLatency;
+    // The pipeline's delay for a given ring occupancy. A sample read out of a ring holding `fill`
+    // frames entered it `fill` frames ago, so the occupancy IS the delay - the rest is what the
+    // resampler and the device's own converters add.
+    double latency_frames_for_fill(double fillFrames) const {
+        double inputFrames = fillFrames + resampler_latency_frames() + (double)deviceLatency;
+
+        if (nominalRatio <= 0.0) {
+            return 0.0;
+        }
 
         // Reported in the HOST's frames, and the ring is measured in the device's.
         return inputFrames / nominalRatio;
+    }
+
+    double internal_latency_frames(void) const {
+        return latency_frames_for_fill(setpointFrames);
     }
 
     uint32 internal_latency(void) const {
@@ -963,6 +979,7 @@ public:
         pthread_mutex_lock(&configLock);
 
         hostRate = setup.sampleRate;
+        eventRate.store(setup.sampleRate);
 
         // A DIFFERENT DECLARED MAXIMUM INVALIDATES THE OBSERVATION, and nothing else does. What was
         // learned about one host block size says nothing about another, so this is the one place
@@ -998,7 +1015,13 @@ public:
     }
 
     tresult PLUGIN_API setProcessing(TBool state) SMTG_OVERRIDE {
-        (void)state;
+        // The block timeline starts again with the transport. Carrying it across a stop would only
+        // matter for the first block after one - the model is behind real time by then and
+        // re-anchors on its own - but starting clean says what is meant.
+        if (state) {
+            nextBlockHostTime = 0;
+        }
+
         return kResultOk;
     }
 
@@ -1014,10 +1037,20 @@ public:
             return kResultOk;
         }
 
-        apply_parameter_changes(data);
+        // BEFORE ANYTHING THAT SENDS, and once. Every MIDI byte this call produces - notes,
+        // controllers, the measurement's own note and its panic - is stamped from this one instant,
+        // so the whole stream stays in order however the host chops its blocks up.
+        //
+        // It is deliberately NOT the moment the block is heard - the host's output latency sits in
+        // between - but that term cancels here and does not belong in the compensation: the audio
+        // comes back through a ring read at the top of process() too, so both ends of the round
+        // trip are anchored to the same clock and the difference between them is free of it.
+        uint64_t blockHostTime = block_host_time(frames);
+
+        apply_parameter_changes(data, blockHostTime);
 
         if (instrument) {
-            forward_events(data);
+            forward_events(data, blockHostTime);
         }
 
         // TRYLOCK, NEVER LOCK. The worker holds this while it tears down and rebuilds the ring,
@@ -1090,7 +1123,7 @@ public:
             }
         }
 
-        run_measurement(out, frames);
+        run_measurement(out, frames, blockHostTime, fill);
         publish_status(out, frames, fill);
 
         pthread_mutex_unlock(&configLock);
@@ -1117,7 +1150,7 @@ public:
     // IT CANNOT SEPARATE THE SYNTH FROM ITS PATCH. A slow pad crosses the threshold later than a
     // piano, and nothing measuring from outside can tell the difference. Hence the manual offset:
     // the measurement gets you within a few milliseconds and a person settles the rest.
-    void start_measurement(void) {
+    void start_measurement(uint64_t blockHostTime) {
         if (!instrument || !running) {
             return;
         }
@@ -1129,8 +1162,11 @@ public:
             uint8_t note[3]  = { (uint8_t)(0x80 | channel), GB_MEASURE_NOTE, 0 };
             uint8_t panic[3] = { (uint8_t)(0xB0 | channel), 123, 0 };   // All Notes Off
 
-            gb_midi_send(midiDestination.load(), note, 3);
-            gb_midi_send(midiDestination.load(), panic, 3);
+            // STAMPED, like everything else this block sends. An immediate All Notes Off would
+            // overtake any note still queued for its offset and leave it sounding for ever - the
+            // one message that must never arrive early is the one that silences things.
+            gb_midi_send_at(midiDestination.load(), note, 3, blockHostTime);
+            gb_midi_send_at(midiDestination.load(), panic, 3, blockHostTime);
         }
 
         measureUnderrunsAtStart = atomic_load(&ring.underflows);
@@ -1142,10 +1178,12 @@ public:
         measureFloor       = 0.0f;
         measureConfirm     = 0;
         measureOnsetFrames = 0;
+        measureOnsetFill   = 0.0;
+        measureNoteTime    = 0;
         measureLatency.store(0);
     }
 
-    void run_measurement(float ** out, int32 frames) {
+    void run_measurement(float ** out, int32 frames, uint64_t blockHostTime, double fill) {
         if (measureState == eMeasureIdle) {
             return;
         }
@@ -1184,7 +1222,19 @@ public:
             if ((double)measureFrames >= (GB_MEASURE_FLOOR_S * hostRate)) {
                 uint8_t note[3] = { 0x90, GB_MEASURE_NOTE, 100 };
 
-                gb_midi_send(midiDestination.load(), note, 3);
+                // AT THE START OF THE NEXT BLOCK, which is the one instant here that is certain to
+                // be in the FUTURE - nextBlockHostTime is this block's start plus its frames, and
+                // the model never hands back a start earlier than the clock. CoreMIDI therefore
+                // holds the packet and releases it exactly then, so the moment the note left is a
+                // number this code knows rather than one it hopes for.
+                //
+                // Stamping it at the block start instead put it in the past by however long the
+                // block had taken to compute - run_measurement() runs after the audio is rendered -
+                // so it went out at once, at an instant nothing recorded. Tens of microseconds on
+                // its own, but it was the reference EVERY later arithmetic was measured from.
+                measureNoteTime = nextBlockHostTime;
+
+                gb_midi_send_at(midiDestination.load(), note, 3, measureNoteTime);
 
                 measureState  = eMeasureListening;
                 measureFrames = 0;
@@ -1214,8 +1264,44 @@ public:
             // The FIRST block that crossed is the onset; the confirmation only decides whether to
             // believe it. Counting from the confirming block instead would add its duration to
             // every measurement.
+            //
+            // TIMED ON THE CLOCK AT BOTH ENDS, not counted in blocks - and this is what stopped
+            // the figure jumping about from run to run.
+            //
+            // Counting elapsed FRAMES assumes blocks arrive evenly spaced, and under a host that
+            // hands over four of them per audio callback they do not: they arrive in a burst and
+            // then nothing for the rest of the cycle. So the answer depended on WHICH call of the
+            // callback the note happened to be detected in - 0, 128, 256 or 384 frames of pure
+            // artefact at a 512-frame cycle, which is up to 8 ms of jump between two runs measuring
+            // the same unchanged synth.
+            //
+            // Two real instants remove it: the note left at measureNoteTime, and this block's ring
+            // read happened at blockActualHostTime. The RAW clock, deliberately - the model is
+            // ahead of it inside a burst, and the ring holds only what physically arrived.
+            //
+            // THE SAMPLE, NOT THE BLOCK, for the last part of it: which sample of this block first
+            // crossed says how far into it the sound began - 0 to a full buffer, half of one on
+            // average, and always SHORT if discarded. One extra pass over the block that crossed,
+            // and only that one.
             if (measureConfirm == 1) {
-                measureOnsetFrames = measureFrames;
+                int32 cross = frames;
+
+                for (int32 i = 0; (i < frames) && (cross == frames); i++) {
+                    for (int c = 0; c < GB_CHANNELS; c++) {
+                        float magnitude = (out[c][i] < 0.0f) ? -out[c][i] : out[c][i];
+
+                        if (magnitude > threshold) {
+                            cross = i;
+                            break;
+                        }
+                    }
+                }
+
+                double elapsed = frames_between(measureNoteTime, blockActualHostTime)
+                                 + (double)cross;
+
+                measureOnsetFrames = (elapsed > 0.0) ? (uint32_t)elapsed : 0;
+                measureOnsetFill   = fill;
             }
         } else {
             measureConfirm = 0;
@@ -1224,7 +1310,7 @@ public:
         if (measureConfirm >= GB_MEASURE_CONFIRM) {
             uint8_t off[3] = { 0x80, GB_MEASURE_NOTE, 0 };
 
-            gb_midi_send(midiDestination.load(), off, 3);
+            gb_midi_send_at(midiDestination.load(), off, 3, blockHostTime);
 
             // Our own share is subtracted here, while it is unambiguously the share that was in
             // force during the measurement.
@@ -1232,7 +1318,18 @@ public:
             // internal_latency(), NOT report_latency() - see the comment on that pair. Netting off
             // the reported figure would subtract the correction already in force as well as our own
             // buffering, so each run would return less than the last.
-            uint32_t ours   = internal_latency();
+            //
+            // BUT FROM THE OCCUPANCY THE ONSET ACTUALLY CAME THROUGH, not from the setpoint. The
+            // ring only sits AT its setpoint on average: a host that hands over four blocks per
+            // audio callback drains it in a burst, so the fill at the fourth is a whole cycle below
+            // the fill at the first, and which of them a note happened to land in moved the answer
+            // by that much. That is where the run-to-run scatter came from. The setpoint remains
+            // what the HOST is told, because that is the long-run figure; the measurement nets off
+            // the real one, and the difference between the two is exactly the momentary deviation
+            // it should not be reporting as hardware.
+            double   fillNow = (measureOnsetFill > 0.0) ? measureOnsetFill : setpointFrames;
+            double   oursNow = latency_frames_for_fill(fillNow);
+            uint32_t ours    = (oursNow > 0.0) ? (uint32_t)oursNow : 0;
 
             // A ROUND TRIP CANNOT BE FASTER THAN OUR OWN PIPELINE. If it looks like it was, the
             // onset is not the note - a threshold crossing on something else, or a ring that was
@@ -1242,6 +1339,7 @@ public:
 
             measureOnset.store((int)total);
             measureOurs.store((int)ours);
+            measureFillSeen.store(fillNow);
             measureTriggerPeak.store(peak);
             measureFloorSeen.store(measureFloor);
 
@@ -1255,7 +1353,7 @@ public:
         if ((double)measureFrames >= (GB_MEASURE_TIMEOUT_S * hostRate)) {
             uint8_t off[3] = { 0x80, GB_MEASURE_NOTE, 0 };
 
-            gb_midi_send(midiDestination.load(), off, 3);
+            gb_midi_send_at(midiDestination.load(), off, 3, blockHostTime);
 
             measureLatency.store(GB_MEASURE_TIMED_OUT);        // nothing came back
             measureState = eMeasureIdle;
@@ -1298,7 +1396,84 @@ public:
         return (forced <= 0) ? (uint8_t)(incoming & 0x0F) : (uint8_t)((forced - 1) & 0x0F);
     }
 
-    void forward_events(ProcessData & data) {
+    // WHERE THIS BLOCK BEGINS IN WALL TIME - AND IT IS NOT "NOW".
+    //
+    // A host is entitled to hand over several blocks per audio callback, and the one this is built
+    // against does: Ableton declares 512 and calls with 128, which is FOUR process() calls computed
+    // back to back inside one 512-frame cycle, microseconds apart. Reading the clock at the top of
+    // each and calling it the block's start time gives all four nearly the same answer - so blocks
+    // two, three and four are stamped up to 384 frames early, and worse, their events INTERLEAVE
+    // with the previous block's: a note at offset 0 of the second call is truly 128 frames after a
+    // note at offset 127 of the first, but comes out stamped 127 frames BEFORE it. CoreMIDI
+    // delivers in timestamp order, so that is a note-off overtaking its note-on. It sounds exactly
+    // as bad as it reads.
+    //
+    // THE FRAMES THEMSELVES CARRY THE PACING. A block starts where the frames already handed over
+    // run out, so the model is one addition: carry the end of the last block forward and use it,
+    // unless real time has already passed it - which is what a new device cycle looks like, and
+    // what a late callback looks like too. Nothing has to classify cycles or measure a buffer.
+    //
+    // MidiSyncTool reached the same place from the other end (its findings, 2026-09-02: Live splits
+    // a buffer at a loop wrap into 500 frames and then 12). Its version has to identify the cycle
+    // because it needs the cycle's own length for its telemetry; this one does not.
+    //
+    // THE CAP IS FOR A HOST THAT RUNS FASTER THAN REALTIME. An offline bounce hands over blocks as
+    // fast as it can compute them, and an unbounded model would schedule MIDI further and further
+    // into the future. A quarter of a second is far longer than any single device cycle and far
+    // shorter than a bounce takes to run away.
+    uint64_t block_host_time(int32 frames) {
+        uint64_t now   = AudioGetCurrentHostTime();
+
+        // THE RAW CLOCK IS KEPT AS WELL AS THE MODEL, and the two are not interchangeable. Outgoing
+        // MIDI is stamped on the MODEL, because that is where a note belongs musically. Anything
+        // measured about the audio COMING BACK has to use the raw one, because the ring holds what
+        // physically arrived by this instant - and for the second, third and fourth call of a
+        // callback the model is up to a whole cycle ahead of it. See run_measurement().
+        blockActualHostTime = now;
+        uint64_t limit = AudioConvertNanosToHostTime(250ull * 1000ull * 1000ull);
+        uint64_t start = now;
+        double   rate  = eventRate.load();
+
+        if ((nextBlockHostTime > now) && ((nextBlockHostTime - now) < limit)) {
+            start = nextBlockHostTime;
+        }
+
+        nextBlockHostTime = (rate > 0.0)
+                            ? start + AudioConvertNanosToHostTime(
+                                  (uint64_t)(((double)frames / rate) * 1.0e9))
+                            : 0;
+
+        return start;
+    }
+
+    // How many of the host's frames separate two host-clock instants. 0 if they are the wrong way
+    // round, which is what a caller wants everywhere it is used here.
+    double frames_between(uint64_t from, uint64_t to) const {
+        double rate = eventRate.load();
+
+        if ((to <= from) || (rate <= 0.0)) {
+            return 0.0;
+        }
+
+        return ((double)AudioConvertHostTimeToNanos(to - from) / 1.0e9) * rate;
+    }
+
+    // WHERE AN EVENT BELONGS IN WALL TIME, from where it belongs in the block. Offset 0 is the top
+    // of this block, which is now; anything later is that many frames into the future and CoreMIDI
+    // will hold it until then.
+    uint64_t host_time_for(uint64_t blockHostTime, int32 sampleOffset) const {
+        double rate = eventRate.load();
+
+        if ((sampleOffset <= 0) || (rate <= 0.0)) {
+            return blockHostTime;
+        }
+
+        double nanos = ((double)sampleOffset / rate) * 1.0e9;
+
+        return blockHostTime + AudioConvertNanosToHostTime((uint64_t)nanos);
+    }
+
+    void forward_events(ProcessData & data, uint64_t blockHostTime) {
         if (data.inputEvents == nullptr) {
             return;
         }
@@ -1342,12 +1517,19 @@ public:
                 continue;
             }
 
-            gb_midi_send(destination, message, 3);
+            // STAMPED WITH ITS OWN OFFSET, not sent on arrival. See gb_midi_send_at(): a block's
+            // worth of notes fired at the block boundary is a bias of half a buffer, always early,
+            // and it grows with every increase in the host's buffer size.
+            gb_midi_send_at(destination, message, 3, host_time_for(blockHostTime, event.sampleOffset));
         }
     }
 
     // Back from a normalised parameter to the wire.
-    void send_controller(ParamID id, ParamValue value) {
+    // ON THE SAME CLOCK AS THE NOTES, and that is not a nicety. Half a stream stamped into the
+    // future and half sent immediately is a stream that arrives out of ORDER - CoreMIDI delivers by
+    // timestamp, so an "immediate" controller overtakes every note still waiting for its offset.
+    // A bend that lands before the note it belongs to is heard as a glitch, not as a timing error.
+    void send_controller(ParamID id, ParamValue value, uint64_t hostTime) {
         uint32_t index      = (uint32_t)(id - GB_CC_BASE);
         uint8_t  channel    = channel_for((int16)((index / GB_CC_PER_CHANNEL) & 0x0F));
         uint32_t controller = index % GB_CC_PER_CHANNEL;
@@ -1365,7 +1547,7 @@ public:
             message[0] = (uint8_t)(0xD0 | channel);
             message[1] = (uint8_t)((value * 127.0) + 0.5);
 
-            gb_midi_send(destination, message, 2);
+            gb_midi_send_at(destination, message, 2, hostTime);
             return;
         }
 
@@ -1378,7 +1560,7 @@ public:
             message[1] = (uint8_t)(bend & 0x7F);
             message[2] = (uint8_t)((bend >> 7) & 0x7F);
 
-            gb_midi_send(destination, message, 3);
+            gb_midi_send_at(destination, message, 3, hostTime);
             return;
         }
 
@@ -1390,7 +1572,7 @@ public:
         message[1] = (uint8_t)controller;
         message[2] = (uint8_t)((value * 127.0) + 0.5);
 
-        gb_midi_send(destination, message, 3);
+        gb_midi_send_at(destination, message, 3, hostTime);
     }
 
     void observe_block(int32 frames) {
@@ -1503,7 +1685,7 @@ private:
         }
     }
 
-    void apply_parameter_changes(ProcessData & data) {
+    void apply_parameter_changes(ProcessData & data, uint64_t blockHostTime) {
         if (data.inputParameterChanges == nullptr) {
             return;
         }
@@ -1552,7 +1734,7 @@ private:
                 // in the same block - so the button worked exactly once and then never again.
                 if (sawPress && !measureArmed && (measureState == eMeasureIdle)) {
                     log_line("measure requested");
-                    start_measurement();
+                    start_measurement(blockHostTime);
                 }
 
                 measureArmed = (value >= 0.5);
@@ -1563,7 +1745,9 @@ private:
 
             if ((id >= GB_CC_BASE) && (id < (GB_CC_BASE + GB_CC_COUNT))) {
                 if (instrument) {
-                    send_controller(id, value);
+                    // The point's own offset, exactly as a note gets its own - a controller move
+                    // inside a block belongs where the host put it.
+                    send_controller(id, value, host_time_for(blockHostTime, offset));
                 }
 
                 continue;
@@ -2183,9 +2367,11 @@ private:
         // Underruns during the measurement matter: a gap in the capture delays the onset by
         // however long the gap was, so a figure taken while the ring was starving is not a
         // measurement of the hardware at all.
-        log_line("measured: onset at %d frames, our share %d, hardware %d (%.1f ms). "
-                 "floor %.4f, triggered at %.4f, underruns %u resyncs %d during. '%s' -> '%s'",
-                 measureOnset.load(), measureOurs.load(), result,
+        log_line("measured: onset at %d frames, our share %d (ring %.0f of %.0f), hardware %d "
+                 "(%.1f ms). floor %.4f, triggered at %.4f, underruns %u resyncs %d during. "
+                 "'%s' -> '%s'",
+                 measureOnset.load(), measureOurs.load(),
+                 measureFillSeen.load(), setpointFrames, result,
                  (double)result / (hostRate / 1000.0),
                  (double)measureFloorSeen.load(), (double)measureTriggerPeak.load(),
                  (unsigned)(atomic_load(&ring.underflows) - measureUnderrunsAtStart),
@@ -2963,6 +3149,19 @@ private:
     // shape: the obvious warning sign disappears while the composite read stays broken. So the
     // derived values get published as atomics, once, by the thread that changed them - and every
     // lock-free reader uses these and never the fields behind them.
+    // THE HOST RATE, READABLE WITHOUT THE LOCK. snapHostRate is the config snapshot's copy and is 0
+    // until a capture device opens, but events are forwarded whether one is open or not - the DAW
+    // still plays the hardware. Written in setupProcessing() and read by forward_events(), which
+    // runs before the trylock.
+    std::atomic<double> eventRate{0.0};
+
+    // AUDIO THREAD ONLY, and it is the whole state of the block timeline: the wall time at which
+    // the frames handed over so far run out. See block_host_time().
+    uint64_t            nextBlockHostTime{0};
+
+    // The unmodelled clock, read at the top of the current block. AUDIO THREAD ONLY.
+    uint64_t            blockActualHostTime{0};
+
     std::atomic<double> snapHostRate{0.0};
     std::atomic<double> snapRatio{1.0};
     std::atomic<double> snapSetpoint{0.0};
@@ -2988,6 +3187,14 @@ private:
     tMeasureState       measureState{eMeasureIdle};
     uint32_t            measureFrames{0};
     uint32_t            measureOnsetFrames{0};
+
+    // The ring occupancy at the block the onset was found in, in DEVICE frames - what the sound
+    // actually came through, as against the setpoint it is supposed to sit at. See run_measurement().
+    double              measureOnsetFill{0.0};
+
+    // The host-clock instant the test note was SCHEDULED for, and therefore the instant it left.
+    // AUDIO THREAD ONLY.
+    uint64_t            measureNoteTime{0};
     int                 measureConfirm{0};
     float               measurePeak{0.0f};
     float               measureFloor{0.0f};
@@ -3002,6 +3209,11 @@ private:
     std::atomic<double> lastOffsetChangeMs{0.0};
     std::atomic<int>    measureOnset{0};
     std::atomic<int>    measureOurs{0};
+
+    // The ring occupancy the onset actually came through, published so the log can show it beside
+    // the setpoint it is meant to be sitting at. A run that disagrees with the others usually
+    // disagrees here first.
+    std::atomic<double> measureFillSeen{0.0};
     std::atomic<float>  measureTriggerPeak{0.0f};
     std::atomic<float>  measureFloorSeen{0.0f};
     // Written by start_measurement() on the AUDIO thread (it runs from the parameter pass, before

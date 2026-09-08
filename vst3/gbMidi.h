@@ -46,6 +46,19 @@ void     gb_midi_destination_name(int index, char * out, unsigned long len);
 // Sends to the destination at that index. False if the index names nothing.
 bool     gb_midi_send(int index, const uint8_t * data, uint32_t length);
 
+// THE SAME SEND, STAMPED - and the difference is a note's position INSIDE the host's block.
+//
+// A host hands over a block of events with a sample offset apiece, and a note at offset 900 of a
+// 1024-frame block belongs 900 frames after that block begins. Firing everything the moment
+// process() is entered puts every note up to a whole block EARLY, which at 128 frames is inaudible
+// and at 2048 is 42 ms - so a part recorded back through the capture path drifts earlier the larger
+// the host's buffer gets, and no latency figure can correct it because the error is per-note.
+//
+// CoreMIDI delivers a packet at its timestamp rather than on arrival, so the offset can simply be
+// added. A hostTime of 0 means "now", as it does in CoreMIDI itself, and a time already past is
+// delivered immediately - which is what makes this safe when a callback runs late.
+bool     gb_midi_send_at(int index, const uint8_t * data, uint32_t length, uint64_t hostTime);
+
 // Which slot currently holds that destination, or -1 if it is not present. Names rather than
 // indices are what a saved project stores, because the list shifts as gear is powered on and off.
 int      gb_midi_slot_for_name(const char * name);

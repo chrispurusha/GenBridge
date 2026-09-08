@@ -3,6 +3,144 @@ GenBridge FINDINGS
 Completed work, measurements, and the traps that cost real time.
 
 
+2026-09-08 (2)  THE STAMP WAS RIGHT AND THE CLOCK WAS WRONG - A HOST'S CALLBACK IS NOT ONE BLOCK
+--------------------------------------------------------------------------------------------------
+CT, after the round above landed: "Looks better taking the host buffering into account. Measuring
+our latency via the latency button does now seem variable though. The sound I hear is glitchy."
+
+Both symptoms, one cause, and it was introduced by the fix above.
+
+A HOST IS ENTITLED TO HAND OVER SEVERAL BLOCKS PER AUDIO CALLBACK, AND THIS ONE DOES. Ableton
+declares 512 and calls with 128 - the retune code has said so for weeks - which is FOUR process()
+calls computed back to back inside one 512-frame cycle, microseconds apart. Reading
+AudioGetCurrentHostTime() at the top of each and calling it the block's start time gives all four
+nearly the same answer. So:
+
+  - blocks two, three and four were stamped up to 384 frames early; and
+  - their events INTERLEAVED with the previous block's. A note at offset 0 of the second call is
+    truly 128 frames after a note at offset 127 of the first, but came out stamped 127 frames
+    BEFORE it. CoreMIDI delivers in timestamp order, so that is a note-off overtaking its note-on.
+
+Measured in vst3check: two process() calls with no pause between them, a note at offset 0 in each,
+came out 0.005 ms apart where they belong 2.667 ms apart. That is the glitch, and it is now a check.
+
+THE FRAMES THEMSELVES CARRY THE PACING. block_host_time() keeps one number - the wall time at which
+the frames handed over so far run out - and uses it unless real time has already passed it, which is
+what a new device cycle and a late callback both look like. Nothing has to classify cycles or
+measure a buffer. MidiSyncTool reached the same place from the other end (its findings 2026-09-02:
+Live splits a buffer at a loop wrap into 500 frames and then 12); its version has to identify the
+cycle because it needs the cycle's length for telemetry, and this one does not. The cap - a quarter
+of a second - is for an offline bounce, which hands over blocks faster than realtime and would
+otherwise walk the model into next week.
+
+EVERYTHING THAT SENDS IS NOW ON THAT ONE CLOCK, and that is not tidiness. Half a stream stamped into
+the future and half sent immediately is a stream that arrives OUT OF ORDER: an "immediate" byte
+overtakes every note still waiting for its offset. So send_controller() (CCs, pitch bend, channel
+pressure), the measurement's own note and note-off, and the All Notes Off that opens a measurement
+all take a timestamp now. Ten sends, no exceptions - grep for gb_midi_send( in gbVst3.cpp and there
+should be none.
+
+AND THE MEASUREMENT STOPPED COUNTING BLOCKS. Elapsed frames assume blocks arrive evenly spaced, and
+in a burst they do not - they arrive together and then nothing for the rest of the cycle. The answer
+therefore depended on WHICH call of the callback the onset was detected in: 0, 128, 256 or 384
+frames of pure artefact at a 512-frame cycle, up to 8 ms of jump between two runs measuring the same
+unchanged synth. It is timed on the clock at both ends now:
+
+  - the note leaves at nextBlockHostTime, the one instant here guaranteed to be in the FUTURE, so
+    CoreMIDI holds it and the moment it left is a number this code knows rather than hopes for;
+  - the arrival is timed against blockActualHostTime, the RAW clock rather than the model, because
+    the ring holds only what physically arrived by that instant.
+
+TWO CLOCKS, DELIBERATELY, and this is the part to remember: outgoing MIDI is stamped on the MODEL,
+because that is where a note belongs musically; anything measured about the audio coming back uses
+the RAW clock, because that is when it physically got here. Inside a burst they differ by up to a
+whole cycle and swapping them silently reintroduces exactly this bug.
+
+The ring term is netted off at the occupancy the onset ACTUALLY came through rather than the
+setpoint it is meant to sit at - a burst drains the ring, so the fill at the fourth call is a cycle
+below the fill at the first. The setpoint remains what the HOST is told, because that is the
+long-run figure. The measurement log now carries "our share N (ring F of S)" so a run that disagrees
+with its neighbours can be seen to disagree there first.
+
+WHAT IS LEFT IS THE SYNTH, and no amount of timing precision touches it: a threshold crossing cannot
+tell a slow attack from a late note, so a pad measures later than a piano and a patch whose attack
+sits near the threshold will still scatter. That is what the manual trim is for, and it now has a
+coarse pair beside the fine one.
+
+FINE AND COARSE ON THE OFFSET ROW, the arrangement MidiSyncTool settled on: [<<] [<] reading [>] [>>],
+outermost coarse (1 ms) and innermost fine (0.1 ms), so distance from the reading reads as size of
+change, and the result snapped to the fine grid so a coarse click on a measured 11.83 ms does not
+carry the .03 for ever. draw_button() paints a box 2 px larger on each side than the rect it is
+given, so the panel's usual 6 px spacing put the coarse and fine boxes touching - one four-glyph
+blob. The gap has to clear the padding on BOTH neighbours before any of it is visible.
+
+2026-09-08  RECORDED PARTS CREPT EARLIER AS THE HOST BUFFER GREW - AND IT WAS NOT THE HOST'S LATENCY
+-----------------------------------------------------------------------------------------------
+CT: "if I use the measured compensation and set host buffer to larger values, I can see events
+recorded based on our instrument getting much earlier", with the suggestion that the host's own
+latency needs to go into the compensation the way MidiSyncTool takes it into account.
+
+IT DOES NOT, AND THE REASON IS WORTH KEEPING. The host's output latency H - the gap between a block
+being COMPUTED and that block being HEARD - is real and is unknown to us. But both ends of this
+plug-in's round trip are anchored to the same instant: forward_events() sends at the top of
+process(), and the fill the ring is read at is measured at the top of process(). A note in block B
+comes back in the output at t_B + D + fill whatever H is, so H cancels in the difference and has no
+place in getLatencySamples(). MidiSyncTool needs it because nothing comes back there: a tick has to
+land at a musical moment as the LISTENER hears it, with only one end of the journey to work from
+(findings 2026-09-02, "ProcessContext.systemTime IS ALWAYS ZERO").
+
+WHAT WAS ACTUALLY WRONG WAS TWO HALF-BUFFER ERRORS THAT HAPPENED TO CANCEL AT ONE BUFFER SIZE.
+
+  1. forward_events() never read event.sampleOffset. A host hands over a block with an offset per
+     event; every note was fired the moment process() was entered, so a note at offset o reached
+     the hardware o frames before its musical time. 0 to a whole buffer, half of one on average,
+     and ALWAYS EARLY. 2.7 ms at 128 frames, up to 42.7 ms at 2048.
+
+  2. run_measurement() credited the onset to measureFrames - the elapsed at the START of the block
+     it was detected in - discarding however far into that block the sound began. Same range, same
+     mean, opposite sign: the stored hardware share came out SHORT by half a buffer, which pushes a
+     recording late.
+
+So the recorded error is (measurement's i) - (the note's o): about zero at the buffer the
+measurement was taken at, and about (N_measure - N_playback) / 2 frames EARLY at any other. Measure
+at 128 and play at 1024 and that is 9 ms; at 2048, 20 ms. Both terms scale with the buffer, which is
+exactly why it read as a missing host term.
+
+THE FIX IS THE ONE MidiSyncTool ALREADY HAD, for a different reason. ms_midi_send_at() stamps a
+packet with a MIDITimeStamp instead of the 0 that synthlib_midi_send_to() hardcodes; gb_midi_send_at()
+is the same thing, and every event now goes out at blockHostTime + sampleOffset/rate. CoreMIDI holds
+it until then, and a stamp already past is delivered immediately - so a late callback degrades to
+today's behaviour rather than bunching. AudioGetCurrentHostTime() is read ONCE at the top of
+process(), which is the instant the offsets are measured from.
+
+IT COSTS NO LATENCY, and that is worth stating because MS_LOOKAHEAD_MS looks like a precedent for
+adding some. Offsets inside a block are in the future when process() runs at the start of its
+period, so no lead is needed to reach them; nothing is scheduled beyond the block that owns it.
+
+The measurement note now goes out through the same stamped path at blockHostTime, so the clock and
+the note start at the same instant, and the onset is refined to the first SAMPLE over the threshold
+by one extra pass over the block that crossed. That makes the stored hardware share independent of
+the buffer it was measured at, which was always the intent of subtracting internal_latency().
+
+The packet list moved onto the stack while it was there. SynthLib's send builds into one shared
+static buffer behind a mutex, so the old path took a lock per note on the audio thread.
+
+IT HAS A REGRESSION TEST, and it needs no hardware. vst3check's virtual MIDI sink now records each
+packet's TIMESTAMP as well as its bytes, and sends two note-ons in ONE block at offsets 0 and 127:
+they must come back 2.646 ms apart (127 frames at 48 kHz), to a quarter of a millisecond. Run
+against the old build it does not merely miss the figure - CoreMIDI COALESCES two identically
+stamped packets into one, so the packet count alone gives it away. Nothing about the pace of the
+test can influence the answer, because what is compared is the two stamps the plug-in itself chose.
+
+tools/do-vst3host did not link CoreMIDI, so vst3check had not built since the sink was added; fixed
+in passing.
+
+CONTROLLERS, BEND AND AFTERTOUCH went the same way in the round below - see 2026-09-08 (2). They
+arrive as parameter changes through IMidiMapping, and an unstamped one does not merely land in the
+wrong place, it OVERTAKES the notes.
+
+
+
 2026-09-02  ARCHITECTURAL REVIEW AGAINST JUCE - WHAT IT DOES THAT WE DO NOT
 ------------------------------------------------------------
 Read for MECHANISM only. JUCE 8 is AGPLv3 (see the note in G2-Edit's vst3/plugin-gui-notes.md), so

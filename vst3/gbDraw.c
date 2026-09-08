@@ -38,6 +38,7 @@
 // to be told through beginEdit/performEdit/endEdit or its automation and its saved state end up
 // disagreeing with what the plug-in is actually doing - see gbEditor.mm.
 
+#include <math.h>      // round, to snap the offset to the fine grid after a coarse step
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -251,7 +252,22 @@ static tRectangle row_value(int row) {
 
 #define GB_OFFSET_MIN_MS    (-100.0)
 #define GB_OFFSET_MAX_MS    (100.0)
-#define GB_OFFSET_STEP_MS   (0.1)
+
+// TWO STEP SIZES, because one cannot do both jobs - the same conclusion MidiSyncTool's panel came
+// to. The coarse step has to reach a synth's figure from nothing without a hundred clicks; the fine
+// step has to TRIM one, and what Measure dials in is whatever the hardware actually did - 11.83 ms,
+// not 11.8 - which a whole-millisecond step could only carry up and down the range keeping the .83
+// for ever. A tenth is also the row's own resolution, since the reading is printed to one decimal.
+#define GB_OFFSET_STEP_FINE_MS      (0.1)
+#define GB_OFFSET_STEP_COARSE_MS    (1.0)
+
+#define OFFSET_VALUE_W              (56.0)     // "-100.0 ms" with room around it
+
+// draw_button() paints a box DRAW_BUTTON_MARGIN wider on each side than the rect it is handed, so
+// four arrows spaced by the 6 px the rest of the panel uses came out with the coarse and fine boxes
+// touching - one four-glyph blob rather than two pairs. The gap has to clear the padding on both
+// neighbours before any of it is visible.
+#define OFFSET_GAP                  (10.0)
 
 #define MEASURE_LABEL     "Measure"
 #define BUTTON_H          (18.0)
@@ -269,12 +285,26 @@ static tRectangle measure_bounds(void) {
     return draw_button_bounds(measure_button());
 }
 
-static tRectangle offset_down(void) {
-    return (tRectangle){ { LABEL_W, offset_y() }, { ARROW_W, 20.0 } };
+// FOUR ARROWS AROUND THE READING, outermost coarse and innermost fine:
+//
+//      [<<] [<]   -11.8 ms   [>] [>>]
+//
+// so that distance from the reading reads as size of change. Slot 0 is the leftmost. The reading
+// sits BETWEEN the pairs rather than after them, which is what makes the arrangement legible - an
+// arrow that is not on the side it moves the value towards is a coin toss every time.
+static tRectangle offset_arrow(int slot) {
+    double x = LABEL_W + ((double)slot * (ARROW_W + OFFSET_GAP));
+
+    if (slot >= 2) {
+        x += OFFSET_VALUE_W + OFFSET_GAP;
+    }
+
+    return (tRectangle){ { x, offset_y() }, { ARROW_W, 20.0 } };
 }
 
-static tRectangle offset_up(void) {
-    return (tRectangle){ { LABEL_W + ARROW_W + 6.0, offset_y() }, { ARROW_W, 20.0 } };
+static tRectangle offset_value_box(void) {
+    return (tRectangle){ { LABEL_W + (2.0 * (ARROW_W + OFFSET_GAP)), offset_y() },
+                         { OFFSET_VALUE_W, 20.0 } };
 }
 
 static tRectangle trim_track(void) {
@@ -701,14 +731,26 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
         // panel already proves fits is "MIDI Out" at eight characters - stay inside that.
         label(20.0, offset_y() + 4.0, "In use");
 
-        draw_button(mainArea, offset_down(), "<", (tRgb){ 0.30, 0.30, 0.33 });
-        draw_button(mainArea, offset_up(), ">", (tRgb){ 0.30, 0.30, 0.33 });
+        static const char * const kArrow[4] = { "<<", "<", ">", ">>" };
 
-        double offsetMs = GB_OFFSET_MIN_MS + (gOffset * (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS));
+        for (int slot = 0; slot < 4; slot++) {
+            draw_button(mainArea, offset_arrow(slot), kArrow[slot], (tRgb){ 0.30, 0.30, 0.33 });
+        }
+
+        double     offsetMs = GB_OFFSET_MIN_MS + (gOffset * (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS));
+        tRectangle valueBox = offset_value_box();
 
         snprintf(buffer, sizeof(buffer), "%+.1f ms", offsetMs);
         set_rgb_colour((tRgb){ 0.92, 0.92, 0.94 });
-        render_text(mainArea, (tRectangle){ { 190.0, offset_y() + 6.0 }, { 0.0, 11.0 } }, buffer);
+
+        // CENTRED, and measured WITHOUT the cache. get_text_width's cache is keyed on the string's
+        // POINTER, and this is a reused stack buffer - a cached width would be whatever was last
+        // formatted into it. eNoCache is the only correct answer for a formatted string.
+        double textW = get_text_width(buffer, 11.0, eNoCache);
+
+        render_text(mainArea,
+                    (tRectangle){ { valueBox.coord.x + ((valueBox.size.w - textW) / 2.0),
+                                    offset_y() + 6.0 }, { 0.0, 11.0 } }, buffer);
 
         // WHICH WAY IT MOVES THE RECORDING, spelled out. "+8 ms" tells nobody whether their part
         // will end up earlier or later, and getting it backwards doubles the error instead of
@@ -1145,21 +1187,42 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
             return true;
         }
 
-        if (hit(offset_down(), x, y) || hit(offset_up(), x, y)) {
-            // A TENTH OF A MILLISECOND A CLICK. This was 1 ms on the argument that a millisecond is
-            // the resolution a person can judge - true of a latency heard on its own, wrong for this
-            // control. The measurement already puts the hardware's share into report_latency(), so
-            // what is left here is the residual a take still sounds early or late by, and a whole
-            // millisecond steps straight over it. 0.1 ms is 4.8 samples at 48k, so it is a real
-            // move rather than a rounding, and the readout was already %+.1f.
-            //
-            // The range stays +/-100 ms deliberately: it is a normalised VST3 parameter, so
-            // narrowing it would silently re-scale the offset saved in every existing host project.
-            double step = GB_OFFSET_STEP_MS / (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS);
-            double next = gOffset + (hit(offset_up(), x, y) ? step : -step);
+        // A TENTH OF A MILLISECOND ON THE INNER PAIR, a whole one on the outer. The fine step was
+        // once the only step, and before that the only step was 1 ms on the argument that a
+        // millisecond is the resolution a person can judge - true of a latency heard on its own,
+        // wrong for this control. The measurement already puts the hardware's share into
+        // report_latency(), so what is left is the residual a take still sounds early or late by,
+        // and a whole millisecond steps straight over it. 0.1 ms is 4.8 samples at 48k. But a
+        // measurement that has not been run yet leaves the whole journey to the arrows, and 20 ms
+        // of it at a tenth a click is two hundred clicks - hence the coarse pair beside it.
+        //
+        // The range stays +/-100 ms deliberately: it is a normalised VST3 parameter, so narrowing
+        // it would silently re-scale the offset saved in every existing host project.
+        for (int slot = 0; slot < 4; slot++) {
+            if (!hit(offset_arrow(slot), x, y)) {
+                continue;
+            }
+
+            static const double kStep[4] = { -GB_OFFSET_STEP_COARSE_MS, -GB_OFFSET_STEP_FINE_MS,
+                                             GB_OFFSET_STEP_FINE_MS, GB_OFFSET_STEP_COARSE_MS };
+
+            double ms = GB_OFFSET_MIN_MS + (gOffset * (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS));
+
+            ms += kStep[slot];
+
+            // SNAPPED TO THE FINE GRID, which is what makes a coarse step usable on a measured
+            // figure: Measure dials in 11.83 ms, and without this every coarse click would carry
+            // that .03 along for ever while the reading claimed a round number.
+            ms = round(ms / GB_OFFSET_STEP_FINE_MS) * GB_OFFSET_STEP_FINE_MS;
+
+            if (ms < GB_OFFSET_MIN_MS) {
+                ms = GB_OFFSET_MIN_MS;
+            } else if (ms > GB_OFFSET_MAX_MS) {
+                ms = GB_OFFSET_MAX_MS;
+            }
 
             request->which      = eGbEditOffset;
-            request->normalized = (next < 0.0) ? 0.0 : ((next > 1.0) ? 1.0 : next);
+            request->normalized = (ms - GB_OFFSET_MIN_MS) / (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS);
             return true;
         }
     }

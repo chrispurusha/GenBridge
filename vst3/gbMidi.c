@@ -146,9 +146,29 @@ int gb_midi_slot_for_name(const char * name) {
 }
 
 bool gb_midi_send(int index, const uint8_t * data, uint32_t length) {
-    if (!gReady || (index < 0) || (index >= gCount)) {
+    return gb_midi_send_at(index, data, length, 0);
+}
+
+// ONE PATH, AND IT IS LOCAL RATHER THAN SynthLib'S. synthlib_midi_send_to() stamps every packet 0,
+// which is the one thing this cannot do; and it builds the packet in a shared static buffer behind
+// a mutex, so routing notes through it would take a lock per event on the audio thread. The packet
+// list here is on the stack and the send takes nothing.
+bool gb_midi_send_at(int index, const uint8_t * data, uint32_t length, uint64_t hostTime) {
+    if (!gReady || (index < 0) || (index >= gCount) || (data == NULL) || (length == 0)) {
         return false;
     }
 
-    return synthlib_midi_send_to(data, length, gDest[index]);
+    // Everything this plug-in sends is a two or three byte channel message, so one stack packet
+    // list holds it with room to spare. MIDIPacketListAdd() is the real guard - it returns NULL
+    // rather than overrunning - and this only says what the size was chosen for.
+    MIDIPacketList list;
+    MIDIPacket *   packet = MIDIPacketListInit(&list);
+
+    packet = MIDIPacketListAdd(&list, sizeof(list), packet, (MIDITimeStamp)hostTime, length, data);
+
+    if (packet == NULL) {
+        return false;
+    }
+
+    return MIDISend(gPort, gDest[index], &list) == noErr;
 }

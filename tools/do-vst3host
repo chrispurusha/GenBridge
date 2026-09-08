@@ -34,7 +34,8 @@ clang++ -O2 -std=gnu++17 -Wall \
     "$SDK/pluginterfaces/base/coreiids.cpp" \
     "$SDK/pluginterfaces/base/funknown.cpp" \
     -framework CoreFoundation \
-    -framework CoreAudio
+    -framework CoreAudio \
+    -framework CoreMIDI
 
 echo "Built: $HERE/vst3host"
 echo "Built: $HERE/vst3check"

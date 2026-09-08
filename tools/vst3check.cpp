@@ -42,6 +42,8 @@
 #include <string>
 #include <vector>
 #include <CoreAudio/CoreAudio.h>
+#include <CoreAudio/HostTime.h>
+#include <CoreMIDI/CoreMIDI.h>
 #include <dlfcn.h>
 #include <unistd.h>
 
@@ -167,6 +169,49 @@ public:
 };
 
 // One note, delivered the way a host delivers them.
+// TWO NOTES IN ONE BLOCK, at chosen sample offsets. The point of the test it serves is that they
+// must NOT come out together: a host block is not an instant, and an event's offset is where inside
+// it the note belongs.
+class NotePair : public IEventList {
+public:
+    Event events[2];
+    int32 rc = 1;
+
+    NotePair(int16 pitchA, int32 offsetA, int16 pitchB, int32 offsetB) {
+        memset(events, 0, sizeof(events));
+
+        events[0].busIndex       = 0;
+        events[0].sampleOffset   = offsetA;
+        events[0].type           = Event::kNoteOnEvent;
+        events[0].noteOn.pitch   = pitchA;
+        events[0].noteOn.velocity = 0.8f;
+        events[0].noteOn.noteId  = -1;
+
+        events[1].busIndex       = 0;
+        events[1].sampleOffset   = offsetB;
+        events[1].type           = Event::kNoteOnEvent;
+        events[1].noteOn.pitch   = pitchB;
+        events[1].noteOn.velocity = 0.8f;
+        events[1].noteOn.noteId  = -1;
+    }
+
+    tresult PLUGIN_API queryInterface(const TUID, void ** o) override { *o = nullptr; return kNoInterface; }
+    uint32 PLUGIN_API addRef(void) override { return (uint32)++rc; }
+    uint32 PLUGIN_API release(void) override { return (uint32)--rc; }
+
+    int32 PLUGIN_API getEventCount(void) override { return 2; }
+
+    tresult PLUGIN_API getEvent(int32 index, Event & e) override {
+        if ((index < 0) || (index > 1)) {
+            return kResultFalse;
+        }
+        e = events[index];
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API addEvent(Event &) override { return kNotImplemented; }
+};
+
 class OneNote : public IEventList {
 public:
     Event event;
@@ -454,6 +499,365 @@ static float run_blocks(IAudioProcessor * processor, float ** ch, float * l, flo
     return peak;
 }
 
+// ONE CALL, WITH NO PAUSE AFTER IT. run_blocks() paces itself at one 128-frame block per 2.666 ms,
+// which is a host handing over exactly one block per audio callback. That is the easy case. This is
+// the other one: several process() calls computed back to back inside a single callback, which is
+// what Ableton does when it declares 512 and calls with 128, and what Live does at a loop wrap.
+static void run_one_now(IAudioProcessor * processor, float ** ch, float * l, float * r,
+                        IEventList * events, ParamValue midiValue) {
+    ProcessData     data;
+    AudioBusBuffers bus;
+    OneChange       midiChange(6, midiValue);
+
+    memset(&data, 0, sizeof(data));
+    memset(&bus, 0, sizeof(bus));
+    memset(l, 0, sizeof(float) * 128);
+    memset(r, 0, sizeof(float) * 128);
+
+    bus.numChannels      = 2;
+    bus.channelBuffers32 = ch;
+
+    data.numSamples            = 128;
+    data.numOutputs            = 1;
+    data.outputs               = &bus;
+    data.symbolicSampleSize    = kSample32;
+    data.processMode           = kRealtime;
+    data.inputParameterChanges = (IParameterChanges *)&midiChange;
+    data.inputEvents           = events;
+
+    processor->process(data);
+}
+
+// ── Does host MIDI actually come out the other side? ────────────────────────────────────────────
+//
+// The bus checks above prove the instrument DECLARES an event input. They do not prove a note the
+// host hands it ever reaches a MIDI cable, which is the plug-in's entire claim as an instrument and
+// the thing that cannot be seen from the outside - a silent hardware synth looks the same whether
+// the plug-in dropped the note or the synth is switched off.
+//
+// The --play round trip settles it, but only with a real synth on a real port. This does the same
+// job with neither: the test process creates its OWN virtual MIDI destination, so it appears in the
+// system's destination list like any interface, the plug-in can be pointed at it by name, and
+// whatever the plug-in sends arrives back here to be counted.
+//
+// THE SINK MUST EXIST BEFORE THE PLUG-IN IS INSTANTIATED. The destination list is enumerated when
+// the plug-in builds its parameter, so a sink created afterwards is not there to be chosen.
+static uint8_t  gSinkBytes[256];
+static uint32_t gSinkCount;
+
+// PER-PACKET, AND STAMPED, for the offset test below. The byte stream alone cannot answer "when was
+// this note meant to happen" - two notes in one block arrive as two packets whose TIMESTAMPS are
+// the whole answer, and they survive whether CoreMIDI held the second one or delivered it early.
+static MIDITimeStamp gSinkStamp[64];
+static uint8_t       gSinkStatus[64];
+static uint8_t       gSinkData1[64];
+static uint32_t      gSinkPackets;
+
+static void sink_read(const MIDIPacketList * list, void *, void *) {
+    const MIDIPacket * packet = &list->packet[0];
+
+    for (uint32_t i = 0; i < list->numPackets; i++) {
+        if ((packet->length >= 2) && (gSinkPackets < 64)) {
+            gSinkStamp[gSinkPackets]  = packet->timeStamp;
+            gSinkStatus[gSinkPackets] = packet->data[0];
+            gSinkData1[gSinkPackets]  = packet->data[1];
+            gSinkPackets++;
+        }
+
+        for (uint16_t b = 0; (b < packet->length) && (gSinkCount < sizeof(gSinkBytes)); b++) {
+            gSinkBytes[gSinkCount] = packet->data[b];
+            gSinkCount++;
+        }
+        packet = MIDIPacketNext(packet);
+    }
+}
+
+static MIDIClientRef      gSinkClient;
+static MIDIEndpointRef    gSinkEndpoint;
+static const char * const kSinkName = "GenBridge Check Sink";
+
+static bool sink_create(void) {
+    CFStringRef name = CFStringCreateWithCString(nullptr, kSinkName, kCFStringEncodingUTF8);
+
+    if (MIDIClientCreate(CFSTR("vst3check"), nullptr, nullptr, &gSinkClient) != noErr) {
+        CFRelease(name);
+        return false;
+    }
+    OSStatus st = MIDIDestinationCreate(gSinkClient, name, sink_read, nullptr, &gSinkEndpoint);
+
+    CFRelease(name);
+    return st == noErr;
+}
+
+static void midi_out_test(IPluginFactory * factory, IPluginFactory2 * factory2, FUnknown * hostApp) {
+    printf("\nMIDI out, with no hardware: host note -> plug-in -> virtual destination\n");
+
+    if (gSinkEndpoint == 0) {
+        printf("    no virtual MIDI destination was created; skipped\n");
+        return;
+    }
+    TUID instCid;
+    bool found = false;
+
+    memset(instCid, 0, sizeof(instCid));
+
+    for (int32 i = 0; (factory2 != nullptr) && (i < factory->countClasses()); i++) {
+        PClassInfo2 info;
+
+        if ((factory2->getClassInfo2(i, &info) == kResultOk)
+            && (strstr(info.subCategories, "Instrument") != nullptr)) {
+            memcpy(instCid, info.cid, sizeof(TUID));
+            found = true;
+            break;
+        }
+    }
+
+    IComponent *      inst     = nullptr;
+    IEditController * instCtrl = nullptr;
+
+    if (found) {
+        factory->createInstance(instCid, IComponent::iid, (void **)&inst);
+    }
+    check("instrument instantiates for the MIDI test", inst != nullptr);
+
+    if (inst == nullptr) {
+        return;
+    }
+    inst->initialize(hostApp);
+
+    TUID ctrlCid;
+
+    inst->getControllerClassId(ctrlCid);
+    factory->createInstance(ctrlCid, IEditController::iid, (void **)&instCtrl);
+
+    if (instCtrl != nullptr) {
+        instCtrl->initialize(hostApp);
+    }
+    IConnectionPoint * a = nullptr;
+    IConnectionPoint * b = nullptr;
+
+    inst->queryInterface(IConnectionPoint::iid, (void **)&a);
+
+    if (instCtrl != nullptr) {
+        instCtrl->queryInterface(IConnectionPoint::iid, (void **)&b);
+    }
+
+    if ((a != nullptr) && (b != nullptr)) {
+        a->connect(b);
+        b->connect(a);
+    }
+    // Point it at our own sink, by name - the same way a person would from the panel.
+    ParamValue midiValue = 0.0;
+    ParamID    midiParam = 0;
+    bool       haveMidi  = false;
+
+    if (instCtrl != nullptr) {
+        for (int32 i = 0; (i < instCtrl->getParameterCount()) && !haveMidi; i++) {
+            ParameterInfo info;
+
+            if ((instCtrl->getParameterInfo(i, info) != kResultOk)
+                || (to_ascii(info.title) != "MIDI Destination")) {
+                continue;
+            }
+
+            for (int32 slot = 0; slot <= info.stepCount; slot++) {
+                String128  name;
+                ParamValue norm = (ParamValue)slot / (ParamValue)info.stepCount;
+
+                instCtrl->getParamStringByValue(info.id, norm, name);
+
+                if (to_ascii(name).find(kSinkName) != std::string::npos) {
+                    midiValue = norm;
+                    midiParam = info.id;
+                    haveMidi  = true;
+                    printf("    the plug-in can see our sink at slot %d\n", slot);
+                    break;
+                }
+            }
+        }
+    }
+    check("plug-in lists the virtual destination", haveMidi);
+
+    IAudioProcessor * ip = nullptr;
+
+    inst->queryInterface(IAudioProcessor::iid, (void **)&ip);
+
+    if ((ip != nullptr) && haveMidi) {
+        ProcessSetup setup;
+
+        memset(&setup, 0, sizeof(setup));
+        setup.processMode        = kRealtime;
+        setup.symbolicSampleSize = kSample32;
+        setup.maxSamplesPerBlock = 128;
+        setup.sampleRate         = 48000.0;
+
+        ip->setupProcessing(setup);
+        // The EVENT bus has to be switched on. A host does this and a test that forgets sees a
+        // plug-in that ignores every note through no fault of its own.
+        inst->activateBus(kEvent, kInput, 0, true);
+        inst->activateBus(kAudio, kOutput, 0, true);
+        inst->setActive(true);
+        ip->setProcessing(true);
+
+        float   l[128];
+        float   r[128];
+        float * ch[2] = { l, r };
+
+        gSinkCount = 0;
+
+        OneNote  on(true, 64, 0.8f);
+        OneNote  off(false, 64, 0.0f);
+
+        // Destination first, on its own block, then the note: the plug-in acts on a parameter
+        // CHANGE, and sending both together would leave which arrived first up to the reader.
+        run_blocks(ip, ch, l, r, 2, nullptr, 0.0, midiValue);
+        run_blocks(ip, ch, l, r, 2, (IEventList *)&on, 0.0, midiValue);
+        run_blocks(ip, ch, l, r, 2, (IEventList *)&off, 0.0, midiValue);
+        usleep(200000);
+
+        printf("    bytes back from the sink: %u", gSinkCount);
+
+        for (uint32_t i = 0; (i < gSinkCount) && (i < 12); i++) {
+            printf(" %02X", gSinkBytes[i]);
+        }
+        printf("\n");
+
+        check("a host note reaches the MIDI destination", gSinkCount >= 3);
+
+        bool sawNoteOn = false;
+
+        for (uint32_t i = 0; (i + 2) < gSinkCount; i++) {
+            if (((gSinkBytes[i] & 0xF0) == 0x90) && (gSinkBytes[i + 1] == 64)
+                && (gSinkBytes[i + 2] > 0)) {
+                sawNoteOn = true;
+            }
+        }
+        check("it is the note that was played, on the right pitch", sawNoteOn);
+
+        // ── AN EVENT'S OFFSET INSIDE THE BLOCK ──────────────────────────────────────────────────
+        //
+        // The check above proves a note gets out. This proves it gets out at the right MOMENT, and
+        // it is the regression test for the bias that made recorded parts creep earlier the larger
+        // the host's buffer got: every note used to be fired the instant process() was entered, so
+        // a note at offset 127 of a 128-frame block reached the synth 2.6 ms early - and at 2048
+        // frames, 42 ms early. See findings 2026-09-08.
+        //
+        // Both notes go in ONE block, so nothing about the pace of the test can affect the answer:
+        // what is compared is the two packets' own timestamps, which is exactly what the plug-in
+        // decided. 127 frames at 48 kHz is 2.6458 ms.
+        gSinkCount   = 0;
+        gSinkPackets = 0;
+
+        NotePair pair(60, 0, 72, 127);
+
+        run_blocks(ip, ch, l, r, 2, (IEventList *)&pair, 0.0, midiValue);
+        usleep(200000);
+
+        // TWO PACKETS, and the count is itself the first half of the answer. Stamped identically -
+        // which is what firing both at the block boundary does - CoreMIDI coalesces them into ONE
+        // packet carrying all six bytes, so a failure here means the offsets were discarded rather
+        // than that a note went missing.
+        printf("    packets back from the sink: %u\n", gSinkPackets);
+
+        check("the pair arrived as two separately stamped packets", gSinkPackets >= 2);
+
+        if (gSinkPackets >= 2) {
+            int first  = -1;
+            int second = -1;
+
+            for (uint32_t i = 0; i < gSinkPackets; i++) {
+                if ((gSinkStatus[i] & 0xF0) != 0x90) {
+                    continue;
+                }
+
+                if ((gSinkData1[i] == 60) && (first < 0)) {
+                    first = (int)i;
+                } else if ((gSinkData1[i] == 72) && (second < 0)) {
+                    second = (int)i;
+                }
+            }
+            check("the pair is the two pitches that were played", (first >= 0) && (second >= 0));
+
+            if ((first >= 0) && (second >= 0)) {
+                double deltaMs = ((double)AudioConvertHostTimeToNanos(gSinkStamp[second])
+                                  - (double)AudioConvertHostTimeToNanos(gSinkStamp[first])) / 1.0e6;
+                double wantMs  = (127.0 / 48000.0) * 1000.0;
+
+                printf("    offset 0 -> offset 127 came out %.3f ms apart (want %.3f)\n",
+                       deltaMs, wantMs);
+
+                // A quarter of a millisecond either way. The figure is arithmetic, not a
+                // measurement - the plug-in computes the stamp - so anything looser would hide the
+                // very error this exists to catch, and 0.000 is what the old code scored.
+                check("an event's sample offset survives into the MIDI timestamp",
+                      (deltaMs > (wantMs - 0.25)) && (deltaMs < (wantMs + 0.25)));
+            }
+        }
+
+        // ── BLOCKS COMPUTED BACK TO BACK IN ONE CALLBACK ────────────────────────────────────────
+        //
+        // The offset test above proves an event keeps its place inside a block. This proves the
+        // BLOCKS keep their place relative to each other, which is a different question the moment
+        // a host hands over more than one per audio callback - and the host this is built against
+        // does, four at a time. Reading the wall clock per call and calling it the block's start
+        // gives all four the same answer: the second call's note at offset 0 comes out stamped
+        // BEFORE the first call's note at offset 127, though it is truly 128 frames later, and a
+        // note-off overtaking its note-on is what that sounds like.
+        //
+        // Two calls with no pause between them, a note at offset 0 in each. They belong exactly one
+        // block apart - 128 frames, 2.667 ms - however close together they were computed.
+        gSinkCount   = 0;
+        gSinkPackets = 0;
+
+        OneNote first(true, 61, 0.8f);
+        OneNote second(true, 73, 0.8f);
+
+        run_one_now(ip, ch, l, r, (IEventList *)&first, midiValue);
+        run_one_now(ip, ch, l, r, (IEventList *)&second, midiValue);
+        usleep(200000);
+
+        int a = -1;
+        int b = -1;
+
+        for (uint32_t i = 0; i < gSinkPackets; i++) {
+            if ((gSinkStatus[i] & 0xF0) != 0x90) {
+                continue;
+            }
+
+            if ((gSinkData1[i] == 61) && (a < 0)) {
+                a = (int)i;
+            } else if ((gSinkData1[i] == 73) && (b < 0)) {
+                b = (int)i;
+            }
+        }
+        check("a note from each of two back-to-back calls arrived", (a >= 0) && (b >= 0));
+
+        if ((a >= 0) && (b >= 0)) {
+            double deltaMs = ((double)AudioConvertHostTimeToNanos(gSinkStamp[b])
+                              - (double)AudioConvertHostTimeToNanos(gSinkStamp[a])) / 1.0e6;
+            double wantMs  = (128.0 / 48000.0) * 1000.0;
+
+            printf("    two calls in one callback came out %.3f ms apart (want %.3f)\n",
+                   deltaMs, wantMs);
+
+            check("a second block computed in the same callback is stamped a block later",
+                  (deltaMs > (wantMs - 0.25)) && (deltaMs < (wantMs + 0.25)));
+        }
+
+        ip->setProcessing(false);
+        inst->setActive(false);
+    }
+
+    if (ip != nullptr) { ip->release(); }
+
+    if (instCtrl != nullptr) {
+        instCtrl->terminate();
+        instCtrl->release();
+    }
+    inst->terminate();
+    inst->release();
+}
+
 int main(int argc, char ** argv) {
     if (argc < 2) {
         printf("usage: vst3check <plugin.vst3> [--block N]\n");
@@ -552,6 +956,14 @@ int main(int argc, char ** argv) {
 
     if (component == nullptr) {
         return 2;
+    }
+
+    // THE SINK IS MADE FIRST, before the plug-in is loaded at all. gbMidi.c caches the destination
+    // list for a second, and that cache is per-dylib rather than per-instance - creating the sink
+    // later meant the plug-in was still answering from a list taken before it existed, and the test
+    // failed while the plug-in was behaving perfectly.
+    if (!sink_create()) {
+        printf("could not create a virtual MIDI destination; the MIDI test will be skipped\n");
     }
 
     static HostApp hostApp;
@@ -1069,6 +1481,9 @@ int main(int argc, char ** argv) {
             inst->release();
         }
     }
+
+    // Needs no hardware, so it always runs - see midi_out_test().
+    midi_out_test(factory, factory2, &hostApp);
 
     // ---- the round trip, on real hardware ----
     //
