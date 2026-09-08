@@ -3,7 +3,7 @@ GenBridge FINDINGS
 Completed work, measurements, and the traps that cost real time.
 
 
-2026-09-08 (4)  LIVE KEYBOARD STOPPED PASSING THROUGH - HARDENED, NOT YET EXPLAINED
+2026-09-08 (4)  LIVE KEYBOARD STOPPED PASSING THROUGH - FIXED, BY ONE OF TWO
 --------------------------------------------------------------------------------------------------
 CT: "MIDI from a keyboard source on the Ableton track is no longer being passed through the plugin",
 and then the detail that makes it a real clue: "It sends to the kronos and returns, when MIDI is
@@ -46,8 +46,14 @@ is worth knowing for anyone extending it: the sink is a virtual destination in t
 CoreMIDI hands those to the read proc as they are sent rather than holding them to their timestamps.
 Proving a reordering out of a real port needs real hardware on the other end.
 
-SO THIS ENTRY IS DELIBERATELY OPEN. Two genuine defects are fixed and a diagnostic is in place; the
-report itself is not explained. The next step is the "notes" row with a keyboard playing.
+RESOLVED BY THE PAIR OF THEM - CT, same day: "MIDI notes from my keyboard now coming through." Both
+fixes shipped in one build, so which of the two it was is not established and now cannot be without
+deliberately putting one back. The bound and the monotonic rule are each correct on their own terms,
+so neither is worth un-fixing to find out; what is worth keeping is that BOTH failure modes end in
+the same silent symptom, and that a clip kept playing through both of them.
+
+The "notes in/out" row stays. It cost nothing and it is the row that would have answered this in one
+glance instead of an afternoon.
 
 2026-09-08 (3)  THE GLITCH WAS THE RING, NOT THE MIDI - A CALLBACK'S DEMAND IS NOT A BLOCK
 --------------------------------------------------------------------------------------------------

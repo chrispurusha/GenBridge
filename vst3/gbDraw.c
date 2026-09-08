@@ -293,15 +293,29 @@ static tRectangle measure_bounds(void) {
 // AT THE RIGHT-HAND END OF THE ROW, not beside the button. The measured figure and its range are
 // printed from just after the button, and they are the longest thing on this row - put the stepper
 // at 196 and the two draw straight through each other.
-#define NOTE_ARROW_W    (18.0)
-#define NOTE_X          (400.0)
+//
+// FOUR ARROWS, the same arrangement as the offset row below it: outermost coarse, innermost fine,
+// reading in the middle. Coarse is an OCTAVE here rather than a bigger number of the same unit -
+// walking from middle C down to an Analog Rytm's C-2 is 48 semitone clicks and four octave ones,
+// and an octave is how anyone thinks about the distance anyway.
+#define NOTE_ARROW_W    (20.0)
+#define NOTE_VALUE_W    (34.0)
+#define NOTE_GAP        (6.0)
+#define NOTE_X          (356.0)
 
-static tRectangle note_down(void) {
-    return (tRectangle){ { NOTE_X, measure_y() }, { NOTE_ARROW_W, BUTTON_H } };
+static tRectangle note_arrow(int slot) {
+    double x = NOTE_X + ((double)slot * (NOTE_ARROW_W + NOTE_GAP + 4.0));
+
+    if (slot >= 2) {
+        x += NOTE_VALUE_W + NOTE_GAP;
+    }
+
+    return (tRectangle){ { x, measure_y() }, { NOTE_ARROW_W, BUTTON_H } };
 }
 
-static tRectangle note_up(void) {
-    return (tRectangle){ { NOTE_X + 52.0, measure_y() }, { NOTE_ARROW_W, BUTTON_H } };
+static tRectangle note_value_box(void) {
+    return (tRectangle){ { NOTE_X + (2.0 * (NOTE_ARROW_W + NOTE_GAP + 4.0)), measure_y() },
+                         { NOTE_VALUE_W, BUTTON_H } };
 }
 
 // C-2 IS NOTE 0 - middle C as C3, which is what the hardware this is pointed at prints on its own
@@ -719,16 +733,25 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
         draw_button(mainArea, measure_button(), MEASURE_LABEL, (tRgb){ 0.30, 0.42, 0.55 });
 
         {
-            char note[8];
-            int  value = (int)((gTestNote * 127.0) + 0.5);
+            static const char * const kNoteArrow[4] = { "<<", "<", ">", ">>" };
 
-            draw_button(mainArea, note_down(), "<", (tRgb){ 0.30, 0.30, 0.33 });
-            draw_button(mainArea, note_up(), ">", (tRgb){ 0.30, 0.30, 0.33 });
+            char       note[8];
+            int        value = (int)((gTestNote * 127.0) + 0.5);
+            tRectangle valueBox = note_value_box();
+
+            for (int slot = 0; slot < 4; slot++) {
+                draw_button(mainArea, note_arrow(slot), kNoteArrow[slot], (tRgb){ 0.30, 0.30, 0.33 });
+            }
 
             note_name(value, note, sizeof(note));
             set_rgb_colour((tRgb){ 0.92, 0.92, 0.94 });
+
+            // eNoCache: the width of a formatted buffer, and the cache is keyed on the pointer.
+            double noteW = get_text_width(note, 11.0, eNoCache);
+
             render_text(mainArea,
-                        (tRectangle){ { NOTE_X + 26.0, measure_y() + 5.0 }, { 0.0, 11.0 } }, note);
+                        (tRectangle){ { valueBox.coord.x + ((valueBox.size.w - noteW) / 2.0),
+                                        measure_y() + 5.0 }, { 0.0, 11.0 } }, note);
         }
 
         int measured = (status != NULL) ? atomic_load(&status->measuredSamples) : 0;
@@ -1259,12 +1282,18 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
             return true;
         }
 
-        if (hit(draw_button_bounds(note_down()), x, y) || hit(draw_button_bounds(note_up()), x, y)) {
-            int note = (int)((gTestNote * 127.0) + 0.5)
-                       + (hit(draw_button_bounds(note_up()), x, y) ? 1 : -1);
+        for (int slot = 0; slot < 4; slot++) {
+            if (!hit(draw_button_bounds(note_arrow(slot)), x, y)) {
+                continue;
+            }
+
+            static const int kNoteStep[4] = { -12, -1, 1, 12 };
+
+            int note = (int)((gTestNote * 127.0) + 0.5) + kNoteStep[slot];
 
             // Clamped rather than wrapped, for the reason every other stepper here is: an arrow
-            // that jumps from the top of a range to the bottom reads as a fault.
+            // that jumps from the top of a range to the bottom reads as a fault. An octave step
+            // that would fall off the end lands ON the end, so C-2 is always one click away.
             note = (note < 0) ? 0 : ((note > 127) ? 127 : note);
 
             request->which      = eGbEditTestNote;

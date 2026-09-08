@@ -6,7 +6,6 @@ Built-but-unchecked work goes in to-test.txt.
 
 Bugs
 
-- LIVE KEYBOARD DOES NOT REACH THE SYNTH while a clip on the same track does (CT, 2026-09-08). Two timeline defects fixed and a "notes in/out" row added to the panel telemetry, but the cause is NOT established - read that row with a keyboard playing: 0 on the left is Live not delivering, in-without-out is ours. See findings 2026-09-08 (4)
 - send_controller() fires on every parameter change the host delivers, with no test for whether the value actually moved - a host that re-sends its CC parameters every block would put a MIDI message per parameter per block on the wire. Suspected, not measured; it is the other way notes could be crowded off a link
 - Tell the host kParamTitlesChanged when the device list changes - hot-plug currently updates our cache only, so the host's generic panel keeps the old names; see findings 2026-09-02
 - Expose a kIsBypass parameter, as JUCE always does - nothing is broken without one, but the host should be able to hand bypass to us
