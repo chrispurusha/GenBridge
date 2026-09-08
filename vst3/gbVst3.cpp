@@ -857,6 +857,14 @@ public:
                      d->frames, d->rate, d->targetMs, d->firstChannel, d->captureChannels,
                      (double)d->trim, d->uid);
             blob += line;
+
+            // WHAT IS ACTUALLY GOING INTO THE PROJECT. "I set 64 and it comes back 512" has three
+            // possible homes - the size never reached the settings, the settings never reached the
+            // file, or the file never reached the device - and only the plug-in can see the middle
+            // one. A zero here means "leave the device alone", which is the default for a device
+            // whose buffer nobody has chosen; it is NOT the same as 512 and reads quite differently.
+            log_line("saving: device '%s' frames %u rate %.0f trim %.2f",
+                     d->uid, d->frames, d->rate, (double)d->trim);
         }
         // Released before write(): the blob is a private copy by now, and state->write() calls back
         // into the host - which must never happen with this lock held.
@@ -3838,6 +3846,10 @@ private:
         }
 
         tDeviceSettings * entry = ensure_settings(uid.c_str());
+
+        // AND WHAT CAME BACK OUT OF IT. Paired with the "saving:" line above, these two settle
+        // whether a buffer size survived the round trip through the project file.
+        log_line("restoring: device '%s' frames %u rate %.0f", uid.c_str(), frames, rate);
 
         entry->frames       = frames;
         entry->rate         = rate;

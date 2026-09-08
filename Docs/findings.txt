@@ -3,6 +3,44 @@ GenBridge FINDINGS
 Completed work, measurements, and the traps that cost real time.
 
 
+2026-09-08 (17)  IT WAS NEVER SAVED - AND NOBODY ASKED FOR AN HOUR
+--------------------------------------------------------------------------------------------------
+"Saving at 64 seems to have fixed it!" The buffer size lives in the project state, the project had
+never been saved after the size was chosen, and every load therefore restored a device with no
+remembered buffer at all.
+
+THE EVIDENCE WAS THERE THE WHOLE TIME and was read past repeatedly: every load opened at "frames 512"
+with NO mismatch warning, and that warning only fires when a size was actually asked for. So
+settings->frames was 0 - "leave the device alone", the default for a device whose buffer nobody has
+chosen. Zero is not 512. Anyone reading those two facts together had the answer.
+
+WHAT WAS OFFERED INSTEAD, in order: device contention, a driver minimum, an async read-back race, a
+CoreAudio ghost stream, a host call-order problem, and a pointless restore in the middle of a
+reopen. Four of those were real defects and are fixed; none of them was this. The question that would
+have settled it in one line - "are you saving the project after setting it?" - was not asked until
+the sixth attempt, and only then because a diagnostic was being added to answer it mechanically.
+
+THE RULE: when a setting does not persist, establish that it was persisted before theorising about
+the persistence mechanism. The cheap question first, every time.
+
+WHAT THE CHASE PRODUCED ANYWAY, all independently worth having:
+
+  - the reconfigure loop (15) - a regression of the author's own making, and by far the worst thing
+    in the session: a moving reported latency told the host to reactivate, forever;
+  - the shared MIDI destination table (11), dropping notes across every instance once a second;
+  - the panel showing the requested buffer rather than the one the device gave (10);
+  - the CoreAudio caches made event-driven rather than polled on the host's main thread;
+  - device_set_buffer_frames() confirming rather than assuming (12);
+  - the ghost-stream wait, so a just-closed stream is not mistaken for another client;
+  - no buffer flap through a reopen of the same device (16);
+  - and the diagnostics that finally cornered it - the lock-hold breakdown, the saving/restoring
+    pair, and the notes in/out row.
+
+A DESIGN QUESTION LEFT OPEN. The device buffer is stored per PROJECT, but it is arguably a property
+of the INTERFACE - the same value would be wanted in every project on this machine. Storing it as a
+machine-wide preference keyed by device UID, with the project state overriding it, would have made
+this whole episode impossible. Not done; see todo.
+
 2026-09-08 (16)  IT WAS A CALL-ORDER PROBLEM, AND A POINTLESS RESTORE ON TOP OF IT
 --------------------------------------------------------------------------------------------------
 CT: "Maybe it's a call order thing then?" It was, and his own log said so once the loop from (15)
