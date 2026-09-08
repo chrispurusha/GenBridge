@@ -177,6 +177,7 @@ static double gMode      = 1.0;
 static double gFirst     = 0.0;
 static double gMidiDest  = 0.0;
 static double gOffset    = 0.5;
+static double gTestNote  = 60.0 / 127.0;
 static double gMidiChan  = 0.0;
 
 #define GB_CHANNEL_SLOTS    (17)
@@ -283,6 +284,35 @@ static tRectangle measure_button(void) {
 // What draw_button actually paints, and therefore what a click has to land in.
 static tRectangle measure_bounds(void) {
     return draw_button_bounds(measure_button());
+}
+
+// WHICH NOTE MEASURE PLAYS, on the same row as the button that plays it. Middle C is a fine default
+// for a keyboard and useless on a drum machine: an Analog Rytm has nothing there at all and wants
+// the lowest note there is. Two arrows and a name - the octave range is 128 wide, so a menu of it
+// would be a scroll rather than a choice.
+// AT THE RIGHT-HAND END OF THE ROW, not beside the button. The measured figure and its range are
+// printed from just after the button, and they are the longest thing on this row - put the stepper
+// at 196 and the two draw straight through each other.
+#define NOTE_ARROW_W    (18.0)
+#define NOTE_X          (400.0)
+
+static tRectangle note_down(void) {
+    return (tRectangle){ { NOTE_X, measure_y() }, { NOTE_ARROW_W, BUTTON_H } };
+}
+
+static tRectangle note_up(void) {
+    return (tRectangle){ { NOTE_X + 52.0, measure_y() }, { NOTE_ARROW_W, BUTTON_H } };
+}
+
+// C-2 IS NOTE 0 - middle C as C3, which is what the hardware this is pointed at prints on its own
+// screen. Naming note 0 "C-1" instead would put a user an octave out on the one device that made
+// this control necessary.
+static void note_name(int note, char * out, unsigned long len) {
+    static const char * const kName[12] = { "C",  "C#", "D",  "D#", "E",  "F",
+                                            "F#", "G",  "G#", "A",  "A#", "B" };
+
+    note = (note < 0) ? 0 : ((note > 127) ? 127 : note);
+    snprintf(out, len, "%s%d", kName[note % 12], (note / 12) - 2);
 }
 
 // FOUR ARROWS AROUND THE READING, outermost coarse and innermost fine:
@@ -473,10 +503,11 @@ void gb_input_device_name(int index, char * out, unsigned long len) {
 
 void gb_draw_set_values(double device, double rate, double frames, double trim,
                         double mode, double firstChannel, double midiDest, double offset,
-                        double midiChannel) {
+                        double midiChannel, double testNote) {
     gMidiDest = midiDest;
     gOffset   = offset;
     gMidiChan = midiChannel;
+    gTestNote = testNote;
     gDevice = device;
     gRate   = rate;
     gFrames = frames;
@@ -687,6 +718,19 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
 
         draw_button(mainArea, measure_button(), MEASURE_LABEL, (tRgb){ 0.30, 0.42, 0.55 });
 
+        {
+            char note[8];
+            int  value = (int)((gTestNote * 127.0) + 0.5);
+
+            draw_button(mainArea, note_down(), "<", (tRgb){ 0.30, 0.30, 0.33 });
+            draw_button(mainArea, note_up(), ">", (tRgb){ 0.30, 0.30, 0.33 });
+
+            note_name(value, note, sizeof(note));
+            set_rgb_colour((tRgb){ 0.92, 0.92, 0.94 });
+            render_text(mainArea,
+                        (tRectangle){ { NOTE_X + 26.0, measure_y() + 5.0 }, { 0.0, 11.0 } }, note);
+        }
+
         int measured = (status != NULL) ? atomic_load(&status->measuredSamples) : 0;
         int rate     = (status != NULL) ? atomic_load(&status->deviceRate) : 48000;
 
@@ -701,8 +745,23 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
             snprintf(buffer, sizeof(buffer), "%s", "measurement failed - try again");
             set_rgb_colour((tRgb){ 0.85, 0.60, 0.25 });
         } else if (measured > 0) {
-            snprintf(buffer, sizeof(buffer), "%d smp (%.1f ms) measured", measured,
-                     (double)measured / ((double)rate / 1000.0));
+            // THE RANGE, NOT JUST THE AVERAGE. Measure plays several notes and averages the middle
+            // of them; an average on its own cannot be told from one lucky shot. Five readings
+            // within a millisecond of each other say the figure can be trusted, and the same
+            // average out of readings 9 ms apart says it cannot - which is a judgement for the
+            // person reading the panel, not one to hide.
+            int low   = (status != NULL) ? atomic_load(&status->measuredLow) : 0;
+            int high  = (status != NULL) ? atomic_load(&status->measuredHigh) : 0;
+            int trips = (status != NULL) ? atomic_load(&status->measuredTrips) : 0;
+            double perMs = (double)rate / 1000.0;
+
+            if ((trips > 0) && (high > low)) {
+                snprintf(buffer, sizeof(buffer), "%.1f ms  (%d trips, %.1f - %.1f)",
+                         (double)measured / perMs, trips, (double)low / perMs, (double)high / perMs);
+            } else {
+                snprintf(buffer, sizeof(buffer), "%d smp (%.1f ms) measured", measured,
+                         (double)measured / perMs);
+            }
             set_rgb_colour((tRgb){ 0.72, 0.72, 0.74 });
         } else if (ranEmpty) {
             // RAN, AND CAME BACK WITH NOTHING. Indistinguishable from "never measured" until now,
@@ -891,6 +950,19 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
 
     snprintf(buffer, sizeof(buffer), "%d", (status != NULL) ? atomic_load(&status->resyncs) : 0);
     stat(kCol[3], y, "resync", buffer);
+
+    // NOTES IN AND NOTES OUT, on the instrument only. "The keyboard does not play the synth" has
+    // three causes that look identical from outside - the host is not handing the notes over, the
+    // plug-in is dropping them, or the send is failing - and this row separates them in a glance:
+    // a still 0 on the left is the host's end, in without out is ours.
+    if (gInstrument) {
+        y += 20.0;
+
+        snprintf(buffer, sizeof(buffer), "%d / %d",
+                 (status != NULL) ? atomic_load(&status->eventsIn) : 0,
+                 (status != NULL) ? atomic_load(&status->eventsOut) : 0);
+        stat(kCol[0], y, "notes", buffer);
+    }
 
     // LAST, so it draws over everything - and the hover update goes here rather than in the click
     // path because the highlight has to follow the pointer while no button is down.
@@ -1184,6 +1256,19 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
         if (hit(measure_bounds(), x, y)) {
             request->which      = eGbEditMeasure;
             request->normalized = 1.0;          // a trigger; the plug-in acts on the rising edge
+            return true;
+        }
+
+        if (hit(draw_button_bounds(note_down()), x, y) || hit(draw_button_bounds(note_up()), x, y)) {
+            int note = (int)((gTestNote * 127.0) + 0.5)
+                       + (hit(draw_button_bounds(note_up()), x, y) ? 1 : -1);
+
+            // Clamped rather than wrapped, for the reason every other stepper here is: an arrow
+            // that jumps from the top of a range to the bottom reads as a fault.
+            note = (note < 0) ? 0 : ((note > 127) ? 127 : note);
+
+            request->which      = eGbEditTestNote;
+            request->normalized = (double)note / 127.0;
             return true;
         }
 

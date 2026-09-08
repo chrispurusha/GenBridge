@@ -43,6 +43,14 @@
 #include <vector>
 #include <CoreAudio/CoreAudio.h>
 #include <CoreAudio/HostTime.h>
+#include <mach/mach_time.h>
+
+// THE PLUG-IN'S OWN LIVE FIGURES, read straight out of it. vst3check dlopen()s the bundle into its
+// OWN process, so the status block the panel reads thirty times a second is in this address space
+// too - gb_status() is exported and needs only a dlsym. Everything about the ring that matters is
+// in there: fill against setpoint, the drift correction in force, underruns and resyncs. Without it
+// a bad measurement is just a bad number.
+#include "../vst3/gbStatus.h"
 #include <CoreMIDI/CoreMIDI.h>
 #include <dlfcn.h>
 #include <unistd.h>
@@ -442,6 +450,82 @@ static int   gOnsetBlock  = -1;
 static int   gOnsetSample = -1;
 static float gThreshold   = 1.0f;
 
+// HOW MANY BLOCKS THE HOST COMPUTES PER AUDIO CALLBACK. One is the easy case and the only one this
+// harness used to drive: a block, a pause, a block. Ableton declares 512 and calls with 128, which
+// is four blocks computed back to back and then nothing for the rest of the cycle - a completely
+// different shape, and the one every ordering and timing defect has hidden in. --burst K drives it.
+static int   gBurst       = 1;
+
+// PACED AGAINST AN ABSOLUTE DEADLINE, NEVER usleep(). usleep() sleeps AT LEAST what it is asked and
+// the overshoot accumulates, so a loop of usleep(2666) hands over blocks slower than 48 kHz - the
+// capture device fills the ring faster than the harness drains it, and the plug-in resyncs. That
+// resync is the harness's, and the log records it as the plug-in's: a rig that manufactures the
+// fault it is looking for. MidiSyncTool paid for this one already (its findings, 2026-09-02: 0.92 ms
+// of "jitter" that was entirely the usleep harness).
+//
+// mach_wait_until() against a running deadline has no such drift - an early or late wake is absorbed
+// by the next one rather than added to it.
+static uint64_t gDeadline = 0;
+
+static tGbStatus * (*gStatusFn)(uint32_t) = nullptr;
+static bool         gWatch                = false;
+static int          gWatchTick            = 0;
+static ParamValue   gBufferValue          = 0.0;
+static bool         gHaveBuffer           = false;
+
+// One line per ~170 ms of driving. Everything here is written by the plug-in's own threads, so it
+// is what the panel would be showing at that instant.
+static void watch_sample(void) {
+    if (!gWatch || (gStatusFn == nullptr)) {
+        return;
+    }
+
+    if ((++gWatchTick % 8) != 0) {
+        return;
+    }
+
+    // THE SLOT IS NOT 0. Every instance this run has created claims one, and the instrument under
+    // --play is several instances in - so the trace scanned an inactive slot and printed nothing at
+    // all, which reads exactly like a ring with nothing to say.
+    tGbStatus * status = nullptr;
+
+    for (uint32_t slot = 0; slot < GB_STATUS_SLOTS; slot++) {
+        tGbStatus * candidate = gStatusFn(slot);
+
+        if ((candidate != nullptr) && atomic_load(&candidate->active)
+            && (atomic_load(&candidate->setpointFrames) > 0.0)) {
+            status = candidate;
+        }
+    }
+
+    if (status == nullptr) {
+        return;
+    }
+
+    printf("      [ring] fill %7.1f of %7.1f   drift %+8.1f ppm   under %d  resync %d"
+           "   trip %d phase %d\n",
+           atomic_load(&status->fillFrames), atomic_load(&status->setpointFrames),
+           atomic_load(&status->driftPpm),
+           atomic_load(&status->underruns), atomic_load(&status->resyncs),
+           atomic_load(&status->measureTripNow), atomic_load(&status->measurePhase));
+    fflush(stdout);
+}
+
+static void pace_to_deadline(uint64_t stepHostTime) {
+    uint64_t now = mach_absolute_time();
+
+    // Behind by more than a whole step means something outside the loop took the time - the pause
+    // between measurement runs, a device open. Catching up by running flat out would starve the
+    // ring, which is the very thing being measured, so the schedule restarts from here.
+    if ((gDeadline == 0) || (now > (gDeadline + stepHostTime))) {
+        gDeadline = now;
+    }
+
+    gDeadline += stepHostTime;
+
+    mach_wait_until(gDeadline);
+}
+
 static float run_blocks(IAudioProcessor * processor, float ** ch, float * l, float * r,
                         int blocks, IEventList * events,
                         ParamValue deviceValue, ParamValue midiValue) {
@@ -470,9 +554,20 @@ static float run_blocks(IAudioProcessor * processor, float ** ch, float * l, flo
         // that it does not reopen the device continuously.
         OneChange deviceChange(0, deviceValue);
         OneChange midiChange(6, midiValue);
+        OneChange bufferChange(3, gBufferValue);
 
-        data.inputParameterChanges = (block == 0) ? (IParameterChanges *)&deviceChange
-                                                  : (IParameterChanges *)&midiChange;
+        // BUFFER FIRST, THEN DEVICE, and ONLY IF ONE WAS ASKED FOR. Sending it unasked meant
+        // sending 0.0 - a real slot, not "leave it alone" - so every run_blocks() call changed the
+        // device buffer, reopened the device, and destroyed whatever measurement was in flight. No
+        // measurement completed at all and the plug-in looked broken.
+        if (gHaveBuffer) {
+            data.inputParameterChanges = (block == 0) ? (IParameterChanges *)&bufferChange
+                                                      : ((block == 1) ? (IParameterChanges *)&deviceChange
+                                                                      : (IParameterChanges *)&midiChange);
+        } else {
+            data.inputParameterChanges = (block == 0) ? (IParameterChanges *)&deviceChange
+                                                      : (IParameterChanges *)&midiChange;
+        }
 
         if ((block == 0) && (events != nullptr)) {
             data.inputEvents = events;
@@ -493,7 +588,14 @@ static float run_blocks(IAudioProcessor * processor, float ** ch, float * l, flo
             }
         }
 
-        usleep(2666);
+        // The pause belongs at the END of a burst, not after every block: the blocks of one
+        // callback are computed as fast as the CPU can do it.
+        watch_sample();
+
+        if (((block + 1) % gBurst) == 0) {
+            pace_to_deadline(AudioConvertNanosToHostTime(
+                                 (uint64_t)((128.0 / 48000.0) * 1.0e9) * (uint64_t)gBurst));
+        }
     }
 
     return peak;
@@ -844,6 +946,85 @@ static void midi_out_test(IPluginFactory * factory, IPluginFactory2 * factory2, 
                   (deltaMs > (wantMs - 0.25)) && (deltaMs < (wantMs + 0.25)));
         }
 
+        // ── THE STREAM MUST NEVER GO BACKWARDS ──────────────────────────────────────────────────
+        //
+        // The two checks above prove events keep their place inside a block and blocks keep their
+        // place inside a callback. This proves the CALLBACKS keep their place relative to each
+        // other, which is the one that took a working plug-in and made it look like it had stopped
+        // passing MIDI through.
+        //
+        // Audio callbacks jitter. A callback that arrives a few hundred microseconds EARLY, on a
+        // clock that re-anchors to the wall at every boundary, produces a first stamp before the
+        // previous callback's last one - and CoreMIDI delivers by timestamp, so a note-off can
+        // overtake its note-on. Notes stick on, later ones queue behind them, and a quantised clip
+        // whose events are far apart still plays perfectly, which is what makes it so confusing.
+        //
+        // Twenty notes, one per call, with the gap between calls deliberately alternating short and
+        // long. The pitches must come back in the order they were played and their timestamps must
+        // be strictly increasing.
+        gSinkCount   = 0;
+        gSinkPackets = 0;
+
+        // FOUR-BLOCK CALLBACKS WITH THE BOUNDARY JITTERED, which is the shape that inverts. A
+        // burst leaves the block model up to a whole callback ahead of the clock; if the NEXT
+        // callback then arrives early, re-anchoring to the clock steps the stamps backwards over
+        // the burst that just went out.
+        //
+        // The gaps alternate 8 ms and 13.3 ms around a true 10.67 ms cycle, so the pacing is right
+        // ON AVERAGE - a test whose mean is wrong would just walk the model into its ceiling and
+        // fail for a different reason.
+        int pitch = 40;
+
+        for (int burst = 0; burst < 6; burst++) {
+            for (int sub = 0; sub < 4; sub++) {
+                OneNote jitter(true, (int16)pitch, 0.8f);
+
+                pitch++;
+                run_one_now(ip, ch, l, r, (IEventList *)&jitter, midiValue);
+            }
+
+            // 6 ms and 15.3 ms around a true 10.67 ms cycle. The early one has to be early by more
+            // than a BLOCK, not merely early: a callback that re-anchors to the clock lands on the
+            // stamp the previous burst's last block already used, and equal stamps still come out
+            // in the order they were handed over. 8 ms sat exactly on that boundary and the test
+            // passed either way, which is worse than no test.
+            usleep((burst % 2) ? 15300 : 6000);
+        }
+        usleep(200000);
+
+        int  seen       = 0;
+        bool ordered    = true;
+        bool increasing = true;
+
+        for (uint32_t i = 0; i < gSinkPackets; i++) {
+            if ((gSinkStatus[i] & 0xF0) != 0x90) {
+                continue;
+            }
+
+            if (gSinkData1[i] != (uint8_t)(40 + seen)) {
+                ordered = false;
+            }
+
+            if ((i > 0) && (gSinkStamp[i] < gSinkStamp[i - 1])) {
+                increasing = false;
+            }
+            seen++;
+        }
+        printf("    %d of 24 jittered notes came back\n", seen);
+
+        // HONEST ABOUT ITS REACH. This sink is a virtual destination in the same process, and
+        // CoreMIDI hands those to the read proc as they are sent rather than holding them to their
+        // timestamps - so what is proved here is that nothing is DROPPED or reordered on the way
+        // out, not that a hardware port would release them in this order. The stamps themselves are
+        // checked by the two tests above.
+        check("every note survives a jittered callback", seen == 24);
+        check("they arrive in the order they were played", ordered);
+        // The weaker of the two, and worth knowing why: CoreMIDI has already sorted the packets by
+        // timestamp before this reads them, so an inversion shows up as the PITCHES arriving out of
+        // order rather than as a stamp going backwards. This catches only the case where the sink
+        // received them in a batch the sort could not fix.
+        check("their timestamps never go backwards", increasing);
+
         ip->setProcessing(false);
         inst->setActive(false);
     }
@@ -862,12 +1043,19 @@ int main(int argc, char ** argv) {
     if (argc < 2) {
         printf("usage: vst3check <plugin.vst3> [--block N]\n");
         printf("  --block N   max samples per block to declare, as a host would (default 512)\n");
+        printf("  --play DEV MIDI   round trip through real hardware\n");
+        printf("  --measure N       with --play, press Measure N times and report the spread\n");
+        printf("  --burst K         compute K blocks back to back per callback, as Ableton does\n");
+        printf("  --watch           trace the plug-in's ring fill, drift and resyncs while it runs\n");
+        printf("  --buffer N        device buffer to impose, by the label's leading text (e.g. 64)\n");
         return 2;
     }
 
-    int32       maxBlock   = 512;
+    int32       maxBlock    = 512;
     const char * playDevice = nullptr;
     const char * playMidi   = nullptr;
+    int          measureRuns = 1;
+    const char * playBuffer = nullptr;
 
     for (int i = 2; i < argc; i++) {
         if ((strcmp(argv[i], "--block") == 0) && ((i + 1) < argc)) {
@@ -875,6 +1063,18 @@ int main(int argc, char ** argv) {
         } else if ((strcmp(argv[i], "--play") == 0) && ((i + 2) < argc)) {
             playDevice = argv[i + 1];
             playMidi   = argv[i + 2];
+        } else if ((strcmp(argv[i], "--measure") == 0) && ((i + 1) < argc)) {
+            measureRuns = atoi(argv[i + 1]);
+        } else if ((strcmp(argv[i], "--buffer") == 0) && ((i + 1) < argc)) {
+            playBuffer = argv[i + 1];
+        } else if (strcmp(argv[i], "--watch") == 0) {
+            gWatch = true;
+        } else if ((strcmp(argv[i], "--burst") == 0) && ((i + 1) < argc)) {
+            gBurst = atoi(argv[i + 1]);
+
+            if (gBurst < 1) {
+                gBurst = 1;
+            }
         }
     }
 
@@ -887,6 +1087,12 @@ int main(int argc, char ** argv) {
     if (lib == nullptr) {
         printf("dlopen failed: %s\n", dlerror());
         return 2;
+    }
+
+    gStatusFn = (tGbStatus * (*)(uint32_t))dlsym(lib, "gb_status");
+
+    if (gWatch && (gStatusFn == nullptr)) {
+        printf("    --watch: gb_status is not exported by this build; tracing disabled\n");
     }
 
     auto entry = (bool (*)(void *))dlsym(lib, "bundleEntry");
@@ -1573,6 +1779,14 @@ int main(int argc, char ** argv) {
                             break;
                         }
 
+                        if ((title == "Device Buffer") && (playBuffer != nullptr)
+                            && (text.find(playBuffer) == 0)) {
+                            gBufferValue = norm;
+                            gHaveBuffer  = true;
+                            printf("    buffer:  slot %d = %s\n", slot, text.c_str());
+                            break;
+                        }
+
                         if ((title == "MIDI Destination") && (text.find(playMidi) != std::string::npos)) {
                             midiValue = norm;
                             haveMidi  = true;
@@ -1647,32 +1861,71 @@ int main(int argc, char ** argv) {
 
                 // Drive the plug-in's OWN Measure control, so its detection is exercised rather
                 // than the harness's - they are different code and only one of them ships.
-                printf("    pressing the plug-in's Measure control\n");
+                //
+                // REPEATEDLY, IF ASKED. One measurement says nothing about whether the measurement
+                // is repeatable, and repeatability is the property that matters: a figure that
+                // moves by 8 ms between two runs on an unchanged synth is not a measurement. The
+                // per-run detail goes to /tmp/genbridge.log (touch /tmp/genbridge-log first); what
+                // is printed here is the spread of what the plug-in ended up reporting.
+                printf("    pressing the plug-in's Measure control %d time%s (burst %d)\n",
+                       measureRuns, (measureRuns == 1) ? "" : "s", gBurst);
 
-                for (int press = 0; press < 2; press++) {
-                    OneChange   trigger(8, (press == 0) ? 1.0 : 0.0);
-                    ProcessData tick;
-                    AudioBusBuffers tbus;
+                double lowMs  = 0.0;
+                double highMs = 0.0;
 
-                    memset(&tick, 0, sizeof(tick));
-                    memset(&tbus, 0, sizeof(tbus));
-                    tbus.numChannels      = 2;
-                    tbus.channelBuffers32 = ch;
+                for (int run = 0; run < measureRuns; run++) {
+                    for (int press = 0; press < 2; press++) {
+                        OneChange   trigger(8, (press == 0) ? 1.0 : 0.0);
+                        ProcessData tick;
+                        AudioBusBuffers tbus;
 
-                    tick.numSamples          = 128;
-                    tick.numOutputs          = 1;
-                    tick.outputs             = &tbus;
-                    tick.symbolicSampleSize  = kSample32;
-                    tick.processMode         = kRealtime;
-                    tick.inputParameterChanges = &trigger;
+                        memset(&tick, 0, sizeof(tick));
+                        memset(&tbus, 0, sizeof(tbus));
+                        tbus.numChannels      = 2;
+                        tbus.channelBuffers32 = ch;
 
-                    ip->process(tick);
+                        tick.numSamples          = 128;
+                        tick.numOutputs          = 1;
+                        tick.outputs             = &tbus;
+                        tick.symbolicSampleSize  = kSample32;
+                        tick.processMode         = kRealtime;
+                        tick.inputParameterChanges = &trigger;
+
+                        ip->process(tick);
+                    }
+
+                    // Five trips of settle + floor + response is about three seconds; 1900 blocks is 5.1, and the
+                    // 120 after it are the pause the worker needs to store the result.
+                    //
+                    // DRIVEN BLOCKS, NOT A usleep(). A pause here is a host that has stopped
+                    // calling process() while the capture device keeps filling the ring - 300 ms is
+                    // 14400 frames into a 7680 frame ring, so it overflowed, the plug-in resynced,
+                    // and store_measurement() correctly threw away every run for happening over a
+                    // resync. Seven of eight runs discarded, and not one of them was the plug-in's
+                    // fault. A DAW does not stop calling process() and neither should this.
+                    // FIVE TRIPS of settle + floor + response is a little under three seconds, and
+                    // 2200 blocks is 5.9 - the run has to be driven right through, plus enough
+                    // after it for the worker to store the result.
+                    run_blocks(ip, ch, l, r, 2200, nullptr, deviceValue, midiValue);
+
+                    // WHAT THE MEASUREMENT LANDED IN. The offset parameter is where the hardware
+                    // share ends up - the reported latency also carries the ring, which the block
+                    // retune can move underneath a run and would read as measurement scatter that
+                    // is nothing of the kind.
+                    double norm = (instCtrl != nullptr) ? instCtrl->getParamNormalized(9) : 0.0;
+                    double ms   = -100.0 + (norm * 200.0);
+
+                    printf("      run %d: offset %+.2f ms, reported %u samples\n",
+                           run + 1, ms, ip->getLatencySamples());
+
+                    if ((run == 0) || (ms < lowMs))  { lowMs  = ms; }
+                    if ((run == 0) || (ms > highMs)) { highMs = ms; }
                 }
 
-                run_blocks(ip, ch, l, r, 900, nullptr, deviceValue, midiValue);
-                usleep(300000);
-
-                printf("    plug-in now reports %u samples\n", ip->getLatencySamples());
+                if (measureRuns > 1) {
+                    printf("    spread over %d runs: %.2f ms (%.2f .. %.2f)\n",
+                           measureRuns, highMs - lowMs, lowMs, highMs);
+                }
 
                 check("the hardware answered the note", played > (quiet + 0.001f));
 

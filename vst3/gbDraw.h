@@ -51,6 +51,7 @@ typedef enum {
     eGbEditMeasure,
     eGbEditOffset,
     eGbEditMidiChannel,
+    eGbEditTestNote,
 } tGbEdit;
 
 typedef struct {
@@ -104,7 +105,7 @@ bool gb_draw_menu_active(void);
 // Current parameter values, so the editor draws what the host believes rather than its own idea.
 void gb_draw_set_values(double device, double rate, double frames, double trim,
                         double mode, double firstChannel, double midiDest, double offset,
-                        double midiChannel);
+                        double midiChannel, double testNote);
 
 #ifdef __cplusplus
 }

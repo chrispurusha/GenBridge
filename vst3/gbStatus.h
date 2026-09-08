@@ -64,6 +64,23 @@ typedef struct {
     atomic_int      latencySamples;
     atomic_int      measuredSamples;    // the hardware round trip, 0 until measured
 
+    // The spread behind that average: the fastest and slowest round trip of the run, and how many
+    // of them counted. An average with no range beside it cannot be told from a lucky single shot.
+    atomic_int      measuredLow;
+    atomic_int      measuredHigh;
+    atomic_int      measuredTrips;
+
+    // Live progress of a run in flight: which trip, and which phase of it. The panel can say
+    // "trip 3 of 5" instead of going quiet for three seconds, and a run that stalls says where.
+    atomic_int      measureTripNow;
+    atomic_int      measurePhase;
+
+    // Note events taken from the host, and note events that reached a MIDI destination. "Notes are
+    // not getting through" has three quite different causes and they look identical from outside;
+    // this says which half of the journey to look at.
+    atomic_int      eventsIn;
+    atomic_int      eventsOut;
+
     // The reported total, broken into what it is made of. All in HOST frames, so they add up.
     atomic_int      ringSamples;
     atomic_int      deviceSamples;

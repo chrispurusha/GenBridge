@@ -170,6 +170,20 @@ using namespace Steinberg::Vst;
 #define GB_MEASURE_RATIO      (8.0f)     // ...or this much above the noise, whichever is greater
 #define GB_MEASURE_CEILING    (0.70f)    // never demand more than this; see the note in the code
 #define GB_MEASURE_CONFIRM    (2)        // consecutive blocks required, so one glitch is not an onset
+
+// SEVERAL ROUND TRIPS, NOT ONE, because a single one is not a measurement of anything repeatable.
+// USB MIDI transit, the synth's own scheduler and its envelope all move the onset a little from one
+// note to the next, and a figure taken from one note carries all of it. Five is enough to throw
+// away the extremes and still average three.
+#define GB_MEASURE_TRIPS      (5)
+
+// TRIMMED, NOT AVERAGED FLAT. One trip landing on a resync, or on a note the synth happened to
+// voice-steal, would drag a plain mean by its whole error; dropping the highest and lowest first
+// costs nothing when they are honest and removes the outlier when they are not.
+#define GB_MEASURE_DROP       (1)
+
+// The default only. Which note is played is settable - a drum machine may have nothing at all on
+// middle C, and an Analog Rytm wants the lowest note there is.
 #define GB_MEASURE_NOTE       (60)
 
 // Remembered per audio device AND per MIDI destination. The same synth answers differently over USB
@@ -252,6 +266,7 @@ enum {
     kParamMidiChannel,   // instrument only: which channel to send on
     kParamMeasure,       // instrument only: rising edge runs a latency measurement
     kParamOffsetMs,      // instrument only: manual correction to the measured figure
+    kParamTestNote,      // instrument only: which note Measure plays
     kParamCount
 };
 
@@ -335,6 +350,7 @@ struct tGbActive {
     std::string uid;
     std::string midiName;
     int         midiChannel{0};
+    int         testNote{GB_MEASURE_NOTE};
     unsigned    frames{GB_DEFAULT_FRAMES};
     double      rate{GB_DEFAULT_RATE};
     unsigned    firstChannel{0};
@@ -371,6 +387,8 @@ static tGbActive gb_parse_active(const std::string & blob) {
             out.midiName = line.substr(5);
         } else if (line.compare(0, 7, "midich=") == 0) {
             out.midiChannel = atoi(line.substr(7).c_str());
+        } else if (line.compare(0, 9, "testnote=") == 0) {
+            out.testNote = atoi(line.substr(9).c_str());
         } else if (line.compare(0, 3, "hw=") == 0) {
             // Held, not applied. A hw= line names its own pair, and which pair is the ACTIVE one is
             // not known until active= and midi= have both been seen - and getState writes them
@@ -772,6 +790,7 @@ public:
             current_midi_name(midiNameNow, sizeof(midiNameNow));
             blob += "midi=" + std::string(midiNameNow) + "\n";
             blob += "midich=" + std::to_string(midiChannel.load()) + "\n";
+            blob += "testnote=" + std::to_string(testNote.load()) + "\n";
 
             // THE MANUAL TRIM, AND THE MEASUREMENTS IT TRIMS. Neither belongs on a dev= line: the
             // offset is one value for the whole plug-in, and a measurement is keyed by the audio
@@ -933,6 +952,39 @@ public:
         return latency_frames_for_fill(setpointFrames);
     }
 
+    // THE PIPELINE'S ACTUAL DELAY AT THIS INSTANT, and it takes TWO numbers, not one.
+    //
+    // Occupancy on its own is not an age. The device writes a whole buffer at a time, so the fill
+    // jumps up by deviceFrames at each capture callback and falls as the host drains it - while the
+    // audio already in the ring is getting older at exactly the same rate. The two move in
+    // ANTI-PHASE and their sum is constant; take the fill alone and what is left is a sawtooth of a
+    // full device buffer. At 512 frames that is 10.7 ms, which is precisely the range a repeated
+    // measurement was wandering over.
+    //
+    // So: how long ago the newest frame arrived, plus how many sit in front of it. deviceLatency
+    // has the device's buffer inside it (device_latency_frames() sums bufferFrames + latency +
+    // safety offset + stream latency), and that buffer term is what "how long ago" now measures
+    // directly - counting it twice would put a whole buffer back on.
+    //
+    // The setpoint, NOT this, is what the host is told: the loop holds the AVERAGE fill there by
+    // design, and a latency that moved with every block would have the host redo its delay
+    // compensation continuously. This is for the measurement, which needs the instant it happened.
+    double latency_frames_measured(double fillFrames, uint64_t at) const {
+        if (nominalRatio <= 0.0) {
+            return 0.0;
+        }
+
+        double buffered = (double)deviceLatency - (double)openDeviceFrames;
+
+        if (buffered < 0.0) {
+            buffered = 0.0;
+        }
+
+        double inRing = fillFrames + buffered + resampler_latency_frames();
+
+        return frames_between(lastWriteHostTime.load(), at) + (inRing / nominalRatio);
+    }
+
     uint32 internal_latency(void) const {
         double total = internal_latency_frames();
 
@@ -1047,6 +1099,14 @@ public:
         // trip are anchored to the same clock and the difference between them is free of it.
         uint64_t blockHostTime = block_host_time(frames);
 
+        // ONLY WHILE A DEVICE IS ACTUALLY RUNNING. Blocks handed over before one opens say nothing
+        // about what the ring will have to cover, and a host - or a checker - that drives a burst of
+        // them unpaced while nothing is open would leave a fictitious cycle length behind that the
+        // retune then treats as settled for the rest of the session.
+        if (running) {
+            observe_burst(frames);
+        }
+
         apply_parameter_changes(data, blockHostTime);
 
         if (instrument) {
@@ -1124,6 +1184,15 @@ public:
         }
 
         run_measurement(out, frames, blockHostTime, fill);
+
+        {
+            tGbStatus * status = gb_status(statusSlot);
+
+            if (status != nullptr) {
+                atomic_store(&status->measureTripNow, measureTrip);
+                atomic_store(&status->measurePhase, (int)measureState);
+            }
+        }
         publish_status(out, frames, fill);
 
         pthread_mutex_unlock(&configLock);
@@ -1150,24 +1219,21 @@ public:
     // IT CANNOT SEPARATE THE SYNTH FROM ITS PATCH. A slow pad crosses the threshold later than a
     // piano, and nothing measuring from outside can tell the difference. Hence the manual offset:
     // the measurement gets you within a few milliseconds and a person settles the rest.
-    void start_measurement(uint64_t blockHostTime) {
+    void start_measurement(void) {
         if (!instrument || !running) {
             return;
         }
 
-        // ALL NOTES OFF FIRST, on every channel we might have used. Belt and braces: our own test
-        // note is released explicitly, and anything left hanging by a previous attempt - or by the
-        // user playing - goes with it.
-        for (uint8_t channel = 0; channel < 16; channel++) {
-            uint8_t note[3]  = { (uint8_t)(0x80 | channel), GB_MEASURE_NOTE, 0 };
-            uint8_t panic[3] = { (uint8_t)(0xB0 | channel), 123, 0 };   // All Notes Off
-
-            // STAMPED, like everything else this block sends. An immediate All Notes Off would
-            // overtake any note still queued for its offset and leave it sounding for ever - the
-            // one message that must never arrive early is the one that silences things.
-            gb_midi_send_at(midiDestination.load(), note, 3, blockHostTime);
-            gb_midi_send_at(midiDestination.load(), panic, 3, blockHostTime);
-        }
+        // THE ALL-NOTES-OFF IS THE WORKER'S JOB, NOT THIS THREAD'S. It is 32 MIDISend calls - one
+        // note-off and one All Notes Off on each of 16 channels - and every one of them is a mach
+        // message to the MIDI server. Half a millisecond of a 2.7 ms block, spent on the audio
+        // thread, at the one moment the ring must not be starved: it underran, the ring resynced,
+        // and store_measurement() then threw the run away for happening over a resync.
+        //
+        // The settle phase exists precisely to let things go quiet, and it is 350 ms long - orders
+        // of magnitude more than the worker needs to get to this.
+        measurePanic.store(true);
+        wake_worker();
 
         measureUnderrunsAtStart = atomic_load(&ring.underflows);
         measureResyncsAtStart    = resyncs.load();
@@ -1179,8 +1245,34 @@ public:
         measureConfirm     = 0;
         measureOnsetFrames = 0;
         measureOnsetFill   = 0.0;
+        measureOnsetOurs   = 0.0;
         measureNoteTime    = 0;
+        measureTrip        = 0;
+
+        for (int i = 0; i < GB_MEASURE_TRIPS; i++) {
+            measureTrips[i] = 0;
+        }
         measureLatency.store(0);
+    }
+
+    // WORKER THREAD. Everything hanging on every channel we might have used, silenced: our own
+    // test note is released explicitly and anything left by a previous attempt - or by playing -
+    // goes with it.
+    //
+    // Sent immediately rather than stamped, because this thread has no block timeline to stamp
+    // against. A played note scheduled up to one block ahead could in principle be overtaken by it,
+    // which is a stuck note; a panic pressed in the middle of playing is not a case worth carrying
+    // machinery for, and the note that follows would clear it.
+    void send_all_notes_off(void) {
+        int destination = midiDestination.load();
+
+        for (uint8_t channel = 0; channel < 16; channel++) {
+            uint8_t note[3]  = { (uint8_t)(0x80 | channel), (uint8_t)testNote.load(), 0 };
+            uint8_t panic[3] = { (uint8_t)(0xB0 | channel), 123, 0 };   // All Notes Off
+
+            gb_midi_send(destination, note, 3);
+            gb_midi_send(destination, panic, 3);
+        }
     }
 
     void run_measurement(float ** out, int32 frames, uint64_t blockHostTime, double fill) {
@@ -1220,7 +1312,11 @@ public:
             }
 
             if ((double)measureFrames >= (GB_MEASURE_FLOOR_S * hostRate)) {
-                uint8_t note[3] = { 0x90, GB_MEASURE_NOTE, 100 };
+                uint8_t note[3] = { 0x90, (uint8_t)testNote.load(), 100 };
+
+                // This trip's own clean-capture baseline. See where it is checked.
+                measureTripUnderruns = atomic_load(&ring.underflows);
+                measureTripResyncs   = resyncs.load();
 
                 // AT THE START OF THE NEXT BLOCK, which is the one instant here that is certain to
                 // be in the FUTURE - nextBlockHostTime is this block's start plus its frames, and
@@ -1300,15 +1396,22 @@ public:
                 double elapsed = frames_between(measureNoteTime, blockActualHostTime)
                                  + (double)cross;
 
+                // OUR SHARE IS WORKED OUT HERE, AT THE ONSET, not two blocks later when the
+                // confirmation arrives. It is built from three things read at one instant - the
+                // fill, the clock, and when the last capture callback landed - and by the time the
+                // confirmation comes in, the device has usually written again: lastWriteHostTime is
+                // then AFTER the onset block, the "how long ago" term collapses to zero, and the
+                // share comes out a whole device buffer short. It read as an 18 ms synth.
                 measureOnsetFrames = (elapsed > 0.0) ? (uint32_t)elapsed : 0;
                 measureOnsetFill   = fill;
+                measureOnsetOurs   = latency_frames_measured(fill, blockActualHostTime);
             }
         } else {
             measureConfirm = 0;
         }
 
         if (measureConfirm >= GB_MEASURE_CONFIRM) {
-            uint8_t off[3] = { 0x80, GB_MEASURE_NOTE, 0 };
+            uint8_t off[3] = { 0x80, (uint8_t)testNote.load(), 0 };
 
             gb_midi_send_at(midiDestination.load(), off, 3, blockHostTime);
 
@@ -1327,8 +1430,7 @@ public:
             // what the HOST is told, because that is the long-run figure; the measurement nets off
             // the real one, and the difference between the two is exactly the momentary deviation
             // it should not be reporting as hardware.
-            double   fillNow = (measureOnsetFill > 0.0) ? measureOnsetFill : setpointFrames;
-            double   oursNow = latency_frames_for_fill(fillNow);
+            double   oursNow = (measureOnsetOurs > 0.0) ? measureOnsetOurs : internal_latency_frames();
             uint32_t ours    = (oursNow > 0.0) ? (uint32_t)oursNow : 0;
 
             // A ROUND TRIP CANNOT BE FASTER THAN OUR OWN PIPELINE. If it looks like it was, the
@@ -1337,13 +1439,34 @@ public:
             // to zero: a silent 0 looked exactly like a device that had never been measured.
             int      theirs = (total > ours) ? (int)(total - ours) : GB_MEASURE_TOO_EARLY;
 
+            // THE TRIP IS ONLY KEPT IF THE CAPTURE WAS CLEAN THROUGH IT. This used to be judged
+            // over the whole run and thrown away wholesale - one resync anywhere and every note was
+            // discarded, which on a rig that resyncs at all means no measurement is ever possible.
+            // Per trip, a disturbed one simply does not vote.
+            bool clean = (atomic_load(&ring.underflows) == measureTripUnderruns)
+                         && (resyncs.load() == measureTripResyncs);
+
+            measureTrips[measureTrip] = (clean && (theirs > 0)) ? theirs : GB_MEASURE_TOO_EARLY;
+            measureTrip++;
+
             measureOnset.store((int)total);
             measureOurs.store((int)ours);
-            measureFillSeen.store(fillNow);
+            measureFillSeen.store(measureOnsetFill);
             measureTriggerPeak.store(peak);
             measureFloorSeen.store(measureFloor);
 
-            measureLatency.store(theirs);
+            if (measureTrip < GB_MEASURE_TRIPS) {
+                // Round again. Back to settle, which is where the note just played gets time to
+                // decay before the next floor is taken - a floor measured over a ringing note sets
+                // a threshold the next one cannot cross.
+                measureState   = eMeasureSettle;
+                measureFrames  = 0;
+                measureConfirm = 0;
+                measureFloor   = 0.0f;
+                return;
+            }
+
+            measureLatency.store(trip_result());
             measureState = eMeasureIdle;
             measureStore.store(true);
             wake_worker();
@@ -1351,15 +1474,63 @@ public:
         }
 
         if ((double)measureFrames >= (GB_MEASURE_TIMEOUT_S * hostRate)) {
-            uint8_t off[3] = { 0x80, GB_MEASURE_NOTE, 0 };
+            uint8_t off[3] = { 0x80, (uint8_t)testNote.load(), 0 };
 
             gb_midi_send_at(midiDestination.load(), off, 3, blockHostTime);
 
-            measureLatency.store(GB_MEASURE_TIMED_OUT);        // nothing came back
+            // A TRIP THAT HEARD NOTHING ENDS THE RUN. Something is wrong with the destination, the
+            // channel or the note, and four more silences take six more seconds to say so.
+            measureLatency.store((measureTrip > 0) ? trip_result() : GB_MEASURE_TIMED_OUT);
             measureState = eMeasureIdle;
             measureStore.store(true);
             wake_worker();
         }
+    }
+
+    // The trimmed mean of the trips that voted. Sorted in place - five elements, on the audio
+    // thread, and an insertion sort of five is nothing beside the block it sits in.
+    int trip_result(void) {
+        int valid[GB_MEASURE_TRIPS];
+        int count = 0;
+
+        for (int i = 0; i < measureTrip; i++) {
+            if (measureTrips[i] > 0) {
+                valid[count++] = measureTrips[i];
+            }
+        }
+
+        if (count == 0) {
+            return GB_MEASURE_TOO_EARLY;
+        }
+
+        for (int i = 1; i < count; i++) {
+            int key = valid[i];
+            int j   = i - 1;
+
+            while ((j >= 0) && (valid[j] > key)) {
+                valid[j + 1] = valid[j];
+                j--;
+            }
+            valid[j + 1] = key;
+        }
+
+        // Trim only when there is enough left to be worth averaging. Three votes still give a
+        // middle one; two would leave nothing after dropping both ends.
+        int drop  = (count >= (2 * GB_MEASURE_DROP) + 1) ? GB_MEASURE_DROP : 0;
+        int total = 0;
+        int used  = 0;
+
+        for (int i = drop; i < (count - drop); i++) {
+            total += valid[i];
+            used++;
+        }
+
+        measureTripsUsed.store(used);
+        measureTripLow.store(valid[0]);
+        measureTripHigh.store(valid[count - 1]);
+        measureTripSpread.store((count > 1) ? (valid[count - 1] - valid[0]) : 0);
+
+        return (used > 0) ? (total / used) : GB_MEASURE_TOO_EARLY;
     }
 
     // WATCH THE BLOCK SIZE THE HOST ACTUALLY USES, which need not be the one it declared.
@@ -1430,12 +1601,83 @@ public:
         // physically arrived by this instant - and for the second, third and fourth call of a
         // callback the model is up to a whole cycle ahead of it. See run_measurement().
         blockActualHostTime = now;
-        uint64_t limit = AudioConvertNanosToHostTime(250ull * 1000ull * 1000ull);
         uint64_t start = now;
         double   rate  = eventRate.load();
 
-        if ((nextBlockHostTime > now) && ((nextBlockHostTime - now) < limit)) {
+        // THE CYCLE BOUNDARY, decided here because both users need the same answer: this is where
+        // the model is allowed to carry forward, and it is what sizes the ring in observe_burst().
+        //
+        // Two calls belong to one callback if the second arrives before half of the first could
+        // have been played. Back to back they are microseconds apart; a real boundary is a whole
+        // block. Three orders of magnitude between the regimes, so the threshold is not delicate.
+        double gap = frames_between(lastCallHostTime, now);
+
+        blockStartsCycle = (lastCallHostTime == 0) || (gap > ((double)lastCallFrames * 0.5));
+        lastCallHostTime = now;
+        lastCallFrames   = (uint32_t)frames;
+
+        // MONOTONIC, AND THAT IS THE WHOLE POINT OF IT.
+        //
+        // The model may never hand back a time earlier than the end of the block before it. Letting
+        // it re-anchor to the clock at every callback boundary looks right - the clock is the truth,
+        // after all - and it inverts the event stream: audio callbacks jitter by a few hundred
+        // microseconds, so a callback arriving EARLY gets a first stamp before the previous
+        // callback's last one. CoreMIDI delivers in timestamp order, so a note-off can be handed
+        // over ahead of the note-on it belongs to. Notes stick on, and the next ones are lost
+        // behind them - which from the keyboard looks like the plug-in has stopped passing MIDI
+        // through altogether, while a quantised clip, whose events are sparse and far apart, plays
+        // perfectly.
+        //
+        // So: carry forward, always, and let the ceiling below be the only thing that pulls it back.
+        // A block boundary that jitters early simply waits; the grid does not move.
+        if (nextBlockHostTime > now) {
             start = nextBlockHostTime;
+        }
+
+        // A HARD CEILING ON TOP OF THE RULE, because the rule is a heuristic and this is not.
+        //
+        // Within a callback the model is legitimately ahead of the clock, and by definition never
+        // by more than one callback's worth of frames. If it ever is, the boundary test has missed
+        // one - a host rendering faster than realtime hands over call after call with no gap
+        // between them, and every one of them reads as a continuation. The model then walks into
+        // the future without limit, and MIDI stamped from it is not late, it is GONE: CoreMIDI
+        // holds each packet until a time that may be minutes away. Nothing sounds, and the symptom
+        // is "the plug-in stopped passing notes through" with everything else working perfectly.
+        //
+        // Two callbacks of slack, so ordinary jitter never touches it, and falling back to the
+        // clock when it trips. The cost of the ceiling being wrong is one callback of MIDI timing;
+        // the cost of no ceiling is silence.
+        //
+        // It is also what makes the monotonic rule above safe. Never going backwards on its own
+        // would let one fast burst push the grid permanently into the future; never going forwards
+        // too far on its own inverts the stream. Together they say: follow the frames, and if that
+        // has drifted implausibly far from the clock, admit it and start again.
+        // GENEROUS, DELIBERATELY. The ceiling is a last resort against a runaway, not a tuning
+        // knob, and tripping it IS a backwards step - the one thing the rule above exists to
+        // prevent. Set it at twice the measured callback it came out at 256 frames while the host
+        // was handing over bursts of 512, so it tripped on every burst and inverted the stream it
+        // was supposed to protect.
+        //
+        // A host taking more than eight of its own declared blocks in one callback is pathological,
+        // and the measured burst is not always available - observedMaxFrames is only collected
+        // while a device is running, and MIDI flows whether one is or not.
+        double cycle = (double)hostMaxFrames * 8.0;
+
+        if ((double)observedMaxFrames * 2.0 > cycle) {
+            cycle = (double)observedMaxFrames * 2.0;
+        }
+
+        if (cycle < 4096.0) {
+            cycle = 4096.0;
+        }
+
+        if (rate > 0.0) {
+            uint64_t ceiling = now + AudioConvertNanosToHostTime(
+                                   (uint64_t)((cycle / rate) * 1.0e9));
+
+            if (start > ceiling) {
+                start = now;
+            }
         }
 
         nextBlockHostTime = (rate > 0.0)
@@ -1520,7 +1762,16 @@ public:
             // STAMPED WITH ITS OWN OFFSET, not sent on arrival. See gb_midi_send_at(): a block's
             // worth of notes fired at the block boundary is a bias of half a buffer, always early,
             // and it grows with every increase in the host's buffer size.
-            gb_midi_send_at(destination, message, 3, host_time_for(blockHostTime, event.sampleOffset));
+            // COUNTED, BOTH SIDES. "Notes are not getting through" has three quite different
+            // causes - the host is not delivering them, the plug-in is dropping them, or the send
+            // is failing - and from outside they look identical. The panel shows in/out, so one
+            // glance says which half to look at.
+            eventsIn.fetch_add(1);
+
+            if (gb_midi_send_at(destination, message, 3,
+                                host_time_for(blockHostTime, event.sampleOffset))) {
+                eventsOut.fetch_add(1);
+            }
         }
     }
 
@@ -1575,13 +1826,48 @@ public:
         gb_midi_send_at(destination, message, 3, hostTime);
     }
 
+    // WHAT THE HOST TAKES PER CALLBACK, NOT PER CALL - and getting this wrong was a glitch you could
+    // hear.
+    //
+    // The ring has to cover the largest single demand made on it, and that demand is a whole audio
+    // callback. Ableton declares 512, calls with 128, and takes all four back to back. The retune
+    // read "the largest block actually seen" as 128 and shrank the setpoint to suit, so the ring
+    // held 400 frames against a callback that drained 512 of them. Every cycle ran it dry: 45
+    // underruns and 44 resyncs in two seconds on a KRONOS at a 64 frame device buffer, one audible
+    // click each. It survived a 512 frame device buffer only because the setpoint then came out at
+    // 960 by accident, which is more than one callback - which is why this never showed up until
+    // someone ran a small buffer.
+    //
+    // The DECLARED maximum was right all along. What is measured here is not a correction to it so
+    // much as a confirmation, and on a host that genuinely uses less than it declares - one block
+    // per callback, smaller than declared - it still reclaims the difference.
+    //
+    // CALLED BEFORE ANY EARLY RETURN, unlike observe_block(). Sitting inside that one, it saw
+    // nothing at all while the ring was resyncing - which is exactly when the numbers are needed,
+    // and is why the first attempt at this fix changed nothing.
+    //
+    // The boundary itself is decided in block_host_time(); this only adds up what fell inside one.
+    void observe_burst(int32 frames) {
+        if (blockStartsCycle) {
+            // A CEILING, because a detection that misfires would otherwise stick for the session.
+            // Nothing legitimately takes more than a few of its declared blocks per callback, and
+            // sizing a ring for a figure this side of that costs a few milliseconds where trusting
+            // a runaway one costs seconds.
+            uint32_t ceiling = (hostMaxFrames > 0) ? (hostMaxFrames * 4) : 8192;
+
+            if ((burstFrames > observedMaxFrames) && (burstFrames <= ceiling)) {
+                observedMaxFrames = burstFrames;
+            }
+
+            burstFrames = (uint32_t)frames;
+        } else {
+            burstFrames += (uint32_t)frames;
+        }
+    }
+
     void observe_block(int32 frames) {
         if (retuneState != eRetuneWatching) {
             return;
-        }
-
-        if ((uint32_t)frames > observedMaxFrames) {
-            observedMaxFrames = (uint32_t)frames;
         }
 
         observedFrames += (uint64_t)frames;
@@ -1733,8 +2019,12 @@ private:
                 // from "was there a press" latched the flag true - the editor's own release arrives
                 // in the same block - so the button worked exactly once and then never again.
                 if (sawPress && !measureArmed && (measureState == eMeasureIdle)) {
-                    log_line("measure requested");
-                    start_measurement(blockHostTime);
+                    // NOT LOGGED FROM HERE. log_line() opens and closes the file on every call, and
+                    // this is the audio thread - three syscalls in the middle of a 2.7 ms block, at
+                    // the exact moment a measurement is about to start. It showed up as a resync
+                    // during the run and the run then discarded itself for not being clean: a
+                    // measurement failing because of the act of measuring. The worker logs it.
+                    start_measurement();
                 }
 
                 measureArmed = (value >= 0.5);
@@ -1784,6 +2074,11 @@ private:
                 // was being raced over simply does not need to exist.
             } else if (q->getParameterId() == kParamMidiChannel) {
                 midiChannel.store((int)(value * (double)(GB_CHANNEL_SLOTS - 1) + 0.5));
+            } else if (q->getParameterId() == kParamTestNote) {
+                int note = (int)((value * 127.0) + 0.5);
+
+                testNote.store((note < 0) ? 0 : ((note > 127) ? 127 : note));
+                continue;
             } else if (q->getParameterId() == kParamOffsetMs) {
                 offsetMs.store(GB_OFFSET_MIN_MS + (value * (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS)));
 
@@ -1848,6 +2143,10 @@ private:
 
             source = self->widen;
         }
+
+        // WHEN THE NEWEST FRAME IN THE RING GOT HERE. Without it the ring's occupancy cannot be
+        // turned into an age: see latency_frames_measured().
+        self->lastWriteHostTime.store(AudioGetCurrentHostTime());
 
         if (!ring_write(&self->ring, source, frames)) {
             self->needResync.store(true);
@@ -1968,6 +2267,11 @@ private:
 
             if (revertWanted.exchange(false)) {
                 revert_retune();
+            }
+
+            if (measurePanic.exchange(false)) {
+                log_line("measure requested");
+                send_all_notes_off();
             }
 
             if (measureStore.exchange(false)) {
@@ -2277,9 +2581,13 @@ private:
         unsigned underruns = (unsigned)(atomic_load(&ring.underflows) - measureUnderrunsAtStart);
         int      resynced  = resyncs.load() - measureResyncsAtStart;
 
-        if ((result >= 0) && ((underruns > 0) || (resynced > 0))) {
-            log_line("measurement discarded: the capture was not clean during it "
-                     "(%u underruns, %d resyncs) - try again", underruns, resynced);
+        // JUDGED PER TRIP NOW, not over the whole run. A resync anywhere used to throw away every
+        // note in the run, so on a rig that resyncs at all no measurement was ever possible - and
+        // the resync was often caused by the act of measuring. A disturbed trip simply does not
+        // vote; the run is only refused when nothing clean survived.
+        if ((result >= 0) && (measureTripsUsed.load() <= 0)) {
+            log_line("measurement discarded: no trip completed over a clean capture "
+                     "(%u underruns, %d resyncs during the run) - try again", underruns, resynced);
 
             tGbStatus * status = gb_status(statusSlot);
 
@@ -2367,9 +2675,15 @@ private:
         // Underruns during the measurement matter: a gap in the capture delays the onset by
         // however long the gap was, so a figure taken while the ring was starving is not a
         // measurement of the hardware at all.
-        log_line("measured: onset at %d frames, our share %d (ring %.0f of %.0f), hardware %d "
-                 "(%.1f ms). floor %.4f, triggered at %.4f, underruns %u resyncs %d during. "
-                 "'%s' -> '%s'",
+        log_line("measured: %d of %d trips used, range %.1f..%.1f ms, spread %d frames (%.1f ms). "
+                 "last onset %d, our "
+                 "share %d (ring %.0f of %.0f), hardware %d (%.1f ms). floor %.4f, triggered at "
+                 "%.4f, underruns %u resyncs %d during. '%s' -> '%s'",
+                 measureTripsUsed.load(), GB_MEASURE_TRIPS,
+                 (double)measureTripLow.load() / (hostRate / 1000.0),
+                 (double)measureTripHigh.load() / (hostRate / 1000.0),
+                 measureTripSpread.load(),
+                 (double)measureTripSpread.load() / (hostRate / 1000.0),
                  measureOnset.load(), measureOurs.load(),
                  measureFillSeen.load(), setpointFrames, result,
                  (double)result / (hostRate / 1000.0),
@@ -2417,9 +2731,14 @@ private:
         atomic_store(&status->deviceSamples, (int)((double)snapDeviceLatency.load() / ratio));
         atomic_store(&status->filterSamples, (int)(resampler_latency_frames() / ratio));
         atomic_store(&status->measuredSamples, (int)hardwareSamples);
+        atomic_store(&status->measuredLow, measureTripLow.load());
+        atomic_store(&status->measuredHigh, measureTripHigh.load());
+        atomic_store(&status->measuredTrips, measureTripsUsed.load());
         atomic_store(&status->offsetSamples, (int)((offsetMs.load() / 1000.0) * snapHostRate.load()));
         atomic_store(&status->latencySamples, (int)snapshot_latency());
         atomic_store(&status->recommendedFrames, recommendedSetpoint);
+        atomic_store(&status->eventsIn, (int)eventsIn.load());
+        atomic_store(&status->eventsOut, (int)eventsOut.load());
     }
 
     // Put the conservative floor back after a retune turned out to be too tight.
@@ -2989,6 +3308,10 @@ private:
                 }
             } else if (line.compare(0, 7, "midich=") == 0) {
                 midiChannel.store(atoi(line.substr(7).c_str()));
+            } else if (line.compare(0, 9, "testnote=") == 0) {
+                int note = atoi(line.substr(9).c_str());
+
+                testNote.store((note < 0) ? 0 : ((note > 127) ? 127 : note));
             } else if (line.compare(0, 11, "activename=") == 0) {
                 // Written purely so the panel can NAME what it is waiting for. The device is absent
                 // by definition in that state, so its name cannot be looked up - a UID is all there
@@ -3155,12 +3478,26 @@ private:
     // runs before the trylock.
     std::atomic<double> eventRate{0.0};
 
+    // Note events taken from the host, and note events that reached a MIDI destination. See the
+    // note where they are counted.
+    std::atomic<uint32_t> eventsIn{0};
+    std::atomic<uint32_t> eventsOut{0};
+
     // AUDIO THREAD ONLY, and it is the whole state of the block timeline: the wall time at which
     // the frames handed over so far run out. See block_host_time().
     uint64_t            nextBlockHostTime{0};
 
     // The unmodelled clock, read at the top of the current block. AUDIO THREAD ONLY.
     uint64_t            blockActualHostTime{0};
+
+    // Whether the current call opened a new audio callback, and what the previous call was, which
+    // is how that is decided. AUDIO THREAD ONLY.
+    bool                blockStartsCycle{true};
+    uint64_t            lastCallHostTime{0};
+    uint32_t            lastCallFrames{0};
+
+    // Frames handed over so far inside the current callback. AUDIO THREAD ONLY.
+    uint32_t            burstFrames{0};
 
     std::atomic<double> snapHostRate{0.0};
     std::atomic<double> snapRatio{1.0};
@@ -3195,12 +3532,38 @@ private:
     // The host-clock instant the test note was SCHEDULED for, and therefore the instant it left.
     // AUDIO THREAD ONLY.
     uint64_t            measureNoteTime{0};
+
+    // Our own share of the round trip, as it stood at the onset block. AUDIO THREAD ONLY.
+    double              measureOnsetOurs{0.0};
+
+    // The round trips of one Measure press, and where the current one is up to. AUDIO THREAD ONLY.
+    int                 measureTrips[GB_MEASURE_TRIPS]{0};
+    int                 measureTrip{0};
+    uint32_t            measureTripUnderruns{0};
+    int                 measureTripResyncs{0};
+
+    // How many trips survived to be averaged, and what the extremes were. Published because an
+    // average on its own hides the thing worth knowing: five readings within a millisecond mean the
+    // number can be trusted, and the same average from readings 9 ms apart means it cannot. The
+    // panel shows the range beside the figure for exactly that reason.
+    std::atomic<int>    measureTripsUsed{0};
+    std::atomic<int>    measureTripLow{0};
+    std::atomic<int>    measureTripHigh{0};
+    std::atomic<int>    measureTripSpread{0};
+
+    // Which note the measurement plays. A drum machine may have nothing on middle C at all - an
+    // Analog Rytm wants the lowest note there is - so this is settable and saved.
+    std::atomic<int>    testNote{GB_MEASURE_NOTE};
     int                 measureConfirm{0};
     float               measurePeak{0.0f};
     float               measureFloor{0.0f};
     bool                measureArmed{false};
     std::atomic<int>    measureLatency{0};
     std::atomic<bool>   measureStore{false};
+
+    // Raised by the audio thread when Measure is pressed; the worker sends the All Notes Off and
+    // writes the log line, neither of which belongs in a process() call.
+    std::atomic<bool>   measurePanic{false};
     std::atomic<bool>   latencyDirty{false};
 
     // The offset moved and the host has not been told yet, and when it last moved - see
@@ -3239,6 +3602,10 @@ private:
     uint32_t            observedMaxFrames{0};
     uint64_t            observedFrames{0};
     uint32_t            openDeviceFrames{0};
+
+    // The host-clock instant of the most recent capture callback. Written by the device thread,
+    // read by the audio thread; see latency_frames_measured() for why occupancy alone is not enough.
+    std::atomic<uint64_t> lastWriteHostTime{0};
     std::atomic<bool>  needResync{true};
     std::atomic<float> trimGain{1.0f};
     std::atomic<bool>  deviceDirty{false};
@@ -3523,6 +3890,7 @@ public:
         }
 
         midiChannel = (double)active.midiChannel / (double)(GB_CHANNEL_SLOTS - 1);
+        note        = (double)active.testNote / 127.0;
 
         // THE CORRECTION IS PER DEVICE, so unlike the MIDI half above it has nothing to restore
         // until a device is known - gb_parse_active() resolves it by matching the saved pair. With
@@ -3742,6 +4110,18 @@ public:
             return kResultOk;
         }
 
+        if ((index == kParamTestNote) && instrument) {
+            info.id                     = kParamTestNote;
+            info.stepCount              = 127;
+            info.defaultNormalizedValue = (double)GB_MEASURE_NOTE / 127.0;
+            info.flags                  = ParameterInfo::kCanAutomate | ParameterInfo::kIsList;
+
+            to_utf16("Test Note", info.title, 128);
+            to_utf16("Note", info.shortTitle, 128);
+
+            return kResultOk;
+        }
+
         if ((index == kParamOffsetMs) && instrument) {
             info.id                     = kParamOffsetMs;
             info.stepCount              = 0;
@@ -3850,6 +4230,21 @@ public:
             return kResultOk;
         }
 
+        if (id == kParamTestNote) {
+            // C-2 IS NOTE 0, the convention where middle C is C3 - which is what the hardware this
+            // is aimed at prints on its own screen. An Analog Rytm's lowest pad is C-2 and a user
+            // reading "C-1" there would be a semitone-free octave out.
+            static const char * const kName[12] = { "C",  "C#", "D",  "D#", "E",  "F",
+                                                    "F#", "G",  "G#", "A",  "A#", "B" };
+            int note = (int)((valueNormalized * 127.0) + 0.5);
+
+            note = (note < 0) ? 0 : ((note > 127) ? 127 : note);
+
+            snprintf(buffer, sizeof(buffer), "%s%d (%d)", kName[note % 12], (note / 12) - 2, note);
+            to_utf16(buffer, string, 128);
+            return kResultOk;
+        }
+
         if (id == kParamOffsetMs) {
             snprintf(buffer, sizeof(buffer), "%+.1f",
                      GB_OFFSET_MIN_MS + (valueNormalized * (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS)));
@@ -3904,6 +4299,7 @@ public:
             case kParamMidiChannel: return midiChannel;
             case kParamMeasure:  return measure;
             case kParamOffsetMs: return offset;
+            case kParamTestNote: return note;
             default:
                 // A controller pass-through: the host owns its value, and pitch bend rests centred.
                 if ((id >= GB_CC_BASE) && (id < (GB_CC_BASE + GB_CC_COUNT))) {
@@ -3927,6 +4323,7 @@ public:
             case kParamMidiChannel: midiChannel = value; return kResultOk;
             case kParamMeasure:  measure  = value; return kResultOk;
             case kParamOffsetMs: offset   = value; return kResultOk;
+            case kParamTestNote: note     = value; return kResultOk;
             default:
                 if ((id >= GB_CC_BASE) && (id < (GB_CC_BASE + GB_CC_COUNT))) {
                     return kResultOk;      // passed straight to the hardware, nothing to keep here
@@ -4021,6 +4418,7 @@ private:
     ParamValue          midiChannel{0.0};
     ParamValue          measure{0.0};
     ParamValue          offset{0.5};       // zero correction sits in the middle of the range
+    ParamValue          note{(double)GB_MEASURE_NOTE / 127.0};   // the note Measure plays
 };
 
 // ------------------------------------------------------------------------------------------------

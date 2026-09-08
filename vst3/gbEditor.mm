@@ -321,6 +321,7 @@ private:
             case eGbEditFirstChannel: id = 5; break;
             case eGbEditMidiDest: id = 6; break;
             case eGbEditMidiChannel: id = 7; break;
+            case eGbEditTestNote:    id = 10; break;
             case eGbEditMeasure:  id = 8; break;
             case eGbEditOffset:   id = 9; break;
             default: return;
@@ -363,7 +364,8 @@ private:
                            controller->getParamNormalized(5),
                            controller->getParamNormalized(6),
                            controller->getParamNormalized(9),
-                           controller->getParamNormalized(7));
+                           controller->getParamNormalized(7),
+                           controller->getParamNormalized(10));
     }
 
 public:

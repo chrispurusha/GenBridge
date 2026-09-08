@@ -3,6 +3,138 @@ GenBridge FINDINGS
 Completed work, measurements, and the traps that cost real time.
 
 
+2026-09-08 (4)  LIVE KEYBOARD STOPPED PASSING THROUGH - HARDENED, NOT YET EXPLAINED
+--------------------------------------------------------------------------------------------------
+CT: "MIDI from a keyboard source on the Ableton track is no longer being passed through the plugin",
+and then the detail that makes it a real clue: "It sends to the kronos and returns, when MIDI is
+present on a track's loop." Clip MIDI works; live playing does not.
+
+NOTHING IN forward_events() CAN TELL THE TWO APART, so either the host is not delivering the live
+events, or something downstream of the send is losing them. That is now visible rather than a matter
+of opinion: the panel's telemetry has a "notes" row showing events taken from the host and events
+that reached a destination. A still 0 on the left is Live's end; in without out is ours.
+
+TWO REAL DEFECTS FOUND WHILE LOOKING, NEITHER PROVEN TO BE THIS ONE:
+
+  THE BLOCK MODEL HAD NO HARD BOUND. Replacing the old quarter-second cap with "re-anchor at every
+  cycle boundary" (2026-09-08 (3)) left the ceiling to a heuristic. A host rendering faster than
+  realtime hands over call after call with no gap, every one reads as a continuation, and the model
+  walks into the future without limit - MIDI stamped from it is not late, it is GONE, held by
+  CoreMIDI until a time that may be minutes away. Nothing sounds and everything else works, which is
+  exactly the shape of the report. There is a ceiling again, and it is generous on purpose.
+
+  THE MODEL IS MONOTONIC NOW, and that is the more interesting of the two. Re-anchoring to the clock
+  at every callback boundary looks obviously right - the clock is the truth - and it can step the
+  stamps BACKWARDS: a callback arriving early gets a first stamp before the previous burst's last
+  one. CoreMIDI delivers in timestamp order, so a note-off can overtake its note-on. Notes stick,
+  later ones queue behind them, and a quantised clip whose events are far apart plays perfectly.
+  The rule is now: follow the frames, never go backwards, and if that has drifted implausibly far
+  from the clock, admit it and start again.
+
+THE CEILING ITSELF INVERTED THE STREAM ON ITS FIRST ATTEMPT, which is worth recording because it is
+the same class of mistake twice in one sitting. Set at twice the measured callback, it came out at
+256 frames while the host was handing over bursts of 512 - so it tripped on every burst, and a trip
+IS a backwards step. observedMaxFrames is also only collected while a device is running, and MIDI
+flows whether one is or not, so it read 0 and fell back to the declared per-call maximum. Eight
+declared blocks, minimum 4096 frames, and a host outside that is pathological.
+
+WHAT THE NEW TEST DOES AND DOES NOT PROVE. vst3check now plays 24 notes in six four-block bursts
+with the boundary jittered 6 ms / 15.3 ms around a true 10.67 ms cycle, and checks every one comes
+back, in order, with non-decreasing stamps. It passes with the fix and it also passes with the old
+rule - so it is a guard on the property, NOT evidence that the property was what CT hit. The reason
+is worth knowing for anyone extending it: the sink is a virtual destination in the same process, and
+CoreMIDI hands those to the read proc as they are sent rather than holding them to their timestamps.
+Proving a reordering out of a real port needs real hardware on the other end.
+
+SO THIS ENTRY IS DELIBERATELY OPEN. Two genuine defects are fixed and a diagnostic is in place; the
+report itself is not explained. The next step is the "notes" row with a keyboard playing.
+
+2026-09-08 (3)  THE GLITCH WAS THE RING, NOT THE MIDI - A CALLBACK'S DEMAND IS NOT A BLOCK
+--------------------------------------------------------------------------------------------------
+CT: "Latency measurement still giving me anything from 1ms to 10ms. I can also still hear the
+glitch." Then the settings, which is what made it findable: KRONOS _ USB _ L&R, 48000, buffer 64,
+stereo, MIDI out KRONOS SOUND, channel 1.
+
+REPRODUCED OUTSIDE ABLETON, on the same hardware, with vst3check --play --buffer 64 --burst 4:
+
+    [ring] fill  18.0 of 400.0   drift -0.0 ppm   under 45  resync 44
+
+Forty-five underruns in two seconds, one audible click each, and the drift loop never even started
+because it was being resynced faster than it could correct.
+
+THE RING WAS SIZED FOR ONE CALL AND DRAINED BY A WHOLE CALLBACK. Ableton declares 512 and calls with
+128, four times back to back. observe_block() read "the largest block actually seen" as 128 and the
+retune shrank the setpoint to suit - 400 frames against a callback that takes 512. Every cycle ran
+it dry. A 512-frame device buffer had hidden it for months: the setpoint then came out at 960 by
+accident, which is more than one callback, so it only ever bit at a small buffer.
+
+The declared maximum was RIGHT all along. observe_burst() now adds up the frames handed over inside
+one callback and the retune sizes from that, so under Ableton it confirms the declaration instead of
+undercutting it, and on a host that genuinely uses less it still reclaims the difference. Same
+settings after the fix: **0 underruns, 0 resyncs**.
+
+THREE WRONG TURNS ON THE WAY, all worth keeping:
+
+  - The cycle boundary cannot be "the block model fell behind real time". Under a host that paces
+    evenly the clock never quite catches up, so one "cycle" ran 408 blocks long and the plug-in
+    asked for a 65520 frame ring and reported 1.4 seconds of latency. It is the GAP between calls:
+    two calls belong to one callback if the second arrives before half of the first could have
+    played. Microseconds against milliseconds - the threshold is not delicate.
+  - That same rule now bounds the MIDI timeline, which had the same flaw and a quarter-second cap
+    papering over it. Within a callback the model is the truth; across callbacks the clock is.
+  - The burst must only be measured while a device is RUNNING. Blocks driven before one opens say
+    nothing about what the ring will cover, and an unpaced burst of them left a fictitious cycle
+    length that settled the retune for the rest of the session.
+
+MEASUREMENT: 1-10 ms BECAME 0.2 ms, and the last of it was mine. Netting off the live ring fill
+(2026-09-08 (2)) was half a fix: occupancy is not an age. The device writes a whole buffer at a time,
+so the fill jumps up at each capture callback and falls as the host drains it, while the audio in
+the ring ages at the same rate - the two move in ANTI-PHASE and their sum is constant. Take the fill
+alone and what is left is a sawtooth of one whole device buffer.
+
+latency_frames_measured() takes two numbers: how long ago the last capture callback landed, and how
+many frames sit in front of it. deviceLatency already contains the device's buffer, so that term is
+subtracted - "how long ago" measures it directly and counting it twice put a whole buffer back on.
+Both are read at the ONSET block; reading the write timestamp two blocks later at confirmation time
+collapses the first term to zero and the share comes out a buffer short. It read as an 18 ms synth.
+
+Measured on the KRONOS, three consecutive runs: 9.73, 9.94, 9.73 ms - and the ring fill differed by
+240 frames (5 ms) between them, which is exactly the error that is no longer in the answer.
+
+FIVE ROUND TRIPS, TRIMMED. One note is not a measurement of anything repeatable: USB transit, the
+synth's scheduler and its envelope all move the onset. Measure plays five, drops the highest and
+lowest, averages the middle three - and the panel prints the RANGE beside the figure, because an
+average with no range beside it cannot be told from one lucky shot. On the KRONOS: "9.7 ms (3 trips,
+9.0 - 10.2)". A trip that ran over an underrun or a resync simply does not vote, which replaces the
+old rule of throwing away the whole run - on a rig that resyncs at all, that rule made a measurement
+impossible, and the resync was often caused by the act of measuring.
+
+THE ACT OF MEASURING WAS ITSELF A GLITCH. Pressing Measure did a log_line() - which opens and closes
+the file - and 32 MIDISend calls, one note-off and one All Notes Off on each of 16 channels, all
+inside one process() call. Half a millisecond of a 2.7 ms block at the exact moment the ring must
+not be starved. Both are the worker's job now.
+
+THE TEST NOTE IS SETTABLE, C-2 to G8, saved with the project and shown on the Measure row. Middle C
+is a fine default for a keyboard and useless on a drum machine - an Analog Rytm has nothing there at
+all and wants the lowest note there is. Note 0 is named C-2, the convention where middle C is C3,
+because that is what the hardware prints on its own screen.
+
+THE HARNESS ACCUSED THE PLUG-IN THREE TIMES, and this is the recurring lesson (see also
+MidiSyncTool's findings 2026-09-02, and the usleep note in the shared memory):
+
+  - usleep(2666) per block drifts slow, so the device outran the harness and the plug-in resynced.
+    Paced against an absolute deadline with mach_wait_until() instead.
+  - usleep(300000) between measurement runs is a host that stops calling process() for 300 ms - 14400
+    frames into a 7680 frame ring. It overflowed, and every run was correctly discarded for
+    happening over a resync. Seven of eight runs lost, not one of them the plug-in's fault.
+  - An unasked-for buffer parameter sent as 0.0 is not "leave it alone", it is a real slot: every
+    run_blocks() call changed the device buffer and reopened the device.
+
+And one that was purely mine: an edit meant to replace the pause after a measurement deleted the
+2000 blocks that DROVE it, so the run got 120 blocks - a third of the settle phase. The measurement
+looked hung for an hour. Publishing the phase and the frame counter to the status block found it in
+one run; that telemetry stayed, and the panel can now say which trip is in flight.
+
 2026-09-08 (2)  THE STAMP WAS RIGHT AND THE CLOCK WAS WRONG - A HOST'S CALLBACK IS NOT ONE BLOCK
 --------------------------------------------------------------------------------------------------
 CT, after the round above landed: "Looks better taking the host buffering into account. Measuring
