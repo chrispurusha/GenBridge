@@ -177,13 +177,41 @@ bool device_buffer_frame_range(AudioObjectID id, uint32_t * minFrames, uint32_t 
     return true;
 }
 
+// CONFIRMED, NOT ASSUMED - and noErr is not confirmation.
+//
+// AudioObjectSetPropertyData() returning noErr means the request was ACCEPTED, not that the device
+// has reconfigured. CoreAudio applies a buffer size change asynchronously and posts a property
+// notification when it lands, so a read-back taken immediately afterwards can still report the old
+// size. The caller then sizes its ring from that old size and tells the host a latency to match.
+//
+// Symptom: opening a project with two instances announced "attempting to set 64, getting 512" on
+// both, and setting 64 BY HAND afterwards worked every time - the second attempt succeeding because
+// the first had by then taken effect. A race that looks exactly like a device refusing a request.
+//
+// Polled rather than waiting on the notification, because the caller is a worker thread inside a
+// device open that is already slower than this, and a listener here would need a run loop and an
+// unsubscribe path for a wait that is normally over in a millisecond or two.
 bool device_set_buffer_frames(AudioObjectID id, uint32_t frames) {
     AudioObjectPropertyAddress address = { kAudioDevicePropertyBufferFrameSize,
                                            kAudioObjectPropertyScopeGlobal,
                                            kAudioObjectPropertyElementMain };
     UInt32                     value   = (UInt32)frames;
 
-    return AudioObjectSetPropertyData(id, &address, 0, NULL, sizeof(value), &value) == noErr;
+    if (AudioObjectSetPropertyData(id, &address, 0, NULL, sizeof(value), &value) != noErr) {
+        return false;
+    }
+
+    // Up to 120 ms, which is far longer than any device on this rig has needed. Kept tight because
+    // the caller holds a lock the host's main thread can block on - see GenBridge's todo about
+    // reconfigure()'s lock scope.
+    for (int attempt = 0; attempt < 24; attempt++) {
+        if (device_buffer_frames(id) == frames) {
+            return true;
+        }
+        usleep(5000);
+    }
+
+    return device_buffer_frames(id) == frames;
 }
 
 // THE STREAM'S OWN LATENCY, which is a fourth term and not the device's.
@@ -253,6 +281,17 @@ bool device_is_running_somewhere(AudioObjectID id) {
     }
 
     return value != 0;
+}
+
+bool device_wait_until_idle(AudioObjectID id, unsigned timeoutMs) {
+    for (unsigned waited = 0; waited < timeoutMs; waited += 5) {
+        if (!device_is_running_somewhere(id)) {
+            return true;
+        }
+        usleep(5000);
+    }
+
+    return !device_is_running_somewhere(id);
 }
 
 uint32_t device_latency_frames(AudioObjectID id, bool isInput) {

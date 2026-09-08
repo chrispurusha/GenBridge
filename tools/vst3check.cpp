@@ -472,6 +472,8 @@ static bool         gWatch                = false;
 static int          gWatchTick            = 0;
 static ParamValue   gBufferValue          = 0.0;
 static bool         gHaveBuffer           = false;
+static ParamValue   gNoteValue            = 60.0 / 127.0;
+static bool         gHaveNote             = false;
 
 // One line per ~170 ms of driving. Everything here is written by the plug-in's own threads, so it
 // is what the panel would be showing at that instant.
@@ -480,7 +482,7 @@ static void watch_sample(void) {
         return;
     }
 
-    if ((++gWatchTick % 8) != 0) {
+    if ((++gWatchTick % 375) != 0) {
         return;
     }
 
@@ -503,11 +505,11 @@ static void watch_sample(void) {
     }
 
     printf("      [ring] fill %7.1f of %7.1f   drift %+8.1f ppm   under %d  resync %d"
-           "   trip %d phase %d\n",
+           "   told %d actual %d\n",
            atomic_load(&status->fillFrames), atomic_load(&status->setpointFrames),
            atomic_load(&status->driftPpm),
            atomic_load(&status->underruns), atomic_load(&status->resyncs),
-           atomic_load(&status->measureTripNow), atomic_load(&status->measurePhase));
+           atomic_load(&status->latencySamples), atomic_load(&status->actualSamples));
     fflush(stdout);
 }
 
@@ -555,18 +557,30 @@ static float run_blocks(IAudioProcessor * processor, float ** ch, float * l, flo
         OneChange deviceChange(0, deviceValue);
         OneChange midiChange(6, midiValue);
         OneChange bufferChange(3, gBufferValue);
+        OneChange noteChange(10, gNoteValue);
 
         // BUFFER FIRST, THEN DEVICE, and ONLY IF ONE WAS ASKED FOR. Sending it unasked meant
         // sending 0.0 - a real slot, not "leave it alone" - so every run_blocks() call changed the
         // device buffer, reopened the device, and destroyed whatever measurement was in flight. No
         // measurement completed at all and the plug-in looked broken.
+        // DEVICE FIRST, THEN THE BUFFER, LATE - which is the order a HOST restores in, since it
+        // walks parameters by id and the device is 0 while the buffer is 3. Sending the buffer
+        // first, as this used to, opens the device already knowing the size it wants and never
+        // exercises the path that was failing: open at whatever the device was, then be asked to
+        // change it. That second reconfigure is where a just-closed stream looked like another
+        // client and the request was skipped.
         if (gHaveBuffer) {
-            data.inputParameterChanges = (block == 0) ? (IParameterChanges *)&bufferChange
-                                                      : ((block == 1) ? (IParameterChanges *)&deviceChange
-                                                                      : (IParameterChanges *)&midiChange);
+            data.inputParameterChanges = (block == 0) ? (IParameterChanges *)&deviceChange
+                                                      : ((block == 200) ? (IParameterChanges *)&bufferChange
+                                                                        : (IParameterChanges *)&midiChange);
         } else {
             data.inputParameterChanges = (block == 0) ? (IParameterChanges *)&deviceChange
                                                       : (IParameterChanges *)&midiChange;
+        }
+
+        // The test note rides on block 2, once, since the plug-in acts on the change.
+        if (gHaveNote && (block == 2)) {
+            data.inputParameterChanges = (IParameterChanges *)&noteChange;
         }
 
         if ((block == 0) && (events != nullptr)) {
@@ -1065,6 +1079,11 @@ int main(int argc, char ** argv) {
             playMidi   = argv[i + 2];
         } else if ((strcmp(argv[i], "--measure") == 0) && ((i + 1) < argc)) {
             measureRuns = atoi(argv[i + 1]);
+        } else if ((strcmp(argv[i], "--note") == 0) && ((i + 1) < argc)) {
+            // The test note Measure plays, as a MIDI number. A drum machine has nothing on middle
+            // C: an Analog Rytm's kick is note 0.
+            gNoteValue = (ParamValue)atoi(argv[i + 1]) / 127.0;
+            gHaveNote  = true;
         } else if ((strcmp(argv[i], "--buffer") == 0) && ((i + 1) < argc)) {
             playBuffer = argv[i + 1];
         } else if (strcmp(argv[i], "--watch") == 0) {
@@ -2287,7 +2306,14 @@ int main(int argc, char ** argv) {
                     run.inputParameterChanges = &none;
 
                     processor->process(run);
-                    usleep(2666);            // 128 frames at 48 kHz
+
+                    // PACED AGAINST A DEADLINE, not usleep - the same fix as run_blocks(). A loop
+                    // of usleep(2666) runs slower than 48 kHz, so the capture device outruns the
+                    // harness and the ring backs up; now that the plug-in reports the delay it
+                    // ACTUALLY has rather than the one it aims at, that backlog shows up as 147 ms
+                    // of latency and fails the two checks below. The plug-in was telling the truth.
+                    pace_to_deadline(AudioConvertNanosToHostTime(
+                                         (uint64_t)((128.0 / 48000.0) * 1.0e9)));
                 }
 
                 usleep(300000);              // let the worker act on the request
@@ -2318,8 +2344,18 @@ int main(int argc, char ** argv) {
                 usleep(300000);
 
                 printf("    after a reactivation: %u samples\n", processor->getLatencySamples());
-                check("a reopen keeps the tuned setpoint",
-                      processor->getLatencySamples() == latencyAfter);
+                // WITHIN A TOLERANCE, NOT EXACTLY. What this is guarding against is the retune
+                // being UNDONE - the setpoint snapping back to the conservative floor, which on
+                // this rig is several hundred samples. The reported figure now follows a live
+                // measurement of the pipeline rather than a constant derived from the setpoint, so
+                // it legitimately differs by a few samples across a reopen; demanding equality
+                // would be testing the noise floor of a measurement, not the behaviour.
+                uint32 after = processor->getLatencySamples();
+                uint32 moved = (after > latencyAfter) ? (after - latencyAfter) : (latencyAfter - after);
+
+                printf("    moved %u samples across the reopen\n", moved);
+
+                check("a reopen keeps the tuned setpoint", moved < 128);
                 break;
             }
         }

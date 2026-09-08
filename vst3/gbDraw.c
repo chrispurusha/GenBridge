@@ -370,6 +370,7 @@ static bool hit(tRectangle r, double x, double y) {
 static tDeviceInfo gCachedList[DEVICE_MAX];
 static uint32_t    gCachedCount = 0;
 static double      gCachedAt    = -1000.0;
+static bool        gCacheValid  = false;
 
 static double monotonic_seconds(void) {
     struct timespec ts;
@@ -379,12 +380,25 @@ static double monotonic_seconds(void) {
     return (double)ts.tv_sec + ((double)ts.tv_nsec * 1e-9);
 }
 
+// EVENT-DRIVEN, NOT TIMED, and that is the difference between a hitch a second and none.
+//
+// The note above records what enumerating on every frame did to Ableton. Once a second was the fix
+// for that, and it is still a Core Audio HAL call on the HOST'S MAIN THREAD - every second, for as
+// long as the panel is open, whether or not anything has changed. On a machine with a dozen
+// interfaces, one of them a USB device that is slow to answer a property query, that is a beachball
+// you can set your watch by. CT: "something in the plugin is causing occasional or regular spinning
+// mouse cursor."
+//
+// Nothing here needs a timer: device_watch_list() already tells us when the list changes, and
+// gb_device_list_invalidate() is what it calls. The long re-read is belt and braces so a missed
+// notification heals itself within half a minute rather than never.
 static const tDeviceInfo * device_list(uint32_t * count) {
     double now = monotonic_seconds();
 
-    if ((now - gCachedAt) > 1.0) {
+    if (!gCacheValid || ((now - gCachedAt) > 30.0)) {
         gCachedCount = device_enumerate(gCachedList, DEVICE_MAX);
         gCachedAt    = now;
+        gCacheValid  = true;
     }
 
     *count = gCachedCount;
@@ -393,7 +407,7 @@ static const tDeviceInfo * device_list(uint32_t * count) {
 }
 
 void gb_device_list_invalidate(void) {
-    gCachedAt = -1000.0;
+    gCacheValid = false;
 }
 
 int gb_slot_for_uid(const char * uid) {
@@ -690,8 +704,33 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
              gGbRates[(int)(gRate * (double)(gGbRateCount - 1) + 0.5)]);
     stepper(1, "Rate", buffer);
 
-    snprintf(buffer, sizeof(buffer), "%d samples",
-             gGbFrames[(int)(gFrames * (double)(gGbFrameCount - 1) + 0.5)]);
+    // WHAT THE DEVICE TOOK, NOT ONLY WHAT WAS ASKED FOR. A CoreAudio device is entitled to refuse a
+    // buffer size - its driver has a minimum, and a device another process already holds keeps the
+    // size that process set. The plug-in handles that correctly: it reads the size back and sizes
+    // the ring from the REAL one. The panel did not, and showed the request.
+    //
+    // That cost a long evening. A KRONOS displaying "64 samples" was running at 512, which put
+    // 1440 frames in the ring and 660 in the device term - 44 ms of reported latency that looked
+    // inexplicable against the setting on screen, because the setting on screen was fiction.
+    {
+        int asked  = gGbFrames[(int)(gFrames * (double)(gGbFrameCount - 1) + 0.5)];
+        int actual = (status != NULL) ? atomic_load(&status->deviceFrames) : 0;
+
+        int shared = (status != NULL) ? atomic_load(&status->deviceShared) : 0;
+
+        if ((actual > 0) && (actual != asked) && shared) {
+            // NOT A REFUSAL - A DECISION. Rate and buffer size are global to a device, so GenBridge
+            // deliberately leaves both alone when something else is already running it rather than
+            // reaching into another client's settings; the host itself being that client is the
+            // case that matters most. "device gave 512" reads as a fault and sends someone hunting
+            // for one, when the answer is that the setting cannot apply while the device is shared.
+            snprintf(buffer, sizeof(buffer), "%d samples  (shared - device at %d)", asked, actual);
+        } else if ((actual > 0) && (actual != asked)) {
+            snprintf(buffer, sizeof(buffer), "%d samples  (device gave %d)", asked, actual);
+        } else {
+            snprintf(buffer, sizeof(buffer), "%d samples", asked);
+        }
+    }
     stepper(2, "Buffer", buffer);
 
     stepper(3, "Mode", (gMode < 0.5) ? "Mono" : "Stereo");

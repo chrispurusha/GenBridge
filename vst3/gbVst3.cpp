@@ -162,6 +162,21 @@ using namespace Steinberg::Vst;
 // the tail itself trips the threshold, and the answer comes back as zero. Measuring twice in a row
 // is the normal thing to do, so it has to survive it.
 #define GB_MEASURE_SETTLE_S   (0.35)
+
+// The longest the settle will wait for the previous note to decay before giving up on quiet and
+// taking the floor anyway. A synth that never goes quiet is a measurement that never happens.
+#define GB_MEASURE_SETTLE_MAX_S    (2.5)
+
+// One-pole coefficient for the reported pipeline delay, at roughly two seconds of time constant
+// over 128-frame blocks. Slow enough to ignore the ring's sawtooth, quick enough to follow a
+// device change without the panel looking stuck.
+#define GB_PIPELINE_SMOOTH    (0.0013)
+
+// How far the reported latency must move before the host is told. Every telling costs a full delay
+// compensation pass, and the figure now follows a live measurement rather than a constant, so it
+// needs a deadband or it would fire on the ring's own noise. 128 frames is 2.7 ms at 48 kHz - below
+// what this control is ever dialled in to correct.
+#define GB_LATENCY_DEADBAND   (64)
 // The onset threshold is RELATIVE to whatever the input is already doing, with an absolute floor
 // under it. A synth with a hissy output, a hum, or a pad still decaying would sit above any fixed
 // level and trip the detector the instant the note went out. Measuring the quiet first and then
@@ -736,11 +751,28 @@ public:
         //
         // The read loop above is deliberately OUTSIDE the lock: state->read() calls back into the
         // host, which must never happen with this held.
-        pthread_mutex_lock(&configLock);
+        lock_config_from_host("setState");
 
-        bool ok = parse_state(blob);
+        bool ok      = parse_state(blob);
+        bool wasOpen = running;
 
         pthread_mutex_unlock(&configLock);
+
+        // ASK FOR THE DEVICE AGAIN, because the settings may have arrived AFTER it was opened.
+        //
+        // Nothing here controls when a host calls setState relative to everything else. If the
+        // device parameter reaches the plug-in first - through the controller, or as a parameter
+        // change in the first process() calls - the device is opened before this blob has been
+        // read, so it comes up with no remembered entry and "leave the device alone" is the honest
+        // default. The saved buffer size then lands in remembered[] with nothing to apply it.
+        //
+        // That is CT's "I still had to set 64 manually": the settings were restored correctly and
+        // simply never reached the device. Rather than guess at a host's ordering, react to the
+        // late arrival - request_device() is debounced, so a host that DID call in the tidy order
+        // coalesces this into the open it was going to do anyway.
+        if (ok && wasOpen) {
+            request_device();
+        }
 
         return ok ? kResultOk : kResultFalse;
     }
@@ -758,7 +790,7 @@ public:
         //
         // Blocking is fine here in a way it never is in process(): getState() is called by the host
         // on its own thread when it saves, and the worst wait is one device swap.
-        pthread_mutex_lock(&configLock);
+        lock_config_from_host("getState");
 
         capture_live_settings();
 
@@ -896,6 +928,44 @@ public:
         return reportedLatency.load();
     }
 
+    // HOW LONG THE HOST'S OWN THREAD WAITED FOR configLock, said out loud when it is long enough to
+    // see. getState(), setState() and setupProcessing() all take that lock, and the worker holds it
+    // across an entire device close and open - so a reconfigure can block whichever thread the host
+    // called on. In Ableton that thread is the main one, and it calls getState() for undo snapshots
+    // on ordinary UI actions: the beachball CT reports.
+    //
+    // This turns "occasional or regular spinning cursor" into a number with a cause beside it. If
+    // these lines are absent while the cursor spins, the cause is somewhere else entirely and this
+    // has ruled out the obvious suspect - which is worth as much.
+    void lock_config_from_host(const char * who) {
+        double began = now_ms();
+
+        pthread_mutex_lock(&configLock);
+
+        double waited = now_ms() - began;
+
+        if (waited >= 20.0) {
+            log_line("HOST THREAD BLOCKED: %s waited %.0f ms for configLock - a device open was in "
+                     "flight. This is what a spinning cursor looks like from in here", who, waited);
+        }
+    }
+
+    // WORTH INTERRUPTING THE HOST FOR? Opening or closing a device always is - the figure goes to or
+    // from zero and everything downstream of the track moves. A drift of a frame or two is not: the
+    // reported latency follows a live measurement now, so without this it would change most blocks
+    // and each change is a full delay compensation pass across the session.
+    bool latency_worth_reporting(uint32 nowLatency) const {
+        uint32 was = reportedLatency.load();
+
+        if ((was == 0) != (nowLatency == 0)) {
+            return true;
+        }
+
+        uint32 moved = (nowLatency > was) ? (nowLatency - was) : (was - nowLatency);
+
+        return moved >= GB_LATENCY_DEADBAND;
+    }
+
     // WHAT THE PLUG-IN ITSELF ADDS, with no hardware correction in it. Split out of
     // report_latency() because the measurement has to subtract our share from the onset it sees,
     // and subtracting the REPORTED figure meant subtracting the previous measurement along with it:
@@ -914,12 +984,26 @@ public:
     // The snapshot's version of internal_latency_frames(). Safe from any thread; never touches a
     // field the worker can be rewriting.
     double snapshot_latency_frames(void) const {
+        // THE SETPOINT, NOT THE MEASUREMENT - reverted 2026-09-08, and the reason is worth keeping.
+        //
+        // Reporting a smoothed measurement removed a 4-9 ms over-compensation and created something
+        // far worse: the figure MOVES, every move past the deadband tells the host its latency
+        // changed, and a host answers that by reactivating the plug-in. Reactivation closes and
+        // reopens the device, which perturbs the ring, which moves the figure again. Ableton sat in
+        // that loop - reconfigure every 1.5 seconds, each holding configLock for 1460 ms, the
+        // device flapping between 64 and its restored 512 - which is both the beachball and the
+        // "I set 64 and get 512" in one.
+        //
+        // A latency a host is told must be STABLE. pipelineAvg is still measured and still published
+        // as "actual" beside this, so the gap that started this can be seen and dealt with by
+        // shrinking it rather than by chasing it.
         double ratio = snapRatio.load();
 
         if (ratio <= 0.0) {
             return 0.0;    // mid-swap, or nothing open: no latency to report rather than inf
         }
 
+        // Before a block has run there is nothing measured yet, so the setpoint is the estimate.
         return (snapSetpoint.load() + resampler_latency_frames() + (double)snapDeviceLatency.load())
                / ratio;
     }
@@ -982,7 +1066,36 @@ public:
 
         double inRing = fillFrames + buffered + resampler_latency_frames();
 
-        return frames_between(lastWriteHostTime.load(), at) + (inRing / nominalRatio);
+        // NO CALLBACK-LEAD TERM HERE, and it was tried. The frames already handed over inside a
+        // callback look like they belong - the fill at the fourth of four calls is 384 frames below
+        // the fill at the first - but the ROUND TRIP this figure is subtracted from is invariant to
+        // which call detects the onset, and adding the term destroys that.
+        //
+        // The reason is worth writing down. If the onset sits at position p in the ring, the call
+        // that reads it finds it at cross = p - (frames already read), and that call's fill is
+        // lower by exactly the same amount. The two cancel: whichever call detects it, the answer
+        // is the same. Adding the lead uncancels them, and a measurement that had settled to 0.2 ms
+        // across runs went back to a 7.3 ms spread - the very lottery it was meant to remove.
+        //
+        // The lead DOES belong in the delay from capture to where the host finally places the
+        // audio, which is a different quantity - see the note on internal_latency_frames() and
+        // findings 2026-09-08 (5).
+        // HOW LONG AGO THE LAST CAPTURE CALLBACK LANDED - CLAMPED, and it needs to be.
+        //
+        // Before the first callback the timestamp is 0, and the gap from 0 is the machine's entire
+        // uptime; after the device stops delivering it grows without limit. Either way the figure
+        // stops meaning "how far into the current device period we are" and starts poisoning the
+        // reported latency - it put 151 ms on the panel and failed two checks that had passed for
+        // weeks. In normal running this term never exceeds one device period, so anything past a
+        // few of them is not a measurement, it is a device that has gone quiet.
+        double sinceWrite = frames_between(lastWriteHostTime.load(), at);
+        double sanest     = ((double)openDeviceFrames * 4.0) / nominalRatio;
+
+        if ((lastWriteHostTime.load() == 0) || (sinceWrite > sanest)) {
+            sinceWrite = 0.0;
+        }
+
+        return sinceWrite + (inRing / nominalRatio);
     }
 
     uint32 internal_latency(void) const {
@@ -1028,7 +1141,7 @@ public:
         // retune() on the second two - and the worker is running by the time a host calls this. VST3
         // guarantees the AUDIO thread is stopped here, which is why the same fields are safe to touch
         // from observe_block(); it guarantees nothing about a thread of the plug-in's own.
-        pthread_mutex_lock(&configLock);
+        lock_config_from_host("setupProcessing");
 
         hostRate = setup.sampleRate;
         eventRate.store(setup.sampleRate);
@@ -1189,6 +1302,59 @@ public:
             tGbStatus * status = gb_status(statusSlot);
 
             if (status != nullptr) {
+                // WITH the callback lead, unlike the measurement's own subtraction. This figure
+                // answers "how far behind the audio is where the host finally puts it", and the
+                // frames already handed over inside this callback are part of that distance. The
+                // measurement subtracts a round trip that is invariant to them - see the note on
+                // latency_frames_measured().
+                double actual = latency_frames_measured(fill, blockActualHostTime)
+                                + (double)burstBefore;
+
+                if (instrument) {
+                    actual += (offsetMs.load() / 1000.0) * hostRate;
+                }
+
+                atomic_store(&status->actualSamples, (int)actual);
+
+                // THE SAME NUMBER THE HOST WILL BE TOLD, averaged. Seeded rather than eased in from
+                // zero: a fresh device would otherwise report a latency climbing out of nothing for
+                // its first second, and every step of that is a compensation pass.
+                double instant = actual - ((offsetMs.load() / 1000.0) * hostRate);
+                double prior   = pipelineAvg.load();
+
+                // BOUNDED BY THE ESTIMATE IT REPLACED, and this is not belt and braces.
+                //
+                // A measured figure can be wrong in ways a constant cannot. The ring's occupancy is
+                // read live, the frames-so-far-this-callback depend on a cycle boundary being
+                // detected correctly, and either can be disturbed - a mis-detected boundary
+                // accumulates a "callback" of arbitrary length, and a ring that has just been
+                // primed or snapped reads full. The result reached a host as 41 ms of plug-in
+                // latency where the setpoint says 20, which is far worse than the 4-9 ms error this
+                // whole exercise set out to remove.
+                //
+                // The pipeline genuinely cannot sit more than about one callback either side of
+                // what the setpoint implies - the drift loop holds it there and the burst explains
+                // the rest - so anything outside that band is a fault, not a measurement.
+                double estimate = latency_frames_for_fill(setpointFrames);
+                double allow    = (double)((observedMaxFrames > 0) ? observedMaxFrames : hostMaxFrames)
+                                  + ((double)openDeviceFrames / ((nominalRatio > 0.0) ? nominalRatio : 1.0));
+
+                if (instant > (estimate + allow)) {
+                    instant = estimate + allow;
+                } else if (instant < (estimate - allow)) {
+                    instant = (estimate > allow) ? (estimate - allow) : estimate;
+                }
+
+                pipelineAvg.store((prior > 0.0)
+                                  ? (prior + ((instant - prior) * GB_PIPELINE_SMOOTH))
+                                  : instant);
+
+                // NOTHING IS TOLD TO THE HOST FROM HERE ANY MORE. This used to raise a flag when
+                // the measured pipeline drifted past the deadband, which is what drove the
+                // reconfigure loop above: a latency change is an instruction to the host to
+                // reactivate us. The measurement is for the panel and the log now, and the figure
+                // the host is given changes only when something structural does - a device, a rate,
+                // a buffer, a retune, the trim.
                 atomic_store(&status->measureTripNow, measureTrip);
                 atomic_store(&status->measurePhase, (int)measureState);
             }
@@ -1295,9 +1461,23 @@ public:
         measureFrames += (uint32_t)frames;
 
         if (measureState == eMeasureSettle) {
-            if ((double)measureFrames >= (GB_MEASURE_SETTLE_S * hostRate)) {
-                measureState  = eMeasureFloor;
-                measureFrames = 0;
+            // QUIET, NOT MERELY ELAPSED - and it is what made four trips out of five disappear.
+            //
+            // Between trips this phase is waiting for the note just played to DECAY, and 0.35 s is
+            // nowhere near enough for a piano or a pad. The floor was then taken over a still
+            // ringing note, the threshold came out eight times too high, the next note could not
+            // cross it, and the trip timed out - which ends the run. Every measurement rested on
+            // one reading and the averaging was decoration.
+            //
+            // So: the settle ends when the input has actually gone quiet, with the old duration as
+            // a MINIMUM and a hard ceiling so a noisy input cannot hang the run.
+            bool quiet   = (peak < GB_MEASURE_MARGIN);
+            bool settled = ((double)measureFrames >= (GB_MEASURE_SETTLE_S * hostRate)) && quiet;
+
+            if (settled || ((double)measureFrames >= (GB_MEASURE_SETTLE_MAX_S * hostRate))) {
+                measureState     = eMeasureFloor;
+                measureFrames    = 0;
+                measureFloorLate = false;
                 measureFloor  = 0.0f;
             }
 
@@ -1307,6 +1487,24 @@ public:
         if (measureState == eMeasureFloor) {
             // Establish what silence looks like on this input before deciding what a note looks
             // like. A noisy preamp would otherwise register an onset immediately.
+            //
+            // THE TRAILING PEAK, NOT THE PEAK OVER THE WHOLE WINDOW. A preset with reverb on it is
+            // still decaying through this phase, so a peak held from the start of the window is a
+            // measurement of the tail rather than of the floor - and the threshold is eight times
+            // whatever this says. Too high a threshold does not fail loudly; it fires LATE into the
+            // attack, which reads as a slower synth, which the host then over-compensates for, and
+            // the take records early. A Kronos on a reverbed preset came out 5 ms adrift of an
+            // Analog Rytm on a dry kick, both reporting the same figure.
+            //
+            // Restarting the hold two thirds of the way through leaves the last third - the part
+            // nearest the note, and the quietest part of any decay - as the answer.
+            if ((double)measureFrames >= (GB_MEASURE_FLOOR_S * hostRate * 0.667)) {
+                if (!measureFloorLate) {
+                    measureFloorLate = true;
+                    measureFloor     = 0.0f;
+                }
+            }
+
             if (peak > measureFloor) {
                 measureFloor = peak;
             }
@@ -1459,10 +1657,11 @@ public:
                 // Round again. Back to settle, which is where the note just played gets time to
                 // decay before the next floor is taken - a floor measured over a ringing note sets
                 // a threshold the next one cannot cross.
-                measureState   = eMeasureSettle;
-                measureFrames  = 0;
-                measureConfirm = 0;
-                measureFloor   = 0.0f;
+                measureState     = eMeasureSettle;
+                measureFrames    = 0;
+                measureConfirm   = 0;
+                measureFloor     = 0.0f;
+                measureFloorLate = false;
                 return;
             }
 
@@ -1680,10 +1879,38 @@ public:
             }
         }
 
+        // AND IT HAS TO COME BACK, WITHOUT EVER GOING BACKWARDS.
+        //
+        // The model advances by the host's NOMINAL frame count while the clock advances at the
+        // device's real rate, and no two crystals agree - so a model that only ever carries forward
+        // creeps ahead by a few parts per million for as long as the session lasts. Left alone it
+        // walks into the ceiling, and the ceiling resets to the clock, which is the one backwards
+        // step this whole arrangement exists to avoid.
+        //
+        // So when it is further ahead than a callback can account for, each block advances by a
+        // shade LESS than its own length. Two per cent of a block is 53 microseconds at 128 frames
+        // - inaudible on any single block, and it closes a whole callback of excess inside half a
+        // second. The advance stays positive, so the stream stays monotonic while it converges.
+        double advance = (double)frames;
+
+        if (rate > 0.0) {
+            double ahead = frames_between(now, start);
+            double allow = (observedMaxFrames > 0) ? (double)observedMaxFrames : (double)hostMaxFrames;
+
+            if (ahead > allow) {
+                double shave = (ahead - allow);
+                double most  = advance * 0.02;
+
+                advance -= (shave > most) ? most : shave;
+            }
+        }
+
         nextBlockHostTime = (rate > 0.0)
                             ? start + AudioConvertNanosToHostTime(
-                                  (uint64_t)(((double)frames / rate) * 1.0e9))
+                                  (uint64_t)((advance / rate) * 1.0e9))
                             : 0;
+
+        blockHostTimeNow = start;
 
         return start;
     }
@@ -1848,6 +2075,16 @@ public:
     //
     // The boundary itself is decided in block_host_time(); this only adds up what fell inside one.
     void observe_burst(int32 frames) {
+        // CLAMPED TO ONE CALLBACK. burstFrames only resets when a cycle boundary is detected, so a
+        // boundary that is missed accumulates without limit - and this figure feeds the reported
+        // latency. Nothing can legitimately have handed over more than a callback's worth before
+        // the current call, by definition of what a callback is.
+        burstBefore = blockStartsCycle ? 0 : burstFrames;
+
+        if ((observedMaxFrames > 0) && (burstBefore > observedMaxFrames)) {
+            burstBefore = observedMaxFrames;
+        }
+
         if (blockStartsCycle) {
             // A CEILING, because a detection that misfires would otherwise stick for the session.
             // Nothing legitimately takes more than a few of its declared blocks per callback, and
@@ -2300,6 +2537,30 @@ private:
                 }
             }
 
+            // THE MEASURED PIPELINE HAS MOVED FAR ENOUGH TO SAY SO. The reported figure follows a
+            // live average now rather than a constant, so something has to notice when it has
+            // drifted past the deadband - a device swap and a ring that has finally settled both
+            // land here. The audio thread raises the flag; this is the only place that acts on it.
+            if (latencyDirty.load()) {
+                // WHERE THE NUMBER COMES FROM, every time it changes. A total on its own starts an
+                // argument that only the breakdown can settle - "43.5 ms" is a ring, a device
+                // buffer, a resampler and a measured round trip, and which of them is the big one
+                // decides what to do about it. Twice now a figure has been questioned and the
+                // components were only on the panel, where they cannot be pasted into a message.
+                double ratio    = (snapRatio.load() > 0.0) ? snapRatio.load() : 1.0;
+                double perMs    = (snapHostRate.load() > 0.0) ? (snapHostRate.load() / 1000.0) : 48.0;
+                double ringPart = snapSetpoint.load() / ratio;
+                double devPart  = (double)snapDeviceLatency.load() / ratio;
+                double filtPart = resampler_latency_frames() / ratio;
+                double offPart  = (offsetMs.load() / 1000.0) * snapHostRate.load();
+
+                log_line("latency %u smp (%.1f ms) = pipeline %.0f (setpoint would say %.0f: ring "
+                         "%.0f + device %.0f + filter %.0f) + measured %.0f (%.1f ms)",
+                         reportedLatency.load(), (double)reportedLatency.load() / perMs,
+                         pipelineAvg.load(), ringPart + devPart + filtPart,
+                         ringPart, devPart, filtPart, offPart, offPart / perMs);
+            }
+
             if (latencyDirty.exchange(false)) {
                 // BEFORE send_latency_changed(), deliberately. That call is what makes the host
                 // reactivate us and reopen the device, and reconfigure() decides on reopen whether
@@ -2315,6 +2576,9 @@ private:
     // Resolve what the plug-in should be listening to, then swap to it under configLock so a
     // process() call in flight sees either the old arrangement or the new one, never a half
     // dismantled one.
+    // Set by reconfigure() around its close/open pair; see close_capture_locked(). Worker only.
+    AudioObjectID keepSettingsFor{0};
+
     void reconfigure(void) {
         tDeviceInfo list[DEVICE_MAX];
         uint32_t    count = device_enumerate(list, DEVICE_MAX);
@@ -2392,8 +2656,14 @@ private:
             log_line("slot %d -> '%s'", index, chosen.name);
         }
 
+        // What close_capture_locked() must NOT hand back, because we are about to reopen it. Zero
+        // when the reconfigure is a genuine device change or a close, where the restore is right.
+        keepSettingsFor = found ? chosen.id : 0;
+
+        double heldFrom = now_ms();
         pthread_mutex_lock(&configLock);
         close_capture_locked();
+        keepSettingsFor = 0;
 
         if (found) {
             // Recorded only on SUCCESS. Writing it before the attempt meant a device that failed to
@@ -2408,8 +2678,23 @@ private:
         }
 
         uint32 nowLatency = running ? report_latency() : 0;
+        double held       = now_ms() - heldFrom;
 
         pthread_mutex_unlock(&configLock);
+
+        // THE OTHER HALF OF THE SPINNING CURSOR. This is how long the worker owned the lock that
+        // every host-thread entry point waits for; lock_config_from_host() reports the wait from
+        // the other side. The two together say whether a beachball was this plug-in's doing.
+        if (held >= 20.0) {
+            // BROKEN DOWN, because "it held the lock for 1441 ms" says a refactor is needed and not
+            // WHICH of the three things inside it to move first.
+            log_line("reconfigure held configLock for %.0f ms (close+probe %.0f, rate+buffer %.0f, "
+                     "open %.0f) - anything the host asked of this plug-in on its own thread waited "
+                     "behind it", held,
+                     (gPhaseIdle > heldFrom) ? (gPhaseIdle - heldFrom) : 0.0,
+                     (gPhaseOpen > gPhaseProps) ? (gPhaseOpen - gPhaseProps) : 0.0,
+                     (gPhaseOpen > 0.0) ? (now_ms() - gPhaseOpen) : 0.0);
+        }
 
         // Told OUTSIDE the lock: restartComponent re-enters the plug-in, and a host is entitled to
         // call straight back into it - including into process(), which trylocks this same mutex.
@@ -2675,11 +2960,27 @@ private:
         // Underruns during the measurement matter: a gap in the capture delays the onset by
         // however long the gap was, so a figure taken while the ring was starving is not a
         // measurement of the hardware at all.
-        log_line("measured: %d of %d trips used, range %.1f..%.1f ms, spread %d frames (%.1f ms). "
+        // EVERY TRIP, NOT JUST THE SUMMARY. An average and a range still hide the shape: five
+        // readings clustered with one wild outlier, and five spread evenly, produce the same two
+        // numbers and mean quite different things. Safe to read here - the run is idle by the time
+        // the worker gets to this, so the array is not being written.
+        char trips[128];
+        int  at = 0;
+
+        trips[0] = '\0';
+
+        for (int i = 0; (i < measureTrip) && (at < (int)sizeof(trips) - 12); i++) {
+            at += snprintf(&trips[at], sizeof(trips) - (size_t)at, "%s%.1f",
+                           (i == 0) ? "" : "/",
+                           (measureTrips[i] > 0)
+                           ? ((double)measureTrips[i] / (hostRate / 1000.0)) : -1.0);
+        }
+
+        log_line("measured: %d of %d trips used [%s], range %.1f..%.1f ms, spread %d frames (%.1f ms). "
                  "last onset %d, our "
                  "share %d (ring %.0f of %.0f), hardware %d (%.1f ms). floor %.4f, triggered at "
                  "%.4f, underruns %u resyncs %d during. '%s' -> '%s'",
-                 measureTripsUsed.load(), GB_MEASURE_TRIPS,
+                 measureTripsUsed.load(), GB_MEASURE_TRIPS, trips,
                  (double)measureTripLow.load() / (hostRate / 1000.0),
                  (double)measureTripHigh.load() / (hostRate / 1000.0),
                  measureTripSpread.load(),
@@ -2863,13 +3164,45 @@ private:
         // Probed BEFORE device_open() below, so what it reports is other clients and never our own
         // stream. Reported rather than silently obeyed: the panel setting is still whatever the user
         // chose, and the log says why the device did not take it.
+        // OUR OWN GHOST FIRST. CoreAudio tears an IOProc down asynchronously, so a device we closed
+        // moments ago can still report that it is running - and the probe below reads that as
+        // "another client has it" and declines to touch the buffer.
+        //
+        // That is the whole of CT's "I'm attempting to set 64 and getting 512" on project load. The
+        // sequence is: the device opens before the saved buffer size is known, so it comes up at
+        // whatever it was - 512; the restored state then arrives and asks for 64; reconfigure()
+        // closes the stream and immediately probes; the probe sees the stream it just closed; the
+        // set is skipped; and 512 stands for the session. Setting 64 by hand later works because by
+        // then the ghost is long gone - which is exactly why retrying "fixed" it, and why the
+        // device is plainly not really shared.
+        //
+        // Bounded, so a device that is genuinely being driven by someone else still reaches the
+        // shared path below after a fifth of a second rather than being waited on for ever.
+        // 120 ms, not longer, and the reason is the lock this runs under - see the todo about
+        // reconfigure()'s scope. Every millisecond spent here is a millisecond the host's main
+        // thread can be blocked in getState().
+        device_wait_until_idle(info.id, 120);
+
+        gPhaseIdle = now_ms();
+
         bool deviceIsShared = device_is_running_somewhere(info.id);
 
         if (deviceIsShared && ((settings->rate > 0.0) || (settings->frames > 0))) {
             log_line("device '%s' is already running for another client - leaving its rate and"
-                     " buffer size alone (asked for %.0f Hz, %u frames)",
+                     " buffer size alone (asked for %.0f Hz, %u frames). Its buffer is whatever that"
+                     " client set, and the ring and reported latency follow it",
                      info.name, settings->rate, settings->frames);
         }
+
+        {
+            tGbStatus * status = gb_status(statusSlot);
+
+            if (status != nullptr) {
+                atomic_store(&status->deviceShared, deviceIsShared ? 1 : 0);
+            }
+        }
+
+        gPhaseProps = now_ms();
 
         // Rate before buffer size: changing the nominal rate can reset the buffer size on some
         // devices, so doing it the other way round silently loses the buffer setting.
@@ -2906,7 +3239,15 @@ private:
                 restoreDevice = info.id;
                 restoreFrames = device_buffer_frames(info.id);
             }
-            device_set_buffer_frames(info.id, wanted);
+            // The result MATTERS now that it is confirmed rather than assumed - see the note on
+            // device_set_buffer_frames(). A false here is a device that had the size asked of it,
+            // took the call and never changed, which is what "something else already has it open"
+            // looks like from this side.
+            if (!device_set_buffer_frames(info.id, wanted) && (restoreDevice == info.id)) {
+                // Nothing was changed, so there is nothing to hand back on close.
+                restoreDevice = 0;
+                restoreFrames = 0;
+            }
         }
 
         double deviceRate = device_sample_rate(info.id);
@@ -2916,6 +3257,59 @@ private:
         }
 
         uint32_t deviceFrames = device_buffer_frames(info.id);
+
+        // SAID OUT LOUD WHEN IT IS NOT WHAT WAS ASKED FOR. Everything downstream uses the real
+        // size - the ring's floor and the device latency both - so the arithmetic was never wrong;
+        // what was missing was anyone being told, and a device silently running eight times the
+        // requested buffer is most of a plug-in's reported latency.
+        if ((settings->frames > 0) && (deviceFrames != settings->frames)) {
+            uint32_t canDo   = 0;
+            uint32_t canDoTo = 0;
+            bool     ranged  = device_buffer_frame_range(info.id, &canDo, &canDoTo);
+
+            // TWO QUITE DIFFERENT CAUSES, and the range tells them apart. If the size asked for is
+            // inside what the device says it supports, the driver took the call and ignored it -
+            // which is what a device ALREADY OPEN by something else does, because the buffer belongs
+            // to whoever opened it first. If it is outside, the driver simply cannot do it.
+            bool inRange = ranged && (settings->frames >= canDo)
+                           && ((canDoTo == 0) || (settings->frames <= canDoTo));
+
+            // AND IF THE OTHER HOLDER IS ONE OF US, SAY SO BY NAME. A host loads every plug-in
+            // into one process, so the status block this instance publishes into is the same array
+            // every other GenBridge in the session publishes into - which makes "something else has
+            // it open" answerable rather than a shrug. Two instances pointed at one device is an
+            // ordinary thing to end up with, and the second one silently inherits the first one's
+            // buffer.
+            const char * culprit = nullptr;
+
+            for (uint32_t slot = 0; slot < GB_STATUS_SLOTS; slot++) {
+                tGbStatus * other = gb_status(slot);
+
+                if ((other == nullptr) || (slot == (uint32_t)statusSlot)
+                    || !atomic_load(&other->active)) {
+                    continue;
+                }
+
+                if (strcmp(other->deviceName, info.name) == 0) {
+                    culprit = other->deviceName;
+                    break;
+                }
+            }
+
+            log_line("asked %s for %u frames and it gave %u - %s. Its range is %u..%u. The ring and "
+                     "the reported latency follow the %u, which is why they look large against the "
+                     "setting on the panel",
+                     info.name, settings->frames, deviceFrames,
+                     (culprit != nullptr)
+                     ? "ANOTHER GenBridge IN THIS HOST ALREADY HAS THIS DEVICE OPEN, and the buffer "
+                       "belongs to whoever opened it first - set them both the same, or point them "
+                       "at different devices"
+                     : (inRange ? "the size is one it says it supports, so something outside this "
+                        "host already has the device open and the buffer belongs to whoever opened "
+                        "it first"
+                        : "outside what its driver will do"),
+                     ranged ? canDo : 0, ranged ? canDoTo : 0, deviceFrames);
+        }
 
         nominalRatio   = deviceRate / hostRate;
         deviceLatency  = device_latency_frames(info.id, true);
@@ -2982,6 +3376,8 @@ private:
         tDriftConfig config = drift_default_config();
 
         drift_init(&drift, &config, deviceRate, setpointFrames);
+
+        gPhaseOpen = now_ms();
 
         if (!device_open(&capture, info.id, true, first, captureChannels,
                          deviceFrames * 4, capture_callback, this)) {
@@ -3109,7 +3505,18 @@ private:
         deviceLatency  = 0;
         publish_config_snapshot();
 
-        if (restoreDevice != 0) {
+        // NOT WHEN WE ARE ABOUT TO REOPEN THE SAME DEVICE. reconfigure() closes and reopens, and
+        // handing the buffer back to what it was in between means every reconfigure drives the
+        // device 64 -> 512 -> 64 for no one's benefit. On a USB interface each of those costs over
+        // a second inside CoreAudio, and between the two the device really IS at 512 - which is what
+        // gets read off the panel and reported as "I set 64 and I keep getting 512".
+        //
+        // The RECORD is kept, so the eventual real close still hands the device back as it was
+        // found. Only the pointless middle of a reopen is skipped.
+        if ((restoreDevice != 0) && (restoreDevice == keepSettingsFor)) {
+            log_line("reopening the same device - leaving its buffer alone rather than restoring "
+                     "%u frames and setting it straight back", restoreFrames);
+        } else if (restoreDevice != 0) {
             if (restoreFrames > 0) {
                 device_set_buffer_frames(restoreDevice, restoreFrames);
             }
@@ -3478,6 +3885,22 @@ private:
     // runs before the trylock.
     std::atomic<double> eventRate{0.0};
 
+    // THE PIPELINE'S DELAY, SMOOTHED - and it is what the host is told, rather than the setpoint
+    // the ring is aimed at.
+    //
+    // The two are not the same thing and the difference is audible. The reported figure used to be
+    // built from setpointFrames, on the reasonable ground that a latency moving every block would
+    // have the host redo delay compensation continuously. But the ring only sits AT its setpoint on
+    // average and, on a bursty host, sits below it: measured on this rig, told 2679 against an
+    // actual 2221-2506, a gap of 4 to 9 ms. A host compensating by 9 ms for a 5 ms delay records
+    // everything 4 ms early, which is exactly the report that led here - and no amount of measuring
+    // the SYNTH can fix a figure that is wrong about US.
+    //
+    // A two-second average, so it follows the ring without chasing its sawtooth, and a deadband
+    // before the host is told (see latency_worth_reporting) so a figure that now moves does not
+    // cost a compensation pass every block.
+    std::atomic<double> pipelineAvg{0.0};
+
     // Note events taken from the host, and note events that reached a MIDI destination. See the
     // note where they are counted.
     std::atomic<uint32_t> eventsIn{0};
@@ -3487,8 +3910,11 @@ private:
     // the frames handed over so far run out. See block_host_time().
     uint64_t            nextBlockHostTime{0};
 
-    // The unmodelled clock, read at the top of the current block. AUDIO THREAD ONLY.
+    // The unmodelled clock, read at the top of the current block, and the model's answer for the
+    // same block. Their difference is the frames already handed over inside this callback. AUDIO
+    // THREAD ONLY.
     uint64_t            blockActualHostTime{0};
+    uint64_t            blockHostTimeNow{0};
 
     // Whether the current call opened a new audio callback, and what the previous call was, which
     // is how that is decided. AUDIO THREAD ONLY.
@@ -3496,8 +3922,13 @@ private:
     uint64_t            lastCallHostTime{0};
     uint32_t            lastCallFrames{0};
 
-    // Frames handed over so far inside the current callback. AUDIO THREAD ONLY.
+    // Frames handed over so far inside the current callback, and how many of them came BEFORE the
+    // current call. The second is the one the latency arithmetic wants, and it has to be counted
+    // rather than inferred from the model: the model legitimately runs ahead of the clock across
+    // callbacks as well as within them, so model-minus-clock grows without bound and is not this.
+    // AUDIO THREAD ONLY.
     uint32_t            burstFrames{0};
+    uint32_t            burstBefore{0};
 
     std::atomic<double> snapHostRate{0.0};
     std::atomic<double> snapRatio{1.0};
@@ -3523,6 +3954,9 @@ private:
 
     tMeasureState       measureState{eMeasureIdle};
     uint32_t            measureFrames{0};
+
+    // Whether the floor phase has reached its final third, where the hold restarts. AUDIO THREAD.
+    bool                measureFloorLate{false};
     uint32_t            measureOnsetFrames{0};
 
     // The ring occupancy at the block the onset was found in, in DEVICE frames - what the sound
@@ -3565,6 +3999,15 @@ private:
     // writes the log line, neither of which belongs in a process() call.
     std::atomic<bool>   measurePanic{false};
     std::atomic<bool>   latencyDirty{false};
+
+    // Raised by the audio thread when the measured pipeline has drifted past the deadband; the
+    // worker decides what to do about it.
+    std::atomic<bool>   latencyStale{false};
+
+    // Phase marks inside one reconfigure, for the lock-hold breakdown. Worker thread only.
+    double              gPhaseIdle{0.0};
+    double              gPhaseProps{0.0};
+    double              gPhaseOpen{0.0};
 
     // The offset moved and the host has not been told yet, and when it last moved - see
     // GB_OFFSET_SETTLE_MS.

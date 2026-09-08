@@ -93,6 +93,14 @@ bool     device_buffer_frame_range(AudioObjectID id, uint32_t * minFrames, uint3
 // the definition.
 bool     device_is_running_somewhere(AudioObjectID id);
 
+// Waits, up to timeoutMs, for a device to stop reporting that it is running. True if it went idle.
+//
+// CoreAudio tears an IOProc down asynchronously, so kAudioDevicePropertyDeviceIsRunningSomewhere can
+// still say "running" for a while after the client that owned it has closed - including when that
+// client was US. Anything that probes for OTHER clients right after closing its own stream needs
+// this first, or it sees its own ghost.
+bool     device_wait_until_idle(AudioObjectID id, unsigned timeoutMs);
+
 // deviceLatency + safetyOffset + bufferFrames + streamLatency. The first three are what AudioMovers'
 // feeder logs separately; the fourth is declared on the STREAM rather than the device and is zero on
 // every USB and Thunderbolt interface here - but 2399 frames on the built-in microphone, which is

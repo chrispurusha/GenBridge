@@ -3,6 +3,448 @@ GenBridge FINDINGS
 Completed work, measurements, and the traps that cost real time.
 
 
+2026-09-08 (16)  IT WAS A CALL-ORDER PROBLEM, AND A POINTLESS RESTORE ON TOP OF IT
+--------------------------------------------------------------------------------------------------
+CT: "Maybe it's a call order thing then?" It was, and his own log said so once the loop from (15)
+was out of the way:
+
+    open Analog Rytm ... frames 512 ... reported latency 1664
+    open KRONOS      ... frames 512 ... reported latency 1812
+    open Analog Rytm ... frames 512
+    open Analog Rytm ... frames 64  ... reported latency 976
+
+Both devices come up at 512 with NO mismatch warning - which is the tell, because that warning only
+fires when a size was asked for. Nothing was asked for. A device with no remembered entry gets
+frames = 0, "leave the device alone", which is the right default for an uninvited global change; and
+the entry only exists once setState has parsed the project blob.
+
+So if the device parameter reaches the plug-in before setState does - through the controller, or as
+a parameter change in the first process() calls - the device is opened before the saved buffer size
+has been read, and the size then lands in remembered[] with nothing left to apply it. Restored
+correctly and never reached the device.
+
+REACT TO THE LATE ARRIVAL RATHER THAN GUESS AT THE ORDER. setState() now asks for the device again
+if one was already open when the blob arrived. request_device() is debounced, so a host that DID
+call in the tidy order coalesces it into the open it was going to do anyway.
+
+AND THE RESTORE IN THE MIDDLE OF A REOPEN. reconfigure() closes and reopens, and close_capture_locked()
+was handing the buffer back to what it found in between - so every reconfigure drove the device
+64 -> 512 -> 64. Between the two it really IS at 512, which is what gets read off the panel. On these
+USB interfaces each leg costs over a second, so the window is long enough to catch by hand. The
+record is kept so the eventual real close still hands the device back; only the pointless middle is
+skipped.
+
+WHAT IS LEFT IS COREAUDIO'S OWN COST, and it is large: closing an Analog Rytm takes 3.6 SECONDS and
+opening it 1.4, measured. Holding configLock across those is the outstanding item - see the todo.
+The plug-in cannot make a device open faster; it can stop making the host wait for it.
+
+2026-09-08 (15)  A MOVING LATENCY IS AN INSTRUCTION TO THE HOST - REVERTED
+--------------------------------------------------------------------------------------------------
+CT's own Live session wrote into the shared log, and the loop is unmistakable:
+
+    open Analog Rytm ... frames 64 ... reported latency 656
+    reconfigure held configLock for 1462 ms (close+probe 0, rate+buffer 4, open 1458)
+    latency now 1876 samples - asked the host to re-read it
+    restored device settings: 512 frames, 0 Hz
+    reconfigure: slot 3 ... open Analog Rytm ... frames 64
+    reconfigure held configLock for 1453 ms
+    ... for ever, about every one and a half seconds
+
+CAUSED BY 2026-09-08 (7), WHICH WAS MINE. Reporting a smoothed measurement instead of the ring's
+setpoint removed a real 4-9 ms over-compensation and bought something far worse. The figure MOVES -
+1276, then 1212, then 1146 - and every move past the deadband told the host its latency had changed.
+A host answers that by REACTIVATING the plug-in. Reactivation closes the device, which restores its
+buffer to the 512 it had before, and reopens it at 64; that perturbs the ring; the figure moves
+again. One feedback loop giving both symptoms at once:
+
+  - the beachball, since each turn of it holds configLock for ~1460 ms and every host-thread entry
+    point waits behind that;
+  - "I set 64 and I get 512", because the device really is flapping between the two, and reading the
+    panel between turns catches it at 512.
+
+A LATENCY A HOST IS TOLD MUST BE STABLE. That is the lesson and it is not a small one:
+getLatencySamples() is not a readout, it is a contract, and changing it is a command with
+consequences that reach the whole session. The figure is back to the setpoint, which moves only when
+something structural does - a device, a rate, a buffer, a retune, the trim.
+
+THE MEASUREMENT SURVIVES AS A DIAGNOSTIC. pipelineAvg is still computed and still published beside
+the reported figure as "actual", so the gap that started this is visible. The way to close it is to
+make the ring actually sit where the setpoint says - see the todo about the ring running below its
+setpoint - not to chase it with a number the host acts on.
+
+WHAT THE LOG DID THAT AN ARGUMENT COULD NOT. Four exchanges of theory about contention, races and
+driver minimums; one paste of the owner's own log lines and the cause was in the first six of them.
+The shared log file - the same one that misled earlier by mixing processes - is worth every bit of
+the attribution that makes it readable.
+
+2026-09-08 (14)  THE SPINNING CURSOR IS device_open(), MEASURED AT 1432 ms UNDER THE LOCK
+--------------------------------------------------------------------------------------------------
+CT offered to run diagnostics under Ableton. The diagnostics found it here first.
+
+Two log lines now bracket the lock every host-thread entry point waits on. From this rig:
+
+    reconfigure held configLock for 1437 ms (close+probe 0, rate+buffer 4, open 1432)
+
+CoreAudio's own device_open is the whole of it. Not the idle wait added today (0 ms), not the buffer
+set and its confirm (4 ms) - those were the obvious suspects and both are nothing. A device that
+takes a second and a half to start is the device's business; holding a lock across it is ours.
+
+WHAT WAITS BEHIND IT: getState(), setState() and setupProcessing(), all of which Ableton calls on
+its main thread - getState() for undo snapshots on ordinary UI actions. And a reconfigure is not a
+rare event: the offset arrows cause one through the latency change. lock_config_from_host() reports
+the wait from the other side, so a session that beachballs without those lines is beachballing for
+some other reason - which is worth as much as the positive.
+
+THE SHAPE OF THE FIX, written down while it is fresh rather than attempted at the end of a long
+session: close under the lock and leave running = false; do the device properties, the ring and
+resampler build, and device_open OUTSIDE it - the audio thread already returns silence while running
+is false, and no IOProc exists yet to touch the ring; retake the lock only to set running = true and
+publish. The one cost is that a host saving DURING a swap reads the previous device, which is honest
+enough for a state that is genuinely mid-change.
+
+ALSO CONFIRMED: THE LATE BUFFER NOW TAKES. The harness restored in the wrong order - buffer first,
+then device - which opens the device already knowing the size it wants and never exercises the path
+that failed. A host walks parameters by id, so the device (0) comes before the buffer (3). Corrected,
+and with the ghost wait in place the KRONOS now reaches "frames 64, devlat 212, reported 1124" on the
+SECOND reconfigure, which is the sequence CT sees on project load.
+
+2026-09-08 (13)  THE 512 IS DELIBERATE - THE DEVICE IS SHARED WITH THE HOST
+--------------------------------------------------------------------------------------------------
+With Live quit, the KRONOS takes 64 immediately: frames 64, devlat 212, reported latency 1124
+(23.4 ms), measured 8.6-11.1 ms across five trips. Every check passes. With Live running it is 512,
+every time, and no amount of retrying moves it.
+
+IT IS NOT CONTENTION AND IT IS NOT A RACE - IT IS THIS PLUG-IN'S OWN POLICY, written down in
+reconfigure() long before any of this: device_is_running_somewhere() is probed before opening, and if
+something else is already driving the device its rate and buffer size are LEFT ALONE. Rate and
+buffer are global to a device, so imposing one reaches into every other client of it, and the case
+that matters most is a device shared with the host itself. The policy is right. What was missing was
+anyone being told.
+
+So the chain is: something in the Live session has the KRONOS running -> GenBridge declines to touch
+its buffer -> the device stays at whatever that client set, 512 -> the ring is sized for 512
+(1.25 * (512 callback + 512 device + 128 taps) = 1440) and devlat comes out 660 -> 44 ms reported.
+Every number CT quoted, from one decision taken for a good reason.
+
+The likeliest holder is Live's own AUDIO INPUT DEVICE. Live takes an input and an output device
+separately, so a session whose output is a QU-24 can still have the KRONOS as its input - and Live's
+buffer is then the KRONOS's buffer.
+
+THE PANEL NOW SAYS WHICH. "64 samples (shared - device at 512)" rather than "(device gave 512)",
+because a refusal and a deliberate hands-off want completely different responses from whoever reads
+it - one is a fault to hunt, the other is a routing decision to take. The log line says the ring and
+the reported latency follow the other client's size.
+
+THREE EXPLANATIONS IN A ROW FOR ONE SYMPTOM, and the first two were wrong: contention over the
+buffer, then an async read-back race. Both were real defects and both are fixed, but neither was
+this. The thing that settled it was the owner quitting Live - a controlled experiment that took
+thirty seconds and that nothing in the preceding hour of reasoning could substitute for.
+
+2026-09-08 (12)  noErr IS NOT CONFIRMATION - THE BUFFER SET WAS A RACE, NOT CONTENTION
+--------------------------------------------------------------------------------------------------
+CT, once the panel started reporting the mismatch: opening a project with two instances announces
+"attempting to set 64, getting 512" on both, and "a manual set to 64 fixes it".
+
+THE SECOND ATTEMPT SUCCEEDING IS THE WHOLE CLUE. Contention does not heal when you ask again - the
+other holder still has the device. A race does, because by the second attempt the first one has
+landed.
+
+AudioObjectSetPropertyData() returning noErr means the request was ACCEPTED, not that the device has
+reconfigured. CoreAudio applies a buffer size change asynchronously, and reconfigure() read the size
+straight back - getting the old one, sizing the ring from it, and telling the host a latency to
+match. device_set_buffer_frames() now polls the read-back until it agrees, up to 200 ms, and its
+result is finally used: a false is a device that had the size asked of it, took the call and never
+changed, which is what genuine contention looks like from this side.
+
+WHICH MEANS THE 45 ms MAY NEVER HAVE BEEN CONTENTION AT ALL. The earlier diagnosis - "something else
+already has this device open" - fitted the evidence and was reinforced by the author's own test runs
+holding the KRONOS at the time. It may simply have been this race, on a device slow to reconfigure.
+Both are now handled and the log tells them apart, which is the useful outcome; but the confident
+explanation was reached before the alternative had been ruled out, and the alternative was simpler.
+
+A DEVICE THAT NEVER CHANGED HAS NOTHING TO HAND BACK. restoreDevice/restoreFrames were recorded
+before the set, so a set that did not take would have had close_capture_locked() "restore" a size the
+device was already at - harmless, but it would have been a second write to a device someone else
+owns. Cleared when the set is refused.
+
+2026-09-08 (11)  TWO INSTANCES DO INTERFERE - THROUGH THE MIDI DESTINATION TABLE
+--------------------------------------------------------------------------------------------------
+CT: "Might be related to attempting to run Kronos and Rytm in the same project? They may be
+interfering somehow?" They were, though not in the way that produced the 512 frame buffer.
+
+THE DESTINATION LIST IS PROCESS-GLOBAL AND WAS REBUILT IN PLACE. gbMidi.c holds one gDest/gName/
+gCount for every GenBridge in the host - a host loads all its plug-ins into one process - and
+refresh() set gCount = 0 and then spent milliseconds inside CoreMIDI enumerating. For that entire
+window every send in the process saw "index >= gCount" and returned false. Notes silently dropped,
+on EVERY instance, once a second for as long as any panel was open, because a repaint is what calls
+refresh(). Two instances is two panels and two audio threads, which is why it showed up as the two
+interfering.
+
+Built into a shadow now and copied in with the COUNT PUBLISHED LAST under a release, so a reader
+indexing below the count it loaded sees entries written before it. Rebuilds are serialised against
+each other by a mutex that no send ever takes - two editors repainting is two threads in there. A
+slot can still name a different device after a rebuild, which is exactly why destinations are saved
+and restored by NAME rather than by index.
+
+WHAT IT DOES NOT EXPLAIN is the KRONOS at 512 while the panel said 64. Buffer sizes are per device;
+close_capture_locked() hands a device back as it found it when an instance switches away; and devlat
+660 is a KRONOS at 512 specifically, where the Rytm at 512 reports 512 for want of a converter
+offset of its own. A Rytm instance cannot hold the KRONOS. Something on the KRONOS did, and the log
+now names it when that something is another GenBridge.
+
+TWO SEPARATE FAULTS, ONE HYPOTHESIS, and it was right about the first. Worth remembering that
+"instances interfering" is a question about SHARED STATICS, and this file has several more of them -
+gClient, gPort and gReady are all one per process. Those are written once and never rebuilt, which
+is why they have been safe.
+
+2026-09-08 (10)  THE PANEL SAID 64 AND THE DEVICE WAS RUNNING AT 512
+--------------------------------------------------------------------------------------------------
+CT gave the breakdown behind a 45 ms report - ring 1440, device 660, filter 32, measured 540 - and
+then: "...and I'm using 64!"
+
+BOTH OF THE FIRST TWO NUMBERS SAY 512, INDEPENDENTLY. 660 is a KRONOS at a 512 frame buffer (512
+plus 148 of its own converter and safety offset) and 1440 is 1.25 * (512 callback + 512 device + 128
+taps). The plug-in read the real size back from the device and sized everything from it correctly.
+The PANEL showed the request.
+
+REPRODUCED, AND IT IS INTERMITTENT. Asking the KRONOS for 64 in one run gave 512 - ring 1440, devlat
+660, reported 2132, CT's numbers to the frame - and in the next gave 64, ring 880, devlat 212,
+reported 1124. The difference is whether something else already had the device open: a CoreAudio
+buffer size belongs to whoever opened it first, and a later request is accepted and ignored. There
+were [Live nnnnn] lines in the shared log at the time, so in the failing run Ableton had it.
+
+The clamp against the device's own range did NOT fire, which is what tells the two causes apart: 64
+is inside what the KRONOS says it supports, so this is not a driver minimum, it is contention. The
+log now says which, having asked for the range specifically to be able to.
+
+AND IF THE OTHER HOLDER IS ANOTHER GenBridge, IT IS NAMED. A host loads every plug-in into one
+process, so the status block an instance publishes into is the same array every other GenBridge in
+the session publishes into - which makes "something else has it open" answerable rather than a
+shrug. Two instances pointed at one device is an ordinary thing to end up with, and the second one
+silently inherits the first one's buffer. The log now distinguishes three cases: another GenBridge
+in this host, something outside it, and a size the driver simply cannot do.
+
+Note that a Rytm instance at 512 does NOT explain a KRONOS at 512 - the sizes are per device, and
+close_capture_locked() hands a device back as it found it when an instance switches away from it.
+devlat 660 is a KRONOS at 512 specifically; the Rytm at 512 reports 512, having no converter offset
+of its own. So whatever held it was on the KRONOS.
+
+The panel's Buffer row now reads "64 samples  (device gave 512)" when the two differ. The arithmetic
+was never wrong - what was missing was anyone being told, and a device silently running eight times
+the requested buffer is most of a plug-in's reported latency. It also explains why the ring looked
+inexplicably large against the setting on screen through the previous three exchanges: the setting
+on screen was fiction.
+
+2026-09-08 (9)  43.5 ms IS THE RING, AND THE RING IS THE PRICE OF NOT GLITCHING
+--------------------------------------------------------------------------------------------------
+The reported latency now logs its own breakdown every time it changes, which settled a question that
+two rounds of argument could not:
+
+    latency 2045 smp (42.6 ms) = pipeline 2045 (setpoint would say 1984:
+                                 ring 1440 + device 512 + filter 32) + measured 0 (0.0 ms)
+
+Not the measurement, and not the change to reporting a live figure - the pipeline and the setpoint
+estimate agree to within 61 frames. It is the RING, and the ring is 1440 frames because that is what
+one audio callback plus a device buffer plus the resampler's taps comes to, with 25 % on top.
+
+THIS IS THE BILL FOR 2026-09-08 (3). Sizing the ring for a single process() call gave 400 frames and
+underran 45 times in two seconds; sizing it for a whole callback stopped that dead and costs exactly
+the difference. The two are the same decision seen from either end, and there is no third option
+where the ring covers a 512-frame demand while holding 400 frames.
+
+    setpoint = 1.25 * (callback frames + device buffer + 2 * RESAMPLER_TAPS)
+
+    Live   device      ring    total (before the synth's own round trip)
+     128       64       400      496 smp   10.3 ms
+     256       64       560      656 smp   13.7 ms
+     512       64       880      976 smp   20.3 ms
+    1024       64      1520     1616 smp   33.7 ms
+     512      256      1120     1408 smp   29.3 ms
+    1024      256      1760     2048 smp   42.7 ms
+
+So 43.5 ms names its own configuration: a 1024 frame host buffer, or a 512 with a device buffer well
+above 64. The levers are the host's buffer first and GenBridge's device buffer second, and they are
+both on the panel.
+
+CT'S OWN BREAKDOWN, WHICH NAMES THE CONFIGURATION EXACTLY: ring 1440, device 660, filter 32,
+measured 540. Both of the first two say the same thing independently - 660 is a KRONOS at a 512
+frame device buffer (512 plus 148 of its own converter and safety offset), and 1440 is
+1.25 * (512 callback + 512 device + 128 taps). The device buffer is in there TWICE, as its own term
+and again inside the ring's floor, which is why it is the biggest single lever:
+
+  GB buffer  512  Live  512   ring 1440 + device 660 + filter 32 = 2132 smp   44.4 ms
+  GB buffer   64  Live  512   ring  880 + device 212 + filter 32 = 1124 smp   23.4 ms
+  GB buffer   64  Live  256   ring  560 + device 212 + filter 32 =  804 smp   16.8 ms
+  GB buffer   64  Live  128   ring  400 + device 212 + filter 32 =  644 smp   13.4 ms
+
+Half of it goes for one control. The 148 frames inside the device term are the KRONOS's own and
+cannot be argued with. Worth saying that a 64 frame device buffer was UNUSABLE before the burst fix
+in 2026-09-08 (3) - it underran 45 times in two seconds - so anyone who set 512 to stop the
+glitching can now put it back.
+
+GB_AUTO_MARGIN IS 1.25 AND HAS NEVER BEEN JUSTIFIED BY MEASUREMENT. At 1024/64 that is 304 frames -
+6.3 ms of pure headroom on top of a floor that is already the worst case. Worth an experiment: drop
+it toward 1.05 and watch the underrun counter across a session. There is also a manual setpoint in
+the saved settings (targetMs) which is honoured with a warning if it is below the floor, but nothing
+on the panel sets it.
+
+2026-09-08 (8)  41 ms REPORTED - A LIVE FIGURE NEEDS BOUNDS A CONSTANT DID NOT
+--------------------------------------------------------------------------------------------------
+CT, straight after the change above: "Ableton now has the plugin as have 41ms latency! that's very
+wrong!" - against roughly 20 ms before it. Reported around 2100 samples on the panel.
+
+THE CHANGE THAT CAUSED IT WAS RIGHT AND INCOMPLETE. Reporting a measured pipeline instead of the
+ring's setpoint removes a 4-9 ms over-compensation, but a measured figure can be wrong in ways a
+constant cannot: the occupancy is read live, and the frames-so-far-this-callback depend on a cycle
+boundary being detected. A missed boundary accumulates a "callback" of arbitrary length; a ring just
+primed or snapped reads full. Either lands on a host as tens of milliseconds.
+
+BOUNDED BOTH WAYS NOW. burstBefore is clamped to one callback - nothing can have handed over more
+than that before the current call, by definition - and the smoothed pipeline is clamped to the
+setpoint's own estimate plus or minus one callback and a device buffer. The drift loop holds the
+ring near its setpoint and the burst explains the rest, so anything outside that band is a fault
+rather than a measurement. The correction survives; the failure mode does not.
+
+AND THE RING WAS SEEN BACKING UP, which may be the real story underneath it: fill climbing 1318 ->
+1467 -> 1771 -> 1898 -> 2003 against a setpoint of 1440, drift wandering. If the ring genuinely sits
+that far above its setpoint then the honest delay IS larger, the plug-in was right to say so, and
+the thing to fix is the ring rather than the reporting. Not yet chased.
+
+ONE LOG FILE, EVERY PROCESS - and it caught me exactly as its own comment warns. Half the lines read
+while diagnosing this were "[Live nnnnn]", from CT's session on the same machine, interleaved with
+"[vst3check nnnnn]" from the rig. Filter by the process name before drawing any conclusion.
+
+A HOST KEEPS THE COPY IT LOADED. Ableton was running a build from before the guard, so the 41 ms on
+screen was not the code being reasoned about. do-vst3 prints this on every run and it is still worth
+saying out loud when a report and a measurement disagree.
+
+2026-09-08 (7)  THE HOST WAS TOLD A LATENCY THE PIPELINE DID NOT HAVE
+--------------------------------------------------------------------------------------------------
+CT: the measurements now agree between rigs, "but those measurements are not resulting in recordings
+with the audio events landing on the beat", 5 ms by hand being right on a KRONOS that measures 11 -
+and the reasonable suspicion that Ableton was adding compensation of its own. It was not. The two
+figures Live reports (8.42 ms in, 5.92 ms out at a 256 buffer) belong to the QU-24, which is Live's
+own device and nowhere near this path.
+
+THE GAP WAS OURS, AND IT IS VISIBLE NOW THAT BOTH NUMBERS ARE PUBLISHED:
+
+    told 2679   actual 2221-2506      gap 173-458 frames, 3.6 - 9.5 ms
+    told 2672   actual 2249-2303      gap ~380 frames,    8 ms
+
+The reported figure was built from the ring's SETPOINT and the real delay is the ring's actual
+occupancy - and on a bursty host the ring sits BELOW its setpoint. A host compensating by 9 ms for a
+5 ms delay records everything 4 ms early, whatever the measurement of the synth says. No amount of
+work on the measurement could have fixed it, which is why three rounds of that did not.
+
+REPORTED FROM A SMOOTHED MEASUREMENT NOW, not from the setpoint. A two-second average, so it follows
+the ring without chasing its sawtooth, and a 64-frame deadband before the host is told, because
+every telling costs a full delay compensation pass and the figure now moves. After:
+
+    told 2306   actual 2286-2300      gap 6-20 frames
+    told 2297   actual 2321-2370      gap 24-73 frames
+
+The setpoint remains the estimate used before a block has run, which is the only moment there is
+nothing measured to report.
+
+TWO GUARDS THE LIVE FIGURE NEEDED THAT THE CONSTANT ONE DID NOT:
+
+  "How long ago the last capture callback landed" is 0 before the first one, and the gap from 0 is
+  the machine's uptime. It put 151 ms on the panel. Clamped at four device periods - beyond that the
+  device has gone quiet and the term is not a measurement.
+
+  The retune checks failed honestly once the figure went live: vst3check's retune loop still paced
+  itself with usleep(2666), which runs slower than 48 kHz, so the device outran it and the ring
+  really did back up to 147 ms. The plug-in was right and the rig was wrong - the third time in this
+  session, and the second time in that same file.
+
+AND ONE CHECK WAS TESTING THE WRONG THING. "A reopen keeps the tuned setpoint" demanded the reported
+latency be EQUAL across a reactivation; it now differs by a handful of samples because it is a
+measurement. What the check exists to catch is the retune being UNDONE, which is several hundred
+samples, so it has a tolerance and prints how far it moved.
+
+2026-09-08 (6)  REFERENCE MEASUREMENTS ON THIS RIG - AND WHAT IS NOT IN THEM
+--------------------------------------------------------------------------------------------------
+CT reported 21 ms for an Analog Rytm where 11 is right, and asked the good question: "Are the times
+I'm getting being accumulated with some Ableton latency reports?"
+
+NO, AND THE REASON IS WORTH STATING. The measurement is a CLOSED LOOP: the plug-in stamps a note
+onto a CoreMIDI destination itself and listens on its own capture device. Nothing Live reports about
+its own latency is in that path, and the host's output latency cancels because both ends of the trip
+are anchored to the top of process() - see 2026-09-08 (1). What Live IS told is internal + measured,
+and internal grows with the ring, which grows with Live's buffer; so a bigger Live buffer inflates
+the REPORTED total without changing the measured hardware share.
+
+MEASURED HERE, same machine, same hardware, through vst3check --play with a four-block callback:
+
+  Analog Rytm, kick on C-2 (note 0), device buffer default   12.5 - 13.5 ms, 0.25 ms across 3 runs
+  Analog Rytm, same, device buffer 64                        12.9 - 13.9 ms
+  Elektron Analog Keys                                       12.5 - 13.6 ms, 0.23 ms across 3 runs
+  KRONOS, dry preset                                          9.1 -  9.4 ms, 0.33 ms across 3 runs
+
+All five trips of a run now agree to within about a millisecond, which is the synth's own jitter.
+The Rytm reports devlat 64 at a 64-frame buffer - the buffer and nothing else, no converter or
+safety offset at all - so `buffered` comes out 0 for it.
+
+THE RYTM MEASURES 13 ms HERE AND 21 ms IN CT'S SESSION, on the same box. That is an eight
+millisecond difference the algorithm cannot produce on its own: the round trip is invariant to the
+ring's size (proved by the failed experiment in the entry above, and confirmed by the buffer-64 run
+moving it by 1 ms, not 8). So the difference is in what the plug-in is pointed at over there - which
+device, which input pair, whether Live holds the same device open - and the log line now carries
+everything needed to tell: every trip individually, plus "our share N (ring F of S)". A share much
+smaller than the 820 measured here is the whole story.
+
+EVERY TRIP IS LOGGED NOW, not just the average and the range. Five readings clustered with one wild
+outlier and five spread evenly produce the same summary and mean quite different things.
+
+2026-09-08 (5)  REVERB ON THE PRESET MEASURED AS 6 ms OF SYNTH
+--------------------------------------------------------------------------------------------------
+CT, recording through both: the Analog Rytm lined up perfectly on the measured figure, the KRONOS
+came out about 5 ms early on a kick drum - "both were measuring around 11 ms" - and setting the
+KRONOS trim to 5 ms by hand made it correct. Then: "Ah yeah, there's reverb on this preset."
+
+THE FLOOR WAS A PEAK HELD OVER THE WHOLE WINDOW, and the threshold is eight times whatever it says.
+A preset with reverb on it is still decaying through that window, so the figure was a measurement of
+the tail rather than of the floor. Too high a threshold does not fail loudly - it fires LATE into
+the attack, which reads as a slower synth, which the host then over-compensates for, and the take
+records EARLY. A dry kick on a Rytm crosses immediately and measures true; the same kick through a
+reverbed KRONOS patch measures the reverb's threshold instead.
+
+The hold now restarts two thirds of the way through the window, leaving the last third - the part
+nearest the note, and the quietest part of any decay - as the answer. On this rig it moved the
+KRONOS from 10.0-10.3 ms to 9.1-9.4 ms; on a preset with a long tail it will move it further.
+
+IT STILL CANNOT SEPARATE THE SYNTH FROM ITS PATCH, and no threshold detector can: a pad crosses
+later than a piano because it IS later. Measure on the driest, most percussive preset the device
+has, and keep the trim for the rest.
+
+FOUR TRIPS OUT OF FIVE WERE SILENTLY NOT HAPPENING. The settle between trips waited a fixed 0.35 s,
+which is nowhere near enough for a note with a tail to decay - so the next floor was taken over the
+ringing note, the threshold came out too high for the next note to cross, and that trip timed out.
+A timeout ends the run, so every "average of five" was resting on one reading. The settle now ends
+when the input has actually gone quiet, with 0.35 s as a minimum and 2.5 s as a ceiling. Trips used
+went from 1 of 5 to 2-3 of 5 on a reverbed preset, and should be 5 of 5 on a dry one.
+
+AN EXPERIMENT THAT FAILED, KEPT BECAUSE IT LOOKED SO RIGHT. The frames already handed over inside a
+callback were added to the share the measurement nets off, on the reasoning that a callback of four
+128-frame blocks drains the ring in one go so the fill at the fourth call is 384 frames below the
+fill at the first. True, and irrelevant: if the onset sits at position p in the ring, the call that
+reads it finds it at cross = p minus the frames already read, and that call's fill is lower by
+exactly the same amount. The two cancel, and the round trip is invariant to which call detects it.
+Adding the term uncancelled them and took a measurement that had settled to 0.2 ms across runs back
+to a 7.3 ms spread. Reverted.
+
+The term DOES belong in a different quantity - how far behind the audio is where the host finally
+places it - and that is now published beside the reported figure as "actual", so the two can be
+compared on a real rig instead of argued about. told 2241 / actual 2191-2251 here, which is the
+agreement that was wanted; whether it holds on CT's rig is the open question behind the 5 ms.
+
+THE MONOTONIC MODEL NEEDED A WAY BACK. It advances by the host's nominal frame count while the clock
+advances at the device's real rate, so it creeps ahead by a few ppm for as long as the session runs
+- into the ceiling, and a ceiling trip resets to the clock, which is the one backwards step the
+monotonic rule exists to prevent. When it is further ahead than a callback can account for, each
+block now advances by a shade less than its own length: two per cent, 53 microseconds at 128 frames,
+closing a whole callback of excess inside half a second, and never negative.
+
 2026-09-08 (4)  LIVE KEYBOARD STOPPED PASSING THROUGH - FIXED, BY ONE OF TWO
 --------------------------------------------------------------------------------------------------
 CT: "MIDI from a keyboard source on the Ableton track is no longer being passed through the plugin",

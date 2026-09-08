@@ -17,6 +17,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <stdatomic.h>
+#include <pthread.h>
 #include <string.h>
 #include <time.h>
 
@@ -35,8 +37,29 @@ static bool            gReady     = false;
 
 static MIDIEndpointRef gDest[GB_MIDI_MAX_DEST];
 static char            gName[GB_MIDI_MAX_DEST][GB_MIDI_NAME_LEN];
-static int             gCount     = 0;
+
+// PUBLISHED LAST, AND ATOMIC, because this table is process-global and every GenBridge in the host
+// shares it - the audio threads of instances that are not the one asking for names read it while
+// this one is rebuilding it.
+//
+// refresh() used to set gCount = 0 and then spend milliseconds in CoreMIDI. For that entire window
+// every send in the process saw "index >= gCount" and returned false: notes silently dropped, on
+// every instance, once a second for as long as any panel was open. Two instances in one project
+// made it twice as likely and looked exactly like the two interfering with each other.
+//
+// The list is built into a shadow and copied in, and the COUNT goes last with a release. A reader
+// indexing below the count it loaded therefore sees entries that were written before it. A slot can
+// still name a different device after a rebuild, which is the reason destinations are saved and
+// restored by NAME rather than by index.
+static _Atomic int     gCount     = 0;
 static double          gCachedAt  = -1000.0;
+static _Atomic bool    gCacheValid = false;
+
+static void midi_notify(const MIDINotification * message, void * refCon);
+
+// Serialises rebuilds against each other - two editors repainting is two threads in here. Never
+// taken by a send, which is the whole point of the atomic above.
+static pthread_mutex_t gRefreshLock = PTHREAD_MUTEX_INITIALIZER;
 
 static double monotonic_seconds(void) {
     struct timespec ts;
@@ -53,7 +76,11 @@ bool gb_midi_init(void) {
 
     // A plug-in may be instantiated many times; one client and one port serve all of them, which is
     // also what keeps the host's MIDI panel from filling with duplicates.
-    if (MIDIClientCreate(CFSTR("GenBridge"), NULL, NULL, &gClient) != noErr) {
+    // A NOTIFY PROC, so the destination list does not have to be polled. Passing NULL here is what
+    // left refresh() with a one-second timer as its only way of noticing a synth being switched on -
+    // and that timer ran on the host's main thread, inside CoreMIDI, for as long as a panel was
+    // open. CoreMIDI will now tell us instead.
+    if (MIDIClientCreate(CFSTR("GenBridge"), midi_notify, NULL, &gClient) != noErr) {
         return false;
     }
 
@@ -69,24 +96,43 @@ bool gb_midi_init(void) {
 }
 
 void gb_midi_invalidate(void) {
-    gCachedAt = -1000.0;
+    atomic_store(&gCacheValid, false);
+}
+
+// From CoreMIDI's own thread. Anything that changes the setup - a device appearing, a name changing,
+// a port being added - means the cached list is stale, and that is all this needs to say.
+static void midi_notify(const MIDINotification * message, void * refCon) {
+    (void)refCon;
+
+    if ((message != NULL) && (message->messageID == kMIDIMsgSetupChanged)) {
+        atomic_store(&gCacheValid, false);
+    }
 }
 
 // Enumerating CoreMIDI takes locks in the framework, and the editor asks for names on every repaint.
 // Cached for the same reason the audio device list is.
 static void refresh(void) {
-    double now = monotonic_seconds();
+    static MIDIEndpointRef next[GB_MIDI_MAX_DEST];
+    static char            nextName[GB_MIDI_MAX_DEST][GB_MIDI_NAME_LEN];
 
-    if ((now - gCachedAt) < 1.0) {
+    // EVENT-DRIVEN, with a long re-read as belt and braces - see midi_notify(). The timer that used
+    // to be the only mechanism here put a CoreMIDI enumeration on the host's main thread once a
+    // second for as long as a panel was open.
+    if (atomic_load(&gCacheValid) && ((monotonic_seconds() - gCachedAt) < 30.0)) {
+        return;
+    }
+    pthread_mutex_lock(&gRefreshLock);
+
+    // Re-checked under the lock: two panels can both have passed the test above.
+    if (atomic_load(&gCacheValid) && ((monotonic_seconds() - gCachedAt) < 30.0)) {
+        pthread_mutex_unlock(&gRefreshLock);
         return;
     }
 
-    gCachedAt = now;
-    gCount    = 0;
-
+    int       found = 0;
     ItemCount total = MIDIGetNumberOfDestinations();
 
-    for (ItemCount i = 0; (i < total) && (gCount < GB_MIDI_MAX_DEST); i++) {
+    for (ItemCount i = 0; (i < total) && (found < GB_MIDI_MAX_DEST); i++) {
         MIDIEndpointRef endpoint = MIDIGetDestination(i);
 
         if (endpoint == 0) {
@@ -95,33 +141,46 @@ static void refresh(void) {
 
         CFStringRef name = NULL;
 
-        gName[gCount][0] = '\0';
+        nextName[found][0] = '\0';
 
         if ((MIDIObjectGetStringProperty(endpoint, kMIDIPropertyDisplayName, &name) == noErr)
             && (name != NULL)) {
-            CFStringGetCString(name, gName[gCount], GB_MIDI_NAME_LEN, kCFStringEncodingUTF8);
+            CFStringGetCString(name, nextName[found], GB_MIDI_NAME_LEN, kCFStringEncodingUTF8);
             CFRelease(name);
         }
 
-        if (gName[gCount][0] == '\0') {
-            snprintf(gName[gCount], GB_MIDI_NAME_LEN, "destination %d", gCount + 1);
+        if (nextName[found][0] == '\0') {
+            snprintf(nextName[found], GB_MIDI_NAME_LEN, "destination %d", found + 1);
         }
 
-        gDest[gCount] = endpoint;
-        gCount++;
+        next[found] = endpoint;
+        found++;
     }
+
+    // ENTRIES FIRST, COUNT LAST. Everything above happened in a shadow, so no send has been able to
+    // see a half-built list; this is the only moment anything changes for a reader.
+    for (int i = 0; i < found; i++) {
+        gDest[i] = next[i];
+        memcpy(gName[i], nextName[i], GB_MIDI_NAME_LEN);
+    }
+
+    atomic_store_explicit(&gCount, found, memory_order_release);
+
+    gCachedAt = monotonic_seconds();
+    atomic_store(&gCacheValid, true);
+    pthread_mutex_unlock(&gRefreshLock);
 }
 
 int gb_midi_destination_count(void) {
     refresh();
 
-    return gCount;
+    return atomic_load_explicit(&gCount, memory_order_acquire);
 }
 
 void gb_midi_destination_name(int index, char * out, unsigned long len) {
     refresh();
 
-    if ((index < 0) || (index >= gCount)) {
+    if ((index < 0) || (index >= atomic_load_explicit(&gCount, memory_order_acquire))) {
         snprintf(out, len, "%s", "-");
         return;
     }
@@ -136,7 +195,9 @@ int gb_midi_slot_for_name(const char * name) {
         return -1;
     }
 
-    for (int i = 0; i < gCount; i++) {
+    int count = atomic_load_explicit(&gCount, memory_order_acquire);
+
+    for (int i = 0; i < count; i++) {
         if (strcmp(gName[i], name) == 0) {
             return i;
         }
@@ -154,7 +215,11 @@ bool gb_midi_send(int index, const uint8_t * data, uint32_t length) {
 // a mutex, so routing notes through it would take a lock per event on the audio thread. The packet
 // list here is on the stack and the send takes nothing.
 bool gb_midi_send_at(int index, const uint8_t * data, uint32_t length, uint64_t hostTime) {
-    if (!gReady || (index < 0) || (index >= gCount) || (data == NULL) || (length == 0)) {
+    // ACQUIRE, to pair with the release in refresh(): entries written before the count was
+    // published are guaranteed visible to a reader that has seen it.
+    if (!gReady || (index < 0)
+        || (index >= atomic_load_explicit(&gCount, memory_order_acquire))
+        || (data == NULL) || (length == 0)) {
         return false;
     }
 

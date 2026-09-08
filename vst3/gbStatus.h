@@ -81,6 +81,19 @@ typedef struct {
     atomic_int      eventsIn;
     atomic_int      eventsOut;
 
+    // WHAT THE PIPELINE'S DELAY ACTUALLY IS at this instant, against latencySamples which is what
+    // the host was TOLD. The reported figure is built from the ring's setpoint because a latency
+    // that moved every block would have the host redo delay compensation continuously; this is
+    // built from the occupancy the audio really came through. If the two disagree on average, every
+    // recording is displaced by the difference - see findings 2026-09-08 (5).
+    atomic_int      actualSamples;
+
+    // The device was already running for another client when it was opened, so its rate and buffer
+    // size were LEFT ALONE deliberately - see the note in reconfigure(). Published because from the
+    // panel that is indistinguishable from a device refusing the setting, and the two want quite
+    // different responses from whoever is reading it.
+    atomic_int      deviceShared;
+
     // The reported total, broken into what it is made of. All in HOST frames, so they add up.
     atomic_int      ringSamples;
     atomic_int      deviceSamples;
