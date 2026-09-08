@@ -2074,6 +2074,48 @@ int main(int argc, char ** argv) {
         fresh->getParamStringByValue(3, fresh->getParamNormalized(3), framesText);
         check("buffer size restored (256)", to_ascii(framesText) == "256");
 
+        // ── THE CALLBACK SIZE SURVIVES A SAVE ───────────────────────────────────────────────────
+        //
+        // Its entire purpose is to be there at the FIRST open of the next session, so a round trip
+        // is the only thing worth asserting about it. It is a PROCESSOR field - how much the host
+        // takes per callback, not a parameter - so it goes through the component rather than the
+        // controller checked above.
+        //
+        // Without it the ring is sized from the declared block size, which on the host this was
+        // built against under-states by half: it declares 256 and hands over 512, so the ring came
+        // up at 560, discovered the truth a second later and retuned to 880 - at the cost of a
+        // device reopen per instance.
+        {
+            MemStream in;
+            MemStream out;
+
+            in.buf = "GENBRIDGE3\n"
+                     "active=" + slot2Uid + "\n"
+                     "callback=512\n"
+                     "dev=256,48000.0,30.000,2,1,0.6000," + slot2Uid + "\n";
+
+            IComponent * roundTrip = nullptr;
+
+            factory->createInstance(processorCid, IComponent::iid, (void **)&roundTrip);
+
+            if (roundTrip != nullptr) {
+                roundTrip->initialize(&hostApp);
+
+                bool took = (roundTrip->setState(&in) == kResultOk);
+
+                check("component accepts a state carrying the callback size", took);
+
+                out.buf.clear();
+                roundTrip->getState(&out);
+
+                check("the callback size is written back out",
+                      out.buf.find("callback=512") != std::string::npos);
+
+                roundTrip->terminate();
+                roundTrip->release();
+            }
+        }
+
         String128 modeText;
         fresh->getParamStringByValue(4, fresh->getParamNormalized(4), modeText);
         check("mono/stereo restored (Mono)", to_ascii(modeText) == "Mono");

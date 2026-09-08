@@ -177,6 +177,11 @@ using namespace Steinberg::Vst;
 // needs a deadband or it would fire on the ring's own noise. 128 frames is 2.7 ms at 48 kHz - below
 // what this control is ever dialled in to correct.
 #define GB_LATENCY_DEADBAND   (64)
+
+// A sanity ceiling on a callback size read back out of a project file. Nothing sane hands over a
+// third of a second in one go, and a corrupt or hand-edited value must not be able to ask for a
+// ring measured in seconds.
+#define GB_MAX_BLOCK_FRAMES   (16384)
 // The onset threshold is RELATIVE to whatever the input is already doing, with an absolute floor
 // under it. A synth with a hissy output, a hum, or a pad still decaying would sit above any fixed
 // level and trip the detector the instant the note went out. Measuring the quiet first and then
@@ -322,7 +327,25 @@ typedef struct {
 // output, which is exactly what happened: a run of "measured: 0" lines was read as a harness fault
 // when it came from a DAW that also had the device open.
 static void log_line(const char * format, ...) {
-    if (access("/tmp/genbridge-log", F_OK) != 0) {
+    // THE GATE IS CACHED, because it is a syscall and this is called from threads that must not
+    // spend them. access() on every call is cheap next to the fopen below when logging is ON, and
+    // it is the entire cost when logging is OFF - which is almost always, and is exactly when it
+    // must be free. Re-polled once a second so touching the file still enables logging mid-session
+    // rather than needing a reload.
+    static std::atomic<double> checkedAt{-1000.0};
+    static std::atomic<bool>   enabled{false};
+    struct timespec            ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    double now = (double)ts.tv_sec + ((double)ts.tv_nsec * 1e-9);
+
+    if ((now - checkedAt.load()) >= 1.0) {
+        checkedAt.store(now);
+        enabled.store(access("/tmp/genbridge-log", F_OK) == 0);
+    }
+
+    if (!enabled.load()) {
         return;
     }
 
@@ -798,6 +821,21 @@ public:
 
         blob += "active=" + deviceSelector + "\n";
 
+        // HOW MUCH THE HOST TAKES PER CALLBACK, which is a property of the HOST and its buffer
+        // setting rather than of any device - so it is written once, outside the dev= lines.
+        //
+        // Saved because neither number available at the FIRST open is right: this host declares 256
+        // and hands over 512, and the observation needs an undisturbed callback that a project load
+        // does not provide. Without it the ring comes up at 560, discovers the truth a second later
+        // and retunes to 880 - which costs a device reopen per instance, 1.4 seconds each on these
+        // interfaces. With it, the first open is already correct.
+        //
+        // A stale value is safe: the retune corrects in BOTH directions now, and setupProcessing()
+        // discards it outright if the host comes back declaring a different block size.
+        if (observedMaxFrames > 0) {
+            blob += "callback=" + std::to_string(observedMaxFrames) + "\n";
+        }
+
         // A NEW KEY, not a version bump: the format skips what it does not recognise, so an older
         // build reading this simply does not get a name to show.
         {
@@ -858,13 +896,16 @@ public:
                      (double)d->trim, d->uid);
             blob += line;
 
-            // WHAT IS ACTUALLY GOING INTO THE PROJECT. "I set 64 and it comes back 512" has three
-            // possible homes - the size never reached the settings, the settings never reached the
-            // file, or the file never reached the device - and only the plug-in can see the middle
-            // one. A zero here means "leave the device alone", which is the default for a device
-            // whose buffer nobody has chosen; it is NOT the same as 512 and reads quite differently.
-            log_line("saving: device '%s' frames %u rate %.0f trim %.2f",
-                     d->uid, d->frames, d->rate, (double)d->trim);
+            // NOT LOGGED FROM HERE, and that is not tidiness. getState() is called by a host far
+            // more often than a save: Ableton takes an undo snapshot on ordinary UI actions, and
+            // this loop runs once per REMEMBERED device - up to 32 of them. log_line() opens and
+            // closes the file on every call, so a line here is dozens of file operations on the
+            // HOST'S MAIN THREAD every time someone moves a control. It was added to answer one
+            // question ("did the buffer size ever reach the project file?"), it answered it, and it
+            // would have been a fresh cause of the very beachball it was helping to chase.
+            //
+            // The "restoring:" line on the way back in survives, because setState runs once per
+            // load and is where a value that failed to persist actually shows up as missing.
         }
         // Released before write(): the blob is a private copy by now, and state->write() calls back
         // into the host - which must never happen with this lock held.
@@ -1157,7 +1198,11 @@ public:
         // A DIFFERENT DECLARED MAXIMUM INVALIDATES THE OBSERVATION, and nothing else does. What was
         // learned about one host block size says nothing about another, so this is the one place
         // that forgets it - see close_capture_locked(), which used to.
-        if ((uint32)setup.maxSamplesPerBlock != hostMaxFrames) {
+        // NOT ON THE FIRST CALL, which would throw away a callback size just restored from the
+        // project - setState() and setupProcessing() arrive in whichever order the host likes, and
+        // this used to clear a good value simply for being the first to see a block size at all.
+        // A LATER change of declared size is a genuine reconfiguration and does discard it.
+        if ((hostMaxFrames != 0) && ((uint32)setup.maxSamplesPerBlock != hostMaxFrames)) {
             observedMaxFrames = 0;
             observedFrames    = 0;
             retuneState.store(eRetuneWatching);
@@ -1636,7 +1681,22 @@ public:
             // what the HOST is told, because that is the long-run figure; the measurement nets off
             // the real one, and the difference between the two is exactly the momentary deviation
             // it should not be reporting as hardware.
-            double   oursNow = (measureOnsetOurs > 0.0) ? measureOnsetOurs : internal_latency_frames();
+            // THE MEAN CALLBACK LEAD, ADDED AS A CONSTANT - which is the difference between the two
+            // failed attempts at this and the right answer.
+            //
+            // The round trip is invariant to WHICH call of a callback detects the onset, because
+            // the position in the ring and that call's fill move together and cancel. That is why
+            // adding the per-block burstBefore made it worse: it uncancelled them and put the
+            // block's own 0..384 frames of variance straight into the answer.
+            //
+            // But the AVERAGE of that term is not zero, and it is not in the subtraction at all -
+            // so every measurement carried it as a constant bias. At a 512 frame callback delivered
+            // in 128s that is (512 - 128) / 2 = 192 frames, 4 ms, and both a KRONOS and an Analog
+            // Rytm recorded 4 ms early on exactly that. A constant has no variance, so this is the
+            // one form of the term that removes the bias without reintroducing the scatter.
+            double   lead    = mean_callback_lead();
+            double   oursNow = ((measureOnsetOurs > 0.0) ? measureOnsetOurs
+                               : internal_latency_frames()) + lead;
             uint32_t ours    = (oursNow > 0.0) ? (uint32_t)oursNow : 0;
 
             // A ROUND TRIP CANNOT BE FASTER THAN OUR OWN PIPELINE. If it looks like it was, the
@@ -1923,6 +1983,16 @@ public:
         return start;
     }
 
+    // HOW FAR INTO A CALLBACK AN AVERAGE BLOCK SITS. A host that hands over one block per callback
+    // has none of this; one that delivers 512 in four 128s has a block starting 0, 128, 256 or 384
+    // frames in, averaging 192. Audio thread only, and both figures it reads are audio-thread state.
+    double mean_callback_lead(void) const {
+        double burst = (double)observedMaxFrames;
+        double call  = (double)lastCallFrames;
+
+        return (burst > call) ? ((burst - call) / 2.0) : 0.0;
+    }
+
     // How many of the host's frames separate two host-clock instants. 0 if they are the wrong way
     // round, which is what a caller wants everywhere it is used here.
     double frames_between(uint64_t from, uint64_t to) const {
@@ -2111,6 +2181,32 @@ public:
     }
 
     void observe_block(int32 frames) {
+        // A RING TOO SMALL IS FIXED AT ONCE, AND NOT ONLY DOWNWARDS.
+        //
+        // The retune below exists to RECLAIM frames once the host has been watched, and it is
+        // deliberately slow and one-way about it. This is the opposite case and it cannot wait: a
+        // ring sized for less than one callback is drained dry every cycle, which is an audible
+        // click each time - and there was no path to it except revert_retune(), which only fires
+        // AFTER an underrun has already been heard.
+        //
+        // It reaches here because neither number available at the first open is right. CT's Live
+        // DECLARES 256 and hands over 512 in one callback; the declaration under-states, and the
+        // observation is still partial during a project load - which is the least undisturbed
+        // moment there is and the one where a busy CPU splits a burst in two. Both said 256, the
+        // ring came up at 560, and only switching the buffer away and back settled it at 880.
+        //
+        // So: whenever the burst actually seen needs more ring than is in force, ask for it. Once
+        // per increase, since observedMaxFrames only ever grows.
+        if (running && (observedMaxFrames > 0) && (retuneState != eRetuneRequested)) {
+            double needed = minimum_setpoint_for(observedMaxFrames) * GB_AUTO_MARGIN;
+
+            if (needed > (setpointFrames + GB_RETUNE_MIN_GAIN)) {
+                retuneState = eRetuneRequested;
+                wake_worker();
+                return;
+            }
+        }
+
         if (retuneState != eRetuneWatching) {
             return;
         }
@@ -2788,7 +2884,11 @@ private:
 
         retuneState.store(eRetuneSettled);
 
-        log_line("retuned: host declared %u but uses %u - setpoint %.0f -> %.0f, latency %u -> %u",
+        // Reads both ways now: reclaiming frames when the host uses less than it declared, and
+        // CLAIMING them when it hands over more per callback than either number suggested.
+        log_line("retuned %s: host declares %u and takes %u per callback - setpoint %.0f -> %.0f, "
+                 "latency %u -> %u",
+                 (setpointFrames > before) ? "UP - the ring was smaller than one callback" : "down",
                  hostMaxFrames, observedMaxFrames, before, setpointFrames, reportedLatency.load(),
                  nowLatency);
 
@@ -3327,7 +3427,30 @@ private:
                          : 0.0;
         trimGain.store(settings->trim);
 
-        uint32_t effectiveHostFrames = (observedMaxFrames > 0) ? observedMaxFrames : hostMaxFrames;
+        // THE DECLARATION IS THE FLOOR, AND THE OBSERVATION ONLY EVER RAISES IT HERE.
+        //
+        // This used to trust the observation outright, which is wrong at the FIRST open: the burst
+        // measurement needs a whole undisturbed callback to be right, and a project load is the
+        // least undisturbed moment there is. A busy load separates back-to-back calls by more than
+        // half a block, the boundary test reads that as two cycles, and the burst comes out half
+        // what it really is.
+        //
+        // Measured by CT: an Analog Rytm at a 64 frame device buffer came up with setpoint 560,
+        // which is 1.25 * (256 + 64 + 128) - a 256 frame callback. Switching the buffer to 128 and
+        // back settled it at 880, which is the same arithmetic on the true 512. Only the first
+        // value was ever wrong, and it was wrong in the direction that underruns.
+        //
+        // maxSamplesPerBlock is a contract and is safe to size for; the retune still reclaims the
+        // difference once it has watched for a couple of seconds and can be believed.
+        // ONCE THE OBSERVATION HAS SETTLED, it is the better number and is used as it stands - that
+        // is the whole point of the retune, and a reopen must not throw the reclaimed frames away.
+        // While it is still WATCHING, it is a partial count and only ever raises the declaration.
+        bool trustObserved = (retuneState.load() != eRetuneWatching) && (observedMaxFrames > 0);
+
+        uint32_t effectiveHostFrames = trustObserved
+                                       ? observedMaxFrames
+                                       : ((observedMaxFrames > hostMaxFrames) ? observedMaxFrames
+                                          : hostMaxFrames);
         double   minimum              = minimum_setpoint_for(effectiveHostFrames, deviceFrames);
 
         // THE FLOOR IS ADVICE, NOT A LIMIT — for a setting the user typed. Auto still takes it, and
@@ -3723,6 +3846,14 @@ private:
                 }
             } else if (line.compare(0, 7, "midich=") == 0) {
                 midiChannel.store(atoi(line.substr(7).c_str()));
+            } else if (line.compare(0, 9, "callback=") == 0) {
+                // Into observedMaxFrames directly, so the first open sizes from it exactly as it
+                // would from a live observation - see the note where it is written.
+                unsigned frames = (unsigned)strtoul(line.substr(9).c_str(), nullptr, 10);
+
+                if ((frames > 0) && (frames <= (GB_MAX_BLOCK_FRAMES))) {
+                    observedMaxFrames = frames;
+                }
             } else if (line.compare(0, 9, "testnote=") == 0) {
                 int note = atoi(line.substr(9).c_str());
 

@@ -3,6 +3,116 @@ GenBridge FINDINGS
 Completed work, measurements, and the traps that cost real time.
 
 
+2026-09-08 (20)  THE DIAGNOSTICS, AND THE ONE THAT HAD TO GO
+--------------------------------------------------------------------------------------------------
+CT, once the ring came up at 880 on both instances: "Diagnostics/debug need tidying?" One of them
+did, and not for tidiness.
+
+THE "saving:" LINE WAS A FRESH CAUSE OF THE BEACHBALL IT HELPED CHASE. It logged one line per
+REMEMBERED DEVICE from inside getState() - and a host calls getState far more often than a save;
+Ableton takes an undo snapshot on ordinary UI actions. log_line() opens and closes the file on every
+call, so up to 32 file operations on the HOST'S MAIN THREAD every time a control moved. It was added
+to answer one question, it answered it, and it is gone. The "restoring:" line on the way back in
+survives: setState runs once per load, and a value that failed to persist shows up as missing there.
+
+AND THE GATE IS CACHED. log_line() began with access("/tmp/genbridge-log") - a syscall on every
+call, which is the ENTIRE cost when logging is off, and off is almost always. Checked once a second
+now, so it stays free when disabled and still switches on mid-session when the file is touched.
+
+WHAT EARNS ITS PLACE, all event-driven - a full vst3check run producing ten instances and several
+device opens writes 265 lines, with no single line dominating:
+
+  reconfigure held configLock for N ms (close+probe, rate+buffer, open)
+      The worker's side of the beachball. It is what identified device_open as the 1.4 seconds.
+  HOST THREAD BLOCKED: <call> waited N ms for configLock
+      The host's side of the same thing, naming the entry point. Absent while a cursor spins means
+      the cause is elsewhere, which is worth as much as the positive.
+  latency N smp = pipeline X (setpoint would say Y: ring + device + filter) + measured Z
+      Where a reported figure comes from. Settled "45 ms cannot be right" in one line.
+  asked <device> for N frames and it gave M - <which of three reasons>
+      Contention, a driver limit, or another GenBridge in this host, told apart rather than guessed.
+  measured: N of 5 trips used [list], range, spread, our share (ring F of S)
+      Every trip individually: five clustered readings and five spread evenly summarise the same.
+  retuned UP/down: host declares N and takes M per callback
+      The line that proved maxSamplesPerBlock under-states this host by half.
+  notes N / N on the panel
+      In and out. "Notes are not getting through" has three causes that look identical outside.
+
+THE RULE THEY ALL FOLLOW: a diagnostic runs on an EVENT, never on a block or a repaint, and never on
+a thread the host is waiting on. Every one that broke that rule today became a bug of its own - the
+per-second device enumeration on the main thread, and the getState logging above.
+
+2026-09-08 (19)  THE HOST DECLARES 256 AND TAKES 512, AND THAT IS NOW REMEMBERED
+--------------------------------------------------------------------------------------------------
+Confirmed from CT's own session, in one line the plug-in wrote about itself:
+
+    retuned UP - the ring was smaller than one callback:
+      host declares 256 and takes 512 per callback - setpoint 560 -> 880
+
+So the earlier inference was right and is now a measurement. maxSamplesPerBlock is a per-CALL
+maximum and says nothing about how many calls arrive in a callback; this host under-states by half.
+
+THE RETUNE GOES UP NOW, IMMEDIATELY. It was deliberately one-way - reclaim only - and the sole path
+upward was revert_retune(), which fires AFTER an underrun has been heard. A ring smaller than one
+callback could therefore only fix itself by glitching first, which is precisely the fault it should
+be preventing. It fired once per instance, which is the check that mattered: a retune tells the host
+its latency changed, and that costs a device reopen.
+
+AND THE CALLBACK SIZE IS SAVED WITH THE PROJECT, because it is a property of the HOST and its buffer
+setting rather than of any device - so it goes on its own line rather than in a dev= one. Without it
+every load pays an extra reopen per instance to discover something it already knew: 560, then the
+truth, then 880, with 1.4 seconds of CoreAudio between them.
+
+TWO ORDERING TRAPS IN ONE SMALL FEATURE, both avoided deliberately:
+
+  - setupProcessing() cleared the observed size whenever the declared block size DIFFERED, which on
+    the very first call means "differs from zero" - so it threw away a value setState had just
+    restored, if the host happened to call in that order. It now only discards on a LATER change,
+    which is a genuine reconfiguration.
+  - A stale saved value is safe only because the retune now corrects in BOTH directions. Those two
+    changes had to land together; either alone would have been a bug.
+
+The round trip has its own check, since surviving a save is the whole point of the field.
+
+2026-09-08 (18)  THE 4 ms IS THE MEAN CALLBACK LEAD, AND THE FIRST RING WAS SIZED ON HALF A CYCLE
+--------------------------------------------------------------------------------------------------
+CT, with recording "almost bang on": a KRONOS measuring 11.2 ms records 4 ms early, and an Analog
+Rytm is 4 ms early too. Two different synths, the same error - so it is ours, not theirs.
+
+HIS OWN LOG RULED OUT THE RING IN ONE LINE:
+
+    latency 1661 = pipeline 1081 (setpoint would say 1124: ring 880 + device 212 + filter 32)
+                 + measured 538
+
+Measured pipeline and setpoint estimate agree to 43 frames. The error is in the MEASURED term, and
+4 ms is 192 frames, which is exactly (512 - 128) / 2 - the mean frames already handed over inside a
+callback when a host delivers 512 in four 128s.
+
+THE TERM HAS NOW BEEN GOT WRONG THREE WAYS, and the third is right:
+
+  - absent (the original): the round trip carries the average as a constant BIAS, 4 ms here;
+  - per block (2026-09-08 (5), reverted): correct on average and disastrous in variance, because a
+    block's own lead is 0, 128, 256 or 384 and that lands straight in the answer - the spread went
+    from 0.2 ms to 7.3 ms;
+  - as a CONSTANT MEAN, which is what it always should have been. (burst - call) / 2 has no
+    per-block variance and removes the bias. The Rytm went from 12.5-13.5 ms to 8.9-9.9.
+
+The distinction is worth holding on to: a quantity can be right in expectation and wrong to use
+sample by sample. The measurement is invariant to WHICH call detects the onset - that is proved and
+was the reason for the revert - but it is not invariant to the average.
+
+AND THE FIRST RING WAS SIZED ON HALF A CALLBACK. CT: a Rytm at a 64 frame device buffer came up with
+setpoint 560, and switching the buffer to 128 and back settled it at 880. Both are 1.25 * (burst +
+64 + 128) - one for a 256 frame callback, one for the true 512. The burst measurement needs an
+undisturbed callback to be right and a project load is the least undisturbed moment there is: a busy
+load separates back-to-back calls by more than half a block, the boundary test reads two cycles, and
+the count comes out half.
+
+So the declaration is the floor while the retune is still WATCHING, and the observation is used as it
+stands once it has settled - which is what the retune is for, and a reopen must not throw away what
+it reclaimed. Getting that second half wrong broke "a reopen keeps the tuned setpoint" by 480
+samples, and the check caught it immediately.
+
 2026-09-08 (17)  IT WAS NEVER SAVED - AND NOBODY ASKED FOR AN HOUR
 --------------------------------------------------------------------------------------------------
 "Saving at 64 seems to have fixed it!" The buffer size lives in the project state, the project had
