@@ -24,8 +24,8 @@
 //
 // The substitution the whole plug-in rests on is smaller than it looks: process() consumes blocks on
 // a clock that is not the capture device's, which is exactly what the proof of concept's output
-// IOProc did. Everything underneath - poc/ring.c, poc/drift.c, poc/resampler.c - is the same code,
-// unchanged and shared with the command line tool.
+// IOProc did. Everything underneath - SynthLib/audio/ring.c, poc/drift.c, poc/resampler.c - is the
+// same code, unchanged and shared with the command line tool.
 
 #include <math.h>
 #include <stdio.h>

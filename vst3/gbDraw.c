@@ -548,7 +548,7 @@ void gb_draw_init(void) {
     });
 
     // contextMenu.c reaches back for the pointer position through this rather than declaring its own
-    // extern - see synthlibHost.h. The redraw half is already covered by gbAppStubs.c. No
+    // extern - see synthlibHost.h. The redraw half is already covered by SynthLib/plugin/pluginStubs.c. No
     // pointerCaptured predicate: this panel never hides the pointer for a drag.
     synthlib_host_init((tSynthLibHost){ .mouseCoord = gb_mouse_coord, .pointerCaptured = NULL });
 

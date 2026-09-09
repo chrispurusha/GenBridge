@@ -1481,3 +1481,10 @@ menu that already writes the pref and a window that already applies it. Moving G
 default flip and a decision to retire the GL path. What actually blocks it sharing the plug-in view is
 scope: its view is 652 lines because that plug-in shows the whole editor canvas, where these two show
 a fixed panel.
+
+METAL ONLY ON macOS, INHERITED (2026-09-09). SynthLib's renderBackendSelect.h now defines
+SYNTHLIB_NO_GL_BACKEND on every Apple target, so this plug-in's build lost the OpenGL backend without
+a line of its own changing - its view has only ever chosen Metal. renderBackendGL.c stays in do-vst3's
+source list, where it compiles to nothing on macOS and is the whole renderer for the Windows and
+Linux builds to come; -framework OpenGL is off the link line, and nm reports zero undefined gl*
+symbols. SYNTHLIB_ALLOW_GL_ON_APPLE brings it all back for an A/B.
