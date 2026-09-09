@@ -13,8 +13,12 @@ BIN="$OUT/genbridge"
 
 SOURCES=(
     "$HERE/poc/genbridge.c"
-    "$HERE/poc/device.c"
-    "$HERE/poc/ring.c"
+
+    # The device and the ring are SynthLib's now - see the header of SynthLib/audio/device.c. The
+    # command line tool uses them exactly as the plug-in does, which is why they are in an audio/
+    # directory rather than a plugin/ one.
+    "$HERE/SynthLib/audio/device.c"
+    "$HERE/SynthLib/audio/ring.c"
     "$HERE/poc/resampler.c"
     "$HERE/poc/drift.c"
     "$HERE/poc/selftest.c"
@@ -36,6 +40,7 @@ for ARCH in arm64 x86_64; do
         -O2 \
         -Wall -Wextra -Werror \
         -I"$HERE/poc" \
+        -I"$HERE/SynthLib/audio" \
         -framework CoreAudio \
         -framework CoreFoundation \
         -o "$OUT/genbridge-$ARCH" \

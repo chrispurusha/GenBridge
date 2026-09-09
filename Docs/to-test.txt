@@ -3,6 +3,15 @@ GenBridge TO TEST
 Finished code that is built but not yet checked against a real host or real hardware.
 Confirmed -> delete the line. Check failed -> move it to todo.txt.
 
+- THE C CONVERSION (2026-09-09), which is verified everywhere except in a host: vst3check is line
+  for line what the C++ build produced, the editor screenshots are byte-identical and 35 of 50 moved
+  functions normalise to the original exactly - but nothing has been loaded into Ableton. Open a
+  saved session with two instances, confirm each opens its own device once, the panel figures move,
+  the meters run, Measure produces a figure and the saved state comes back. See findings 2026-09-09.
+- THAT THE SAVED FORMAT STILL ROUND-TRIPS THROUGH A REAL PROJECT, which is the one thing the
+  conversion rewrote rather than moved: the blob parser and writer went from std::string to a byte
+  walk. vst3check covers a v3 blob and the version-1 and -2 paths are UNEXERCISED - open a project
+  saved by an older build if one still exists, and confirm the device, buffer and trim come back.
 - Note timing vs host buffer size (the reason recorded parts crept earlier as the buffer grew), and the reordering that followed the first attempt at it: events are stamped with their own sampleOffset, blocks computed back to back in one callback are stamped a block apart rather than together, and CCs/bend/pressure go out on the same clock as the notes. Both halves have vst3check checks, so what needs a real host is the EAR: play repeated notes and a bend through a hardware synth at 128, 512 and 2048 and confirm nothing cuts, sticks or arrives before the note it belongs to. Then record a quantised clip at all three and confirm the transient sits in the same place
 - Ring size at the FIRST open after a save: set the buffer, save, reload, and confirm from /tmp/genbridge.log that the ring opens straight at 880 with NO "retuned UP" line and no second reopen - the callback size is now saved with the project. Then change Live's buffer size and confirm it retunes to the new value rather than trusting the stale one
 - THE 4 ms: record through both synths again with the measured figure in force and the trim at zero. The measurement no longer carries the mean callback lead as a bias, which on this rig moved an Analog Rytm from 12.5-13.5 ms to 8.9-9.9 - so a take that was 4 ms early should now land. If a residual remains it is the synth's own attack against the detector, which is what the trim is for

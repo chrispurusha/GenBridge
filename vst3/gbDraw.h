@@ -27,6 +27,7 @@ extern "C" {
 #include <stdbool.h>
 
 #include "device.h"
+#include "gbParams.h"
 
 // The editor's contents, drawn through SynthLib's renderer - the same render_rectangle(),
 // render_text() and draw_button() the sibling applications use, so this cannot drift away from
@@ -69,9 +70,8 @@ typedef struct {
 // a Kronos while the panel said Analog Keys.
 //
 // So: the slot count is fixed, every caller uses these two functions, and the only thing that
-// varies is how many of the slots currently point at a real device.
-#define GB_DEVICE_SLOTS    (DEVICE_MAX)
-
+// varies is how many of the slots currently point at a real device. GB_DEVICE_SLOTS is in
+// gbParams.h, with every other scale the panel and the wrapper have to agree about.
 int    gb_device_slot(double normalized);           // normalised -> slot index
 double gb_device_normalized(int slot);              // slot index -> normalised
 int    gb_input_device_count(void);                 // how many slots point at something real
@@ -79,12 +79,6 @@ int    gb_input_device_channels(int index);        // input channels on that slo
 void   gb_input_device_name(int slot, char * out, unsigned long len);
 int    gb_slot_for_uid(const char * uid);           // -1 when the device is not present
 void   gb_device_list_invalidate(void);             // after a change, so the next read is fresh
-
-// The stepper lists, shared with the processor so the two cannot disagree about what index 2 means.
-extern const double gGbRates[];
-extern const int    gGbFrames[];
-extern const int    gGbRateCount;
-extern const int    gGbFrameCount;
 
 void gb_draw_init(void);
 void gb_draw_set_status_slot(int slot);

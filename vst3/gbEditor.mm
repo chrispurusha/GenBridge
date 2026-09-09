@@ -41,34 +41,30 @@
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 
 #include "gbEditor.h"
+#include "gbLog.h"
 #include "gbView.h"
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
 
-// Same gate as the processor's log_line(): touch /tmp/genbridge-log to turn it on. Resize is
-// negotiated between host and plug-in over several calls per pointer move, and no amount of staring
-// at the code shows which rects a given host actually asks for - two versions of
-// checkSizeConstraint() were reasoned out and both were wrong. This is how the next one gets
-// evidence instead.
+// THROUGH gbLog.c, not a second copy of it. Resize is negotiated between host and plug-in over
+// several calls per pointer move, and no amount of staring at the code shows which rects a given
+// host actually asks for - two versions of checkSizeConstraint() were reasoned out and both were
+// wrong. This is how the next one gets evidence instead.
+//
+// It used to open the file itself, with the gate path and the output path written out again here.
+// That is how the sibling project ended up logging its editor into GENBRIDGE's log file, gated on
+// GenBridge's file, because the whole function was copied across (fixed there the same day). One
+// implementation means one gate, one path, and the "[name pid]" attribution every other line has.
 static void gb_editor_log(const char * format, ...) {
-    if (access("/tmp/genbridge-log", F_OK) != 0) {
-        return;
-    }
-
-    FILE * file = fopen("/tmp/genbridge.log", "a");
-
-    if (file == nullptr) {
-        return;
-    }
+    char    line[512];
     va_list args;
 
     va_start(args, format);
-    fprintf(file, "[editor] ");
-    vfprintf(file, format, args);
-    fprintf(file, "\n");
+    vsnprintf(line, sizeof(line), format, args);
     va_end(args);
-    fclose(file);
+
+    gb_log_line("[editor] %s", line);
 }
 
 class GenBridgeEditorView : public IPlugView {

@@ -209,8 +209,18 @@ without the licence notices FreeType and the VST3 SDK require - see `THIRD_PARTY
 Built the way G2-Edit's is: a script rather than an Xcode target, against `pluginterfaces/` only,
 with no CMake, no vstgui and no `public.sdk` helper classes beyond the four translation units that
 do nothing but instantiate interface IDs - `funknown.cpp`, `coreiids.cpp`, `vstinitiids.cpp` and
-`commoniids.cpp`. The bridge core in `poc/` is compiled in unchanged - only the CLI and
-the self-test stay behind.
+`commoniids.cpp`. The bridge core is compiled in unchanged - the resampler and the drift loop from
+`poc/`, and the device and the ring from `SynthLib/audio/`, which the command line tool builds from
+too. Only the CLI itself and the self-test stay behind.
+
+**The plug-in is C. `vst3/gbVst3.cpp` is the only C++ file in it, and it holds the COM plumbing and
+nothing else** - vtables, reference counting, class registration, and the conversions into VST3's own
+shapes. What GenBridge *does* is in `vst3/gbBridge.c` (the device, the ring, the clock),
+`vst3/gbMeasure.c` (the round-trip measurement), `vst3/gbState.c` (the saved format),
+`vst3/gbParams.c` (what the parameters are) and `vst3/gbDraw.c` (the panel), which is also what lets
+the same code be read - and in places shared - by the sibling projects. The rule is simple enough to
+apply while writing: if a piece of code would still make sense in a command line tool, it does not
+belong in the wrapper.
 
 `tools/do-vst3host` builds two harnesses for exercising the plug-in outside a DAW:
 

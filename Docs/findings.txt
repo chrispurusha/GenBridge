@@ -1325,3 +1325,159 @@ armchair has been wrong every single time.
 WHAT TO DO NEXT, AND IT IS NOT ANOTHER GUESS. gb_editor_log() now records every checkSizeConstraint
 in/out and every onSize, behind the same /tmp/genbridge-log gate as the processor. Reproduce the jump
 with the gate on and read the sequence. The answer is in that log; it has never been in the source.
+
+
+==========================================================================
+2026-09-09  THE PLUG-IN IS NOW C, WITH THE VST3 WRAPPER AS THE ONLY C++
+==========================================================================
+
+gbVst3.cpp was 5,220 lines and held everything: the device life cycle, the ring and the drift loop's
+callers, the block timeline, the latency arithmetic, the round-trip measurement, the saved format,
+the parameter table AND the COM plumbing. It is now 1,295 lines and holds the last of those alone.
+
+WHERE IT WENT
+
+    vst3/gbBridge.c       2,313   the device, the worker, the audio path, the latency arithmetic
+    vst3/gbState.c          723   the saved blob: parsing, writing, and the per-device tables
+    vst3/gbMeasure.c        578   the round-trip measurement and its storage
+    vst3/gbParams.c         268   what the parameters ARE, and how a value reads
+    vst3/gbLog.c             79   the file-gated log
+    vst3/gbBridgePrivate.h  516   tGbBridge itself, which the wrapper never sees
+    vst3/gbVst3.cpp       1,295   COM: four classes, the factory, and the conversions
+
+WHY IT IS AN OPAQUE POINTER. The bridge's state carries C11 _Atomic members, which C++ cannot parse
+at all - so the struct is defined in gbBridgePrivate.h, included only by the three .c files, and the
+wrapper holds a tGbBridge *. That is not a workaround for the language boundary, it IS the boundary:
+the C side keeps the tool that fits (52 atomics, declared as what they are) and the wrapper cannot
+reach past the API even by accident.
+
+THE SEAM, which is the only part that had to be designed rather than moved. A ProcessData becomes
+four calls - gb_bridge_block_begin(), then a gb_bridge_parameter() per queue and a gb_bridge_note()
+per event, then gb_bridge_render(). Walking IParamValueQueue and IEventList is the wrapper's job
+because they are C++ interfaces; deciding what a value MEANS is the bridge's. An IBStream becomes a
+block of bytes. And the two things only the wrapper can do - making an IMessage and reaching the
+component handler - are a two-function tGbHostOps the bridge posts through, because only the
+CONTROLLER can call restartComponent and a processor never sees an IComponentHandler.
+
+WHAT WAS VERIFIED, and it is worth listing because a refactor this size is exactly where a silent
+change hides:
+
+  - 35 of the 50 moved functions are IDENTICAL to the originals after normalising the mechanical
+    differences (self->, _Atomic for std::atomic, gb_ prefixes, char arrays for std::string). The
+    other 15 differ ONLY in those same ways plus four deliberate ones: the overload
+    minimum_setpoint_for() split into two names, kAfterTouch/kPitchBend replaced by the asserted
+    GB_CC_* constants, open_capture_locked() taking a pointer where it took a reference, and
+    deviceSelector assigned with snprintf. Checked by script, function by function, against
+    git HEAD.
+  - vst3check's output is LINE FOR LINE what the C++ build produces on the same rig, run back to
+    back. (One check fails on both: the "MIDI destination restored by name" case that is already on
+    the todo, which needs the KRONOS switched on.)
+  - The editor screenshots from tools/vst3host are BYTE-IDENTICAL between the two builds, and both
+    report 2091 parameters.
+  - The retune figure vst3check reports varies run to run on BOTH builds - it is the checker's own
+    timing sensitivity, not a difference between them. Six runs of the C build gave 34.4 ms every
+    time; six of the C++ build gave 34.4 four times, 44.4 once and 161.8 once.
+
+TWO THINGS THE MOVE FOUND ON ITS OWN
+
+  1. latency_worth_reporting() had NO CALLER, and had not had one since the reported latency went
+     back to being the setpoint on 2026-09-08. C++ says nothing about an unused private member
+     function; C warns about an unused static one, so eleven lines of dead code fell out of the
+     build the moment it moved. Removed. GB_LATENCY_DEADBAND stays with a note - it is the answer to
+     a question that can come back if the measured pipeline is ever reported again.
+  2. GB_CHANNEL_SLOTS, GB_MAX_FIRST_CHANNEL and the offset range were defined TWICE - once in
+     gbDraw.c and once in the wrapper - so the panel's idea of a scale and the host's could have
+     drifted apart without a compiler anywhere to say so. That is the same fault gb_device_slot()
+     already carries a note about ("the symptom was hearing a Kronos while the panel said Analog
+     Keys"). They now live once, in gbParams.h, with the parameter table that uses them.
+
+AND TWO THINGS THE COMPARISON ITSELF FOUND, which is the argument for building one rather than
+reading the diff and hoping:
+
+  - getParameterInfo() no longer ZEROED the caller's ParameterInfo before refusing an index. The C++
+    version memset it at the top and then returned kInvalidArgument; the first C version returned
+    before touching it, so a caller that ignores the return - and a caller looping over indices
+    reuses one struct - saw the PREVIOUS parameter's details instead of nothing. Restored, and the
+    two builds then produced byte-identical output through the same harness.
+  - THE EFFECT ADVERTISES ONE PARAMETER MORE THAN IT HAS. Five of the eleven are instrument-only and
+    the count subtracts four, so index 6 (kParamMidiDest) is inside getParameterCount()'s answer and
+    getParameterInfo() refuses it. That is not new - every build has done it - and it is deliberately
+    NOT fixed here, because a conversion that also changes what a host is told is a conversion nobody
+    can check. It is on the todo, where it is one character.
+
+AND ONE THING IT COULD NOT REMOVE. GB_CC_PER_CHANNEL, GB_CC_AFTERTOUCH and GB_CC_PITCHBEND are the
+SDK's kCountCtrlNumber, kAfterTouch and kPitchBend written out as numbers, because ivstmidicontrollers.h
+is a C++ header the C side cannot include. Three static_asserts in gbVst3.cpp stop the two drifting:
+if Steinberg ever renumbers them, the build stops rather than the pedal going to the wrong place.
+
+
+2026-09-09  THREE SMALL BUGS, AND WHERE THEY CAME FROM
+
+THE EFFECT ADVERTISED A PARAMETER IT DID NOT HAVE. GB_PARAMS_INSTRUMENT_ONLY was 4 where five of the
+eleven parameters are instrument-only, so getParameterCount() said 7 and getParameterInfo(6) answered
+kInvalidArgument. Now 5, and vst3check's line reads "the effect 6". Found by the C conversion putting
+the count and the table in the same file; invisible while they were 200 lines apart in a class.
+
+THE EDITOR HAD ITS OWN LOGGER, AND THE SIBLING PROJECT INHERITED OURS. gbEditor.mm opened the log
+file itself, with the gate path and the output path written out a second time. MidiSyncTool's editor
+is a copy of it and kept BOTH paths: touching /tmp/midisynctool-log did nothing for its resize lines,
+and touching /tmp/genbridge-log put them in THIS project's log file with no attribution. Both now go
+through their own project's log_line(), so there is one gate, one path and the "[name pid]" prefix
+every other line has. Fixed in both.
+
+AND THE AUDIT THAT FOUND THEM. With GenBridge in C, the three plug-ins can be compared file by file:
+
+    gbAppStubs.c   vs msAppStubs.c   98%      the same file
+    poc/ring.c     vs msRing.c       97%      the same file
+    poc/device.c   vs msDevice.c     96%      WAS the same file - see below
+    gbView.m       vs msView.m       91%      same job, small per-project interface
+    gbEditor.mm    vs msEditor.mm    78%      same job, per-project parameter mapping
+    g2Editor.mm    vs gbEditor.mm    25%      G2-Edit's plug-in predates this shape
+    g2GlView.m     vs gbView.m       10%      G2-Edit draws through GL, not Metal
+
+THE 96% WAS THE INTERESTING ONE. device.c and msDevice.c both carry a comment saying they are verbatim
+copies and to fix a bug in both - and two GenBridge fixes had never reached the other copy: the
+CONFIRMED buffer-size setter, and device_wait_until_idle(). MidiSyncTool's own todo had the first as
+"dormant, nothing calls it", which was wrong: its measurement harness calls it on every run, and could
+therefore label a run with a block size the device had not taken yet. Both ported; the two files are
+now identical apart from the header comment and the include line. Written up in MidiSyncTool's
+findings, since that is where the consequence lands.
+
+WHAT THE AUDIT DID NOT FIND, which is worth recording so it is not re-run: the Metal layer
+attach/detach pair (the crash that took Live down) is present in all three; kInfiniteTail is declared
+in all three; the dangling editor-view pointer is guarded in GenBridge and MidiSyncTool and cannot
+happen in G2-Edit, which never keeps the pointer; and checkSizeConstraint is history-free in all
+three, so the oscillation fixed here on 2026-09-08 cannot occur in the others.
+
+
+2026-09-09  device.c, ring.c AND THE STUBS ARE SynthLib's NOW
+
+Moved into two new directories in the submodule - SynthLib/audio/ for the device and the ring,
+SynthLib/plugin/ for pluginStubs.c - and this project builds against them. poc/device.c, poc/ring.c
+and vst3/gbAppStubs.c are gone.
+
+NOT SynthLib/src, AND THE REASON IS NOT TIDINESS. SynthLib/src is a PBXFileSystemSynchronizedRootGroup
+in G2-Edit's Xcode project and it RECURSES, so a file put there is compiled into that application
+whether it wants it or not - a plug-in-only file would collide with the application's own definitions
+and nothing would say so until the link. The new directories are outside it and every file in them is
+listed by hand in a do-vst3 / do-poc, which is how those scripts already treat SynthLib's sources.
+
+VERIFIED BY THE SAME THREE HARNESSES as the C conversion: vst3check line for line identical to the
+run before the move, the state round-trip identical across all five blobs, and the command line tool
+still self-tests and enumerates devices. The move changed no code - the diffs are the header comments
+and the include paths.
+
+WHAT IS STILL DUPLICATED, and it is now written down in SynthLib/TODO.md rather than in three
+projects' heads: gbView.m/msView.m at 91% and gbEditor.mm/msEditor.mm at 78%. Both are the same job
+with a small per-project interface. They were deliberately left out of this pass so that a move of
+IDENTICAL files stays checkable; generalising two files and moving four in one go would have made a
+failure impossible to attribute.
+
+AND THE THING THAT TURNED OUT NOT TO BE TRUE: that G2-Edit's plug-in is on OpenGL and would have to be
+ported before it could share any of this. It calls gfx_backend_choose(eRenderBackendMetal) in
+g2GlView.m like the other two - the file name is historical. What is on OpenGL is the G2-Edit
+APPLICATION, and only by default: RENDER_BACKEND_DEFAULT in renderBackendSelect.h, with a Renderer
+menu that already writes the pref and a window that already applies it. Moving G2-Edit to Metal is a
+default flip and a decision to retire the GL path. What actually blocks it sharing the plug-in view is
+scope: its view is 652 lines because that plug-in shows the whole editor canvas, where these two show
+a fixed panel.

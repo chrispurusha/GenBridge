@@ -21,18 +21,31 @@ if [[ ! -d "$SDK/pluginterfaces" ]]; then
     exit 1
 fi
 
-# The bridge core, shared verbatim with the command line tool in poc/. Deliberately NOT
-# genbridge.c or selftest.c - those are the CLI and the measurement harness, and if this list ever
-# needs one of them, something that should have stayed reusable has grown a dependency on main().
+# THE PLUG-IN, WHICH IS ALMOST ALL OF IT. poc/ is the bridge core, shared verbatim with the command
+# line tool - deliberately NOT genbridge.c or selftest.c, which are the CLI and the measurement
+# harness, and if this list ever needs one of them, something that should have stayed reusable has
+# grown a dependency on main().
+#
+# vst3/ is everything else: gbBridge.c and gbMeasure.c are the plug-in's behaviour, gbState.c its
+# saved format, gbParams.c what its parameters are, gbDraw.c its panel. All C. The one C++ file in
+# the build is gbVst3.cpp, which is the COM plumbing and nothing else - see its header.
 C_SOURCES=(
-    "$HERE/poc/device.c"
-    "$HERE/poc/ring.c"
+    # SHARED, in SynthLib but NOT in SynthLib/src - see the header of audio/device.c. Both of these
+    # were duplicated in MidiSyncTool and had already drifted apart; there is one copy now.
+    "$HERE/SynthLib/audio/device.c"
+    "$HERE/SynthLib/audio/ring.c"
+    "$HERE/SynthLib/plugin/pluginStubs.c"
+
     "$HERE/poc/resampler.c"
     "$HERE/poc/drift.c"
+    "$HERE/vst3/gbLog.c"
+    "$HERE/vst3/gbParams.c"
+    "$HERE/vst3/gbBridge.c"
+    "$HERE/vst3/gbMeasure.c"
+    "$HERE/vst3/gbState.c"
     "$HERE/vst3/gbStatus.c"
     "$HERE/vst3/gbMidi.c"
     "$HERE/vst3/gbDraw.c"
-    "$HERE/vst3/gbAppStubs.c"
 
     # SynthLib, and only the parts a plug-in panel needs. Deliberately NOT the menu bar, the popup
     # or context-menu system, the file or bank browsers, or synthlibWindow.c - the first four are
@@ -84,7 +97,8 @@ DEPLOYMENT_TARGET=11.5
 # enum leakage rather than a dependency, so the library itself is never built or linked. freetype is
 # the one real library the renderer needs, taken as a static build so the bundle stays self
 # contained.
-INCLUDES=(-I"$HERE/poc" -I"$HERE/vst3" -I"$HERE/SynthLib/src" -I"$SDK"
+INCLUDES=(-I"$HERE/poc" -I"$HERE/vst3" -I"$HERE/SynthLib/src"
+          -I"$HERE/SynthLib/audio" -I"$HERE/SynthLib/plugin" -I"$SDK"
           -I"$HERE/SynthLib/ThirdParty/glfw/include"
           -I"$HERE/SynthLib/ThirdParty/freetype/include")
 

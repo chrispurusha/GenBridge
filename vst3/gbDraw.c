@@ -67,13 +67,7 @@
 
 // The lists the stepper parameters index into. These must agree with the processor's own mapping,
 // which is why both read them from here rather than each keeping a copy.
-const double gGbRates[]    = { 44100.0, 48000.0, 88200.0, 96000.0 };
-// Down to 16, which no USB device will accept but built-in and Thunderbolt hardware sometimes will.
-// A device that cannot go that low says so through kAudioDevicePropertyBufferFrameSizeRange, and
-// the request is clamped rather than failing - see the clamp in the plug-in's open path.
-const int    gGbFrames[]   = { 16, 32, 64, 128, 256, 512, 1024 };
-const int    gGbRateCount  = (int)(sizeof(gGbRates) / sizeof(gGbRates[0]));
-const int    gGbFrameCount = (int)(sizeof(gGbFrames) / sizeof(gGbFrames[0]));
+// The stepper lists are defined in gbParams.c, beside the parameter table that scales them.
 
 static bool   gFontReady  = false;
 
@@ -180,7 +174,6 @@ static double gOffset    = 0.5;
 static double gTestNote  = 60.0 / 127.0;
 static double gMidiChan  = 0.0;
 
-#define GB_CHANNEL_SLOTS    (17)
 
 // Which processor's figures this panel shows. -1 until the host has connected the two ends, which
 // it may do before or after the editor opens - so the panel simply shows no live figures until it
@@ -220,7 +213,6 @@ static double measure_y(void)   { return level_y() + 40.0; }
 static double offset_y(void)    { return measure_y() + 34.0; }
 static double telemetry_y(void) { return (gInstrument ? offset_y() : level_y()) + 42.0; }
 
-#define GB_MAX_FIRST_CHANNEL    (32)
 
 // ROWS 0-2 ARE DROP-DOWNS AND HAVE NO ARROWS. Two controls for one setting is clutter, and a menu
 // that lists every choice at once makes stepping past them pointless.
@@ -251,8 +243,6 @@ static tRectangle row_value(int row) {
 
 #define RIGHT_GUTTER    (74.0)     // room for the trim readout, which sits outside the track
 
-#define GB_OFFSET_MIN_MS    (-100.0)
-#define GB_OFFSET_MAX_MS    (100.0)
 
 // TWO STEP SIZES, because one cannot do both jobs - the same conclusion MidiSyncTool's panel came
 // to. The coarse step has to reach a synth's figure from nothing without a hundred clicks; the fine
