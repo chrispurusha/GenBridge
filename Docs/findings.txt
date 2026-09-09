@@ -1735,3 +1735,43 @@ came back as 700x748, and 748/700 IS the old aspect. It now asserts that the WID
 HEIGHT is recomputed - and it takes GB_CANVAS_W/H from gbDraw.h instead of restating them, because a
 check carrying its own copy of a number cannot notice the number changing, which is the whole fault.
 tools/do-vst3host gained the include paths that needs.
+
+BOTH ENDS CAN MAKE THE CONNECTION (2026-09-09, CT on Live 12)
+
+An audio track's `Audio To` pointed straight at the GenBridge track's DEVICE works, and needs no
+side-chain configuration at all - the plug-in simply receives what the track sends. The side-chain
+`Audio From` route works too. They are the same connection made from opposite ends, and the push
+version is the simpler thing to tell someone.
+
+What neither avoids is the audio track itself: a MIDI track's own routing cannot take a hardware
+input, which is exactly why Live's External Instrument asks for one in its own panel rather than
+through a routing. The hop costs a track and nothing else.
+
+WHAT TO MEASURE WITH, which turns out to deserve its own section in the README rather than a clause.
+The detector is a level threshold above a measured noise floor, so the SOUND decides how good the
+figure is, and two properties matter for reasons already recorded in this file:
+
+  - A FAST ATTACK, because the onset is timed at the threshold crossing. A slow attack crosses late,
+    the round trip comes back longer than it is, and the host compensates too far - takes land early.
+    This is the same mechanism as the 4 ms callback-lead bias, arriving from a different direction.
+  - A SHORT DECAY, because between trips the run waits for quiet before taking the next floor. A
+    floor taken over a ringing tail is too high for the next note to cross, which is what lost four
+    trips out of five before the settle phase learned to wait for silence rather than for a duration.
+
+Hence CT's suggestion, now in the README: keep a dedicated percussive program on the synth for
+measuring. Reaching for whatever is loaded means every measurement is of a different sound and the
+figures cannot be compared; a known program in a known location makes a change in the number mean
+something about the RIG rather than about the patch.
+
+CONFIRMED: 19.8 -> 17.3 ms (2026-09-09, CT, same rig and arrangement)
+
+The prediction written above was "about 17.8 rather than 19.8, and the take should land with no trim
+at all". It came back at 17.3, which is half a millisecond from the figure CT had reached by hand -
+inside the judgement the detector and the patch leave anyway, and well inside the 2.0 ms the missing
+callback-lead correction was costing. The mean callback lead was the term.
+
+Worth keeping for the next time a measurement looks wrong by a millisecond or two: BOTH of the
+biases found on this synth came from the same place - a block of audio arriving somewhere other than
+where the arithmetic assumed - and neither was visible in the result. One was the lead being counted
+(2.0 ms), the other was it not being counted at all (4 ms, 2026-09-08). The log line added today
+names the terms so the next one is read rather than deduced.

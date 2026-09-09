@@ -334,7 +334,13 @@ WHAT IS IN HERE
 GenBridge captures audio from an audio device your DAW is NOT using - a synth's
 own USB output, a second interface - and plays it into a track, staying in sync
 with your project as it goes. The instrument version also sends MIDI out, so a
-hardware synth can be played from a MIDI clip and recorded back in one device.
+hardware synth can be played from a MIDI clip and recorded back in one device,
+and it MEASURES how late the synth answers so your DAW can line the recording up
+by itself.
+
+The instrument can take its audio two ways: from an audio device it opens itself,
+or from your DAW's own input. The second is the arrangement Ableton calls an
+External Instrument - with the hardware latency measured rather than typed in.
 
 STEP 1 - INSTALL
 
@@ -386,6 +392,65 @@ is usually enough. Two devices appear, both by Chris Purusha:
 
 If only one of them appears, your host has cached an older scan - force a
 rescan in its plug-in preferences.
+
+STEP 4 - SETTING IT UP
+
+The EFFECT is one control: choose a Device, and its audio appears on the track.
+
+The INSTRUMENT sends MIDI to a hardware synth and takes its audio back. Set
+"MIDI Out" to the synth, "Channel" to whatever it listens on, and then choose
+where the audio comes from with the "Source" row at the top:
+
+  Source = Audio device
+
+    GenBridge opens the device itself. Choose it in the Device row, along with
+    the rate, buffer size and which input pair to take. Use this when the synth
+    has its own USB audio output, or is on an interface your DAW is not using.
+
+  Source = Host input
+
+    GenBridge takes the audio your DAW hands it, and opens nothing. The Device,
+    Rate, Buffer and Input rows grey out, because there is no device for them to
+    describe. Use this when the synth is plugged into the same interface your DAW
+    is already using.
+
+    Your DAW has to route that audio to the plug-in. In Ableton Live, make an
+    audio track whose input is the socket the synth is plugged into, set its
+    Monitor to In, and then either:
+
+      - set that audio track's "Audio To" to the GenBridge track's device, or
+      - set GenBridge's own side-chain "Audio From" to that audio track.
+
+    Either works; the first needs nothing configured on the plug-in. What does
+    NOT work is pointing it at GenBridge's own track - that is a feedback loop,
+    Live mutes it, and the panel says "NO AUDIO from the host" to tell you so.
+
+    A MIDI track cannot take a hardware input directly, which is why the audio
+    track is needed at all.
+
+MEASURING THE LATENCY
+
+Press Measure. GenBridge plays a note, listens for it coming back, does it five
+times and reports how long the synth and the wiring take. The figure lands in
+"In use", which is what gets reported to your DAW - so recordings line up on the
+beat without you working anything out. You can nudge it by hand afterwards.
+
+WHAT IT MEASURES WITH MATTERS. It listens for the sound crossing a level, so:
+
+  - Use a sound with a FAST ATTACK. A slow one crosses the level late, the
+    figure comes back too long, and your recordings end up slightly early.
+  - Use one that goes QUIET QUICKLY. Between attempts it waits for silence
+    before listening again, so long releases, reverb and delay make it worse.
+  - Keep a patch on the synth just for this, and use it every time. Measuring a
+    different sound each time gives a different answer each time.
+  - Check the Test Note actually makes a sound on that patch. It is C3 by
+    default, and a drum kit may have nothing there - the measurement then waits,
+    hears nothing and gives up.
+
+Anything in the audio path that does its own latency compensation will throw the
+figure off. An Ableton External Instrument device used as the source is the one
+to watch: set its Hardware Latency to zero while measuring, or use a plain audio
+track, which compensates nothing.
 
 BOUNCING AND FREEZING
 

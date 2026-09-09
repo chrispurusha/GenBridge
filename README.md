@@ -418,22 +418,27 @@ To set it up in Live:
    Rate, Buffer, Mode and Input rows grey out - there is no device being opened for them to describe.
 2. Set the plug-in's own **MIDI Out** row to the synth's MIDI destination, and **Channel** to
    whatever it listens on. This is the plug-in sending MIDI itself, not Live's `MIDI To`.
-3. Feed the plug-in's **side-chain** from an **audio track** whose input is the hardware input the
-   synth is plugged into, monitoring **In**. Tap it **Pre FX** or **Post FX** so the tap survives
-   muting that track.
+3. Get the synth's audio into the plug-in. It needs an **audio track** whose input is the hardware
+   input the synth is plugged into, monitoring **In** - a MIDI track's own routing cannot take a
+   hardware input, which is why Live's External Instrument asks for one in its own panel rather than
+   through a routing. From there, **either end can make the connection** and both are confirmed
+   working on Live 12:
 
-   A MIDI track's side-chain chooser does **not** offer `Ext. In` - that is why Live's own External
-   Instrument device asks for the hardware input in its own panel rather than through a routing.
-   Confirmed on Live 12; the audio-track hop is the way in, and it costs nothing but a track.
+   - **Push** - set the audio track's `Audio To` to the GenBridge track's device. Nothing to
+     configure on the plug-in at all; this is the simpler of the two.
+   - **Pull** - leave the audio track's output alone and set the plug-in's own side-chain
+     `Audio From` to that track, tapped **Pre FX** or **Post FX** so the tap survives muting it.
 4. **Never point the side-chain at the plug-in's own track.** That is a feedback loop, Live mutes it,
-   and the result is silence - the panel now says `NO AUDIO from the host` in amber rather than
-   leaving you to guess.
-5. Press **Measure** with the synth able to sound and nothing else feeding the side-chain.
+   and the result is silence - the panel says `NO AUDIO from the host` in amber rather than leaving
+   you to guess.
+5. Press **Measure** with the synth able to sound and nothing else feeding the input. See below for
+   what it should be playing.
 
 **Anything in that audio path doing its own latency compensation will bias the measurement.** An
 External Instrument device used as the source is the case to watch: Live is already pulling its
 return earlier by whatever its *Hardware Latency* field says, so the figure comes back short by that
-much. Set it to zero while measuring, or feed the side-chain from the hardware input directly.
+much. Set it to zero while measuring, or use a plain audio track, which compensates nothing of its
+own.
 
 The measurement is keyed on `(host input)` rather than a device UID in this mode, so a figure taken
 this way is never confused with one taken through a capture device - a different path and a different
@@ -460,6 +465,28 @@ reported latency.
 
 A measurement cannot separate the synth from its patch - a slow pad crosses the threshold later than
 a piano - so the last fraction of a millisecond stays a judgement. That is what the +/- is for.
+
+### What to measure with
+
+**Use a sound with a fast attack that goes quiet again quickly, and keep a patch on the synth for
+exactly this.** The detector is a level threshold above a measured noise floor, so the sound decides
+how good the number is:
+
+- **A fast attack is the measurement.** The onset is timed at the threshold crossing, and a slow
+  attack crosses it late - so the round trip comes back longer than it is and the host compensates
+  too far, putting takes early. A percussive sound with an immediate transient measures the wire and
+  the synth; a pad measures the pad.
+- **A short decay matters as much, and is easier to overlook.** Between trips the plug-in waits for
+  the input to go quiet before taking the next noise floor, and a floor taken over a ringing tail is
+  too high for the next note to cross - which used to lose four trips out of five. There is a ceiling
+  on that wait, so a sound that never decays does not hang the run; it just measures worse.
+- **No reverb, no delay, no long release.** They are decay by another name.
+- **A dedicated program on the synth is worth the slot.** Reaching for whatever is loaded means every
+  measurement is of a different sound, and the figures cannot be compared. A short percussive program
+  on a known location - the same one every time - makes the number repeatable and makes a change in
+  it mean something about the rig rather than about the patch.
+- **Check the test note actually sounds on it.** `Test Note` defaults to C3; a drum program may have
+  nothing there, and the run then times out having heard nothing.
 
 **The correction belongs to a (audio device, MIDI destination) pair**, not to the plug-in. The same
 synth reached over USB and over DIN answers at different speeds, and two synths on one interface are
