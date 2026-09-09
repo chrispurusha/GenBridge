@@ -26,8 +26,14 @@ clang++ -O2 -std=gnu++17 -fobjc-arc -Wall \
     -framework Cocoa
 
 # The headless companion: no window, different questions. See vst3check.cpp.
+#
+# IT INCLUDES A FEW OF THE PLUG-IN'S OWN HEADERS - gbStatus.h to read the live figures out of the
+# running instance, gbDraw.h for the canvas the editor size must match - so it needs the same include
+# paths those headers expect. Sharing the header rather than restating its constants is the point: a
+# check that carries its own copy of a number cannot notice the number changing, which is exactly the
+# fault the editor-size check exists to catch.
 clang++ -O2 -std=gnu++17 -Wall \
-    -I "$SDK" \
+    -I "$SDK" -I "$HERE/../vst3" -I "$HERE/../SynthLib/audio" -I "$HERE/../SynthLib/src" \
     -o "$HERE/vst3check" \
     "$HERE/vst3check.cpp" \
     "$SDK/public.sdk/source/vst/vstinitiids.cpp" \

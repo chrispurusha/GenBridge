@@ -1716,3 +1716,22 @@ confirmed on the rig rather than on paper.
 
 WHAT IT MEANS FOR THE MODE: nothing has to be subtracted for the host's input path. That figure was
 right as measured; only our own bias was missing.
+
+AND THE ROWS THAT WENT MISSING UNTIL A RESIZE (2026-09-09, same session)
+
+Adding the Capture Source row took GB_CANVAS_H from 556 to 592. The panel is drawn on a fixed logical
+canvas scaled by WIDTH alone, so a window whose height does not match that aspect loses whatever falls
+past its bottom edge - and the controller was RESTORING the saved editor height from the project. A
+session saved before the row existed therefore reopened at the old aspect, one row too short, with the
+bottom of the panel simply absent until the user dragged the window and checkSizeConstraint() put the
+aspect right.
+
+The height is now DERIVED from the restored width and the current canvas rather than read from the
+blob, which makes any future change of GB_CANVAS_H self-correcting for every session saved before it.
+The width is still restored, because that is the part the user chose.
+
+vst3check had encoded the bug rather than catching it: its round-trip check asserted that 700x748
+came back as 700x748, and 748/700 IS the old aspect. It now asserts that the WIDTH survives and the
+HEIGHT is recomputed - and it takes GB_CANVAS_W/H from gbDraw.h instead of restating them, because a
+check carrying its own copy of a number cannot notice the number changing, which is the whole fault.
+tools/do-vst3host gained the include paths that needs.
