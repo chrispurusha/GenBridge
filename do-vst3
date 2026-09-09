@@ -54,6 +54,9 @@ C_SOURCES=(
     # that becomes necessary has to be added by hand.
     "$HERE/SynthLib/src/utilsGraphics.c"
     "$HERE/SynthLib/src/renderBackend.c"
+    # COMPILES TO NOTHING ON macOS since SynthLib's 2026-09-09 change - renderBackendSelect.h defines
+    # SYNTHLIB_NO_GL_BACKEND on Apple, and this plug-in's view has only ever chosen Metal. Kept in
+    # the list because it is the whole renderer for the Windows and Linux builds to come.
     "$HERE/SynthLib/src/renderBackendGL.c"
     "$HERE/SynthLib/src/geometry.c"
     "$HERE/SynthLib/src/utils.c"
@@ -172,7 +175,7 @@ for ARCH in arm64 x86_64; do
     clang++ -arch "$ARCH" -mmacosx-version-min=$DEPLOYMENT_TARGET \
         -bundle \
         -framework CoreAudio -framework CoreMIDI -framework CoreFoundation -framework Cocoa \
-        -framework Metal -framework QuartzCore -framework OpenGL \
+        -framework Metal -framework QuartzCore \
         -o "$WORK/GenBridge-$ARCH" "${OBJS[@]}" "$FREETYPE_LIB"
 done
 
