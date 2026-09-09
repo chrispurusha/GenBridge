@@ -1488,3 +1488,14 @@ a line of its own changing - its view has only ever chosen Metal. renderBackendG
 source list, where it compiles to nothing on macOS and is the whole renderer for the Windows and
 Linux builds to come; -framework OpenGL is off the link line, and nm reports zero undefined gl*
 symbols. SYNTHLIB_ALLOW_GL_ON_APPLE brings it all back for an A/B.
+
+vst3check IS GREEN, AND ONE OF THOSE GREENS IS WORTH NOTHING (2026-09-09). All checks passed for the
+first time in a while the moment the KRONOS was switched on - because "MIDI destination restored by
+name" restores a blob naming KRONOS SOUND, so it tests whether that synth is powered up. The fallback
+it was meant to catch (an absent saved destination silently selecting the first port) is untouched
+and still on the todo. Nothing was fixed between the red and the green.
+
+That is the same rig coupling already recorded for two other checks in this file, and it is the
+argument for the fallback check being written the other way round: restore a name that is
+deliberately ABSENT, and assert nothing gets selected. A check that goes green when hardware appears
+is measuring the room.
