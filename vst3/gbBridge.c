@@ -926,6 +926,36 @@ void gb_reconfigure(tGbBridge * self) {
 
     int index = atomic_load(&self->wantedDevice);
 
+    // HOST INPUT OPENS NOTHING, and closes whatever was open. Holding a capture device while the
+    // audio is coming from the host would keep hardware nobody is listening to - and on a device
+    // that is also the host's own interface, it would keep imposing a buffer size on it.
+    if (atomic_load(&self->captureSource) == GB_SOURCE_HOST) {
+        pthread_mutex_lock(&self->configLock);
+        gb_close_capture_locked(self);
+        pthread_mutex_unlock(&self->configLock);
+
+        gb_publish_waiting(self, false, NULL);
+
+        tGbStatus * status = gb_status(atomic_load(&self->statusSlot));
+
+        if (status != NULL) {
+            snprintf(status->deviceName, sizeof(status->deviceName), "%s", "Host input");
+            atomic_store(&status->active, true);
+        }
+
+        // WHAT THE HOST IS TOLD IS THE CORRECTION AND NOTHING ELSE. gb_report_latency() adds the
+        // pipeline term to it, and with nothing open that term is already zero - nominalRatio is 0,
+        // so gb_internal_latency_frames() returns 0 rather than dividing by it.
+        uint32_t nowLatency = gb_report_latency(self);
+
+        if (nowLatency != atomic_load(&self->reportedLatency)) {
+            atomic_store(&self->reportedLatency, nowLatency);
+            gb_send_latency_changed(self);
+        }
+        gb_log_line("capture source: HOST INPUT - no device opened, latency %u samples", nowLatency);
+        return;
+    }
+
     gb_log_line("reconfigure: slot %d, saved uid '%s'", index, self->deviceSelector);
 
     // THE PARAMETER IS THE ONLY SELECTOR. It used to be one of two, with a saved UID as the
@@ -1173,7 +1203,7 @@ void gb_current_midi_name(tGbBridge * self, char * out, unsigned long len) {
 }
 
 void gb_remember_offset_pair(tGbBridge * self, const char * destination) {
-    snprintf(self->offsetUid, sizeof(self->offsetUid), "%s", self->deviceSelector);
+    snprintf(self->offsetUid, sizeof(self->offsetUid), "%s", gb_audio_key(self));
     snprintf(self->offsetDest, sizeof(self->offsetDest), "%s", destination);
 }
 
@@ -1181,7 +1211,10 @@ void gb_remember_offset_pair(tGbBridge * self, const char * destination) {
 // a latency update; the table write happens here instead, because gb_measured_for(self) can allocate a
 // slot and memmove the array and that has no business running under a process() call.
 void gb_sync_offset_to_pair(tGbBridge * self) {
-    if (!self->instrument || (self->deviceSelector[0] == '\0')) {
+    // THE KEY IS THE AUDIO SOURCE, which in host-input mode is not a device UID - see gb_audio_key().
+    // Testing deviceSelector here meant that in that mode there was no pair to fold the correction
+    // into, so a measured or nudged offset was never written down.
+    if (!self->instrument || (gb_audio_key(self)[0] == '\0')) {
         return;
     }
 
@@ -1189,7 +1222,7 @@ void gb_sync_offset_to_pair(tGbBridge * self) {
 
     gb_current_midi_name(self, destination, sizeof(destination));
 
-    tMeasured * entry = gb_measured_for(self, self->deviceSelector, destination, true);
+    tMeasured * entry = gb_measured_for(self, gb_audio_key(self), destination, true);
 
     if (entry != NULL) {
         entry->offsetMs = atomic_load(&self->offsetMs);
@@ -1995,11 +2028,19 @@ uint64_t gb_bridge_block_begin(tGbBridge * self, int32_t frames) {
     // anchored to the same clock and the difference between them is free of it.
     uint64_t blockHostTime = gb_block_host_time(self, frames);
 
-    // ONLY WHILE A DEVICE IS ACTUALLY RUNNING. Blocks handed over before one opens say nothing
-    // about what the ring will have to cover, and a host - or a checker - that drives a burst of
-    // them unpaced while nothing is open would leave a fictitious cycle length behind that the
-    // retune then treats as settled for the rest of the session.
-    if (atomic_load(&self->running)) {
+    // ONLY WHILE THERE IS AUDIO. Blocks handed over before anything opens say nothing about what the
+    // ring will have to cover, and a host - or a checker - that drives a burst of them unpaced while
+    // nothing is open would leave a fictitious cycle length behind that the retune then treats as
+    // settled for the rest of the session.
+    //
+    // BUT "AUDIO" IS NOT "A DEVICE", and testing self->running here cost 2.0 ms in the host-input
+    // mode (CT, 2026-09-09: measured 19.8, correct at 17.8). What the burst observation measures is
+    // how the HOST delivers blocks - its own property, as observedMaxFrames' note says - and
+    // gb_mean_callback_lead() is built on it. With no device open the observation never ran, the
+    // lead came out 0, and the constant bias it exists to remove went straight into every
+    // measurement. The comment on that subtraction in gbMeasure.c describes the same symptom on the
+    // same synth: "both a KRONOS and an Analog Rytm recorded 4 ms early on exactly that".
+    if (gb_capturing(self)) {
         gb_observe_burst(self, frames);
     }
 
@@ -2071,6 +2112,18 @@ void gb_bridge_parameter(tGbBridge * self, uint32_t id, double value, int32_t sa
         atomic_store(&self->lastOffsetChangeMs, gb_now_ms());
         atomic_store(&self->offsetDirty, true);
         gb_wake_worker(self);
+    } else if (id == kParamSource) {
+        int wanted = (value < 0.5) ? GB_SOURCE_DEVICE : GB_SOURCE_HOST;
+
+        if (wanted != atomic_load(&self->captureSource)) {
+            atomic_store(&self->captureSource, wanted);
+
+            // THE WORKER DOES THE REST. Going to Host input has to CLOSE whatever device is open -
+            // leaving it running would hold hardware nobody is listening to - and coming back has to
+            // open one again. Both are gb_reconfigure()'s job, and it is debounced like every other
+            // route to it.
+            gb_request_device(self);
+        }
     } else if (id == kParamRate) {
         int index = (int)(value * (double)(gGbRateCount - 1) + 0.5);
 
@@ -2172,8 +2225,89 @@ void gb_bridge_note(tGbBridge * self, tGbNoteKind kind, int16_t channel, int16_t
     }
 }
 
-void gb_bridge_render(tGbBridge * self, float ** out, int32_t frames, uint64_t blockHostTime) {
-// TRYLOCK, NEVER LOCK. The worker holds this while it tears down and rebuilds the ring,
+// ── Capturing from the HOST rather than from a device ───────────────────────
+//
+// The External-Instrument mode: Live's own interface input arrives on the plug-in's side-chain, and
+// all this has to do is hand it back. No ring, no resampler, no drift loop - the host's input and
+// its output are the same clock, and reconciling two clocks is the only reason any of that exists.
+//
+// SILENCE IS THE HONEST ANSWER when the host has routed nothing. A user who has chosen Host input
+// and connected nothing should hear nothing, not whatever a device left in the ring.
+static void gb_render_from_host(tGbBridge * self, float ** out, const float * const * in,
+                                int32_t inChannels, int32_t frames, uint64_t blockHostTime) {
+    float trim = atomic_load(&self->trimGain);
+
+    for (int c = 0; c < GB_CHANNELS; c++) {
+        // A MONO SOURCE FEEDS BOTH SIDES, the same rule the device path applies on the way into the
+        // ring - see the widen buffer in gb_capture_callback().
+        const float * source = ((in != NULL) && (inChannels > 0))
+                               ? in[(c < inChannels) ? c : (inChannels - 1)] : NULL;
+
+        if (source == NULL) {
+            memset(out[c], 0, (size_t)frames * sizeof(float));
+            continue;
+        }
+
+        for (int32_t i = 0; i < frames; i++) {
+            out[c][i] = source[i] * trim;
+        }
+    }
+
+    // WAS THERE ANYTHING IN IT? A cheap test with an early exit, because the answer is the one
+    // thing the panel cannot work out for itself and the one thing a user needs told - see
+    // hostInputPresent in gbStatus.h.
+    bool audible = false;
+
+    for (int c = 0; (c < GB_CHANNELS) && !audible; c++) {
+        for (int32_t i = 0; i < frames; i++) {
+            if ((out[c][i] > 1.0e-6f) || (out[c][i] < -1.0e-6f)) {
+                audible = true;
+                break;
+            }
+        }
+    }
+
+    if (audible) {
+        self->hostSilentFrames = 0;
+    } else {
+        self->hostSilentFrames += (uint64_t)frames;
+    }
+
+    // THE MEASUREMENT IS UNCHANGED, AND THAT IS THE POINT. It reads the OUTPUT buffer, which now
+    // holds the host's input, so it times exactly the same round trip - note out, synth, interface,
+    // host, here - without knowing the capture path underneath it has gone.
+    gb_run_measurement(self, out, frames, blockHostTime, 0.0);
+
+    tGbStatus * status = gb_status(atomic_load(&self->statusSlot));
+
+    if (status != NULL) {
+        // NO RING, SO NO RING FIGURES. A published zero would read as a starved buffer rather than
+        // an absent one; the panel greys these, and these are the values it greys.
+        atomic_store(&status->fillFrames, 0.0);
+        atomic_store(&status->actualSamples,
+                     (int)((atomic_load(&self->offsetMs) / 1000.0) * self->hostRate));
+        atomic_store(&status->measureTripNow, self->measureTrip);
+        atomic_store(&status->measurePhase, (int)self->measureState);
+
+        // TWO SECONDS, so a genuine gap between notes does not read as a broken routing while a
+        // routing that never carries anything says so quickly enough to be useful.
+        atomic_store(&status->hostInputPresent,
+                     ((double)self->hostSilentFrames < (self->hostRate * 2.0)) ? 1 : 0);
+    }
+    gb_publish_status(self, out, frames, 0.0);
+}
+
+void gb_bridge_render(tGbBridge * self, float ** out, const float * const * in, int32_t inChannels,
+                      int32_t frames, uint64_t blockHostTime) {
+    // THE HOST-INPUT MODE TAKES NO LOCK AND NEEDS NONE. It touches no ring, no resampler and no
+    // device - nothing the worker can be rebuilding underneath it - so the trylock below, and the
+    // block of silence a failed trylock produces, would be cost for nothing.
+    if (atomic_load(&self->captureSource) == GB_SOURCE_HOST) {
+        gb_render_from_host(self, out, in, inChannels, frames, blockHostTime);
+        return;
+    }
+
+    // TRYLOCK, NEVER LOCK. The worker holds this while it tears down and rebuilds the ring,
     // the resampler and the device - during which none of them may be touched. Blocking here
     // would stall the host's audio thread on a CoreAudio device open, which is exactly the
     // kind of thing that makes a DAW drop out. Failing to acquire it means a device change is

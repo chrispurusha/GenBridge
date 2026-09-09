@@ -42,6 +42,7 @@
 
 #include "gbEditor.h"
 #include "gbLog.h"
+#include "gbParams.h"
 #include "gbView.h"
 
 using namespace Steinberg;
@@ -320,6 +321,7 @@ private:
             case eGbEditTestNote:    id = 10; break;
             case eGbEditMeasure:  id = 8; break;
             case eGbEditOffset:   id = 9; break;
+            case eGbEditSource:   id = kParamSource; break;
             default: return;
         }
 
@@ -361,7 +363,8 @@ private:
                            controller->getParamNormalized(6),
                            controller->getParamNormalized(9),
                            controller->getParamNormalized(7),
-                           controller->getParamNormalized(10));
+                           controller->getParamNormalized(10),
+                           controller->getParamNormalized(kParamSource));
     }
 
 public:

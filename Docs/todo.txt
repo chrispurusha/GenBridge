@@ -12,6 +12,10 @@ Shared with the sibling projects
 - msVst3.cpp is 1,445 lines and has not had the treatment gbVst3.cpp just had - its clock, its saved state and its parameter table are all logic sitting inside the COM class. The seam that worked here is in gbBridge.h
 - THE SUBMODULE HAS UNPUSHED WORK: SynthLib/audio and SynthLib/plugin exist only in THIS project's checkout until the SynthLib repo is committed and pushed and each project's pin advanced. MidiSyncTool cannot adopt them until then, and its pin is on a different commit from everyone else's to start with
 
+Features
+
+- BUILT 2026-09-09, not yet played through a synth - see to-test.txt. Live routes into the instrument's aux bus (logged from Live itself), the passthrough and the parameter are in, vst3check covers the audio path, and the open question is whether the measured figure should be reported in full or with the host's own input path taken off it. The shape, for reference: a new "Capture source: Device | Host input" PARAMETER at the end of the id list - NOT a "Host" entry in the device slots, because those are positions in the device list and renumbering them silently repoints saved automation; reconfigure() opens nothing in that mode; gb_bridge_render() branches to a passthrough with the trim applied; reported latency becomes the measured offset with no pipeline term; and the panel greys device, rate, buffer, first channel and mono/stereo, along with the ring, drift and underrun figures, which would be meaningless rather than zero
+
 Bugs
 
 - The device buffer size is stored per PROJECT, but it is arguably a property of the INTERFACE - the same value is wanted in every project on the machine, and a setting chosen but not saved is silently lost (findings 2026-09-08 (17), which cost an evening). Consider a machine-wide preference keyed by device UID, with the project state overriding it where present

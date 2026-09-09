@@ -1499,3 +1499,220 @@ That is the same rig coupling already recorded for two other checks in this file
 argument for the fallback check being written the other way round: restore a name that is
 deliberately ABSENT, and assert nothing gets selected. A check that goes green when hardware appears
 is measuring the room.
+
+
+2026-09-09  A SIDE-CHAIN ON THE INSTRUMENT, AS A PROBE FOR THE EXTERNAL-INSTRUMENT MODE
+
+THE MODE BEING AIMED AT: Live's External Instrument with the hardware latency MEASURED rather than
+typed. The host's own interface input arrives at the plug-in, which passes it through, plays the
+synth over MIDI, times the round trip and reports it as its latency. External Instrument does
+everything in that sentence except the measuring, which is the one part GenBridge already knows how
+to do.
+
+IT IS THE SMALLER HALF OF THE PLUG-IN, NOT A NEW SUBSYSTEM. The ring, the resampler and the drift
+loop exist because a capture device's clock is not the host's. In this mode they are the same clock
+by definition, so none of it is needed: copy input to output with the trim, send the MIDI, run the
+measurement that already exists (it analyses the OUTPUT buffer, so it works unchanged), and report
+the measured figure with no pipeline term under it.
+
+WHY NOTHING BUT THE BUS HAS BEEN BUILT. Whether Live will route audio into a VST3 INSTRUMENT's aux
+bus cannot be answered from this side of the interface, and this file already records what happens
+when Live's routing model is argued about rather than observed - it has been wrong every time. So
+what exists today is a probe:
+
+  - getBusCount() reports one audio input for the instrument, where it reported none.
+  - getBusInfo() describes it as kAux with NO kDefaultActive flag. That shape is what keeps the old
+    trap shut: a MAIN input on an instrument makes a host look for a source and refuse the plug-in
+    when there is none, which is what G2-Edit hit. A side-chain a host has not been asked to fill is
+    ignored.
+  - setBusArrangements() accepts 0 OR 1 inputs on the instrument, since a host proposing zero for a
+    side-chain it will not fill is proposing something perfectly ordinary.
+  - activateBus() logs when the host turns it on - the first evidence, and it arrives before audio
+    would.
+  - process() logs the SHAPE of what arrives, once and thereafter only on change: numInputs, the
+    channel count, whether the buffers are non-null, whether silenceFlags is set, and whether there
+    is any signal. Once per change because a line per block is a file nobody can read and would
+    perturb the timing this plug-in measures.
+
+THE AUDIO PATH IS UNTOUCHED. Nothing that ships today behaves differently; the plug-in still fills
+from the ring and still ignores every input buffer.
+
+THE BASELINE, so the Live run has something to be compared against: under vst3check, which hands
+over no inputs at all, the probe logs
+
+    HOST INPUT: numInputs 0, channels -1, buffers NO, silenceFlags clear, signal none
+
+If Live logs that, Live is not routing and the mode needs a different shape. If it logs numInputs 1
+with buffers yes and signal PRESENT, the rest is ~150 lines and a panel pass.
+
+vst3check's "no audio input bus" assertion became "one audio input bus", plus two new ones that
+check the SHAPE - kAux, and not default-active. That is the property protecting against the old trap
+now, and it is worth more than the absence it replaced.
+
+
+2026-09-09  THE EXTERNAL-INSTRUMENT MODE IS BUILT (not yet played through a synth)
+
+LIVE ROUTES INTO A VST3 INSTRUMENT'S AUX BUS, which was the whole question and is now answered by
+Live itself rather than by argument:
+
+    [Live] HOST INPUT: numInputs 1, channels 2, buffers yes, silenceFlags set (host says silent), signal none
+    [Live] HOST INPUT: activateBus(aux input 0) -> ACTIVE
+
+Two channels, real buffers, and the host opting in. Silent at that moment because nothing was feeding
+the routed input yet - the probe logs on CHANGE, so the first block carrying audio produces a "signal
+PRESENT" line of its own.
+
+WHAT WAS BUILT ON THAT. A "Capture Source" parameter with two values: an audio device, as before, or
+the host's own input. In the second, gb_bridge_render() takes the host's buffers, applies the trim and
+hands them back - and takes no lock, because it touches no ring, no resampler and no device for a
+worker to be rebuilding underneath it. gb_reconfigure() opens nothing and closes whatever was open,
+since holding a capture device nobody is listening to is exactly what the mode exists to avoid - and
+on an interface that is also the host's own, it would keep imposing a buffer size on it.
+
+The measurement is untouched, which was the point of the design: it reads the OUTPUT buffer, so it
+times the same round trip - note out, synth, interface, host, here - without knowing the capture path
+underneath it has gone. The reported latency comes out as the correction alone, because
+gb_internal_latency_frames() returns 0 when nothing is open rather than dividing by a zero ratio.
+
+A NEW PARAMETER AT THE END, NOT A DEVICE SLOT, and the reason is in the todo that predates it: the
+device parameter's slots are positions in the device list, so inserting a "Host" entry would silently
+repoint every saved automation lane. The invariant that makes the count arithmetic work - the
+instrument-only parameters are the LAST ones - is now written down in gbParams.h, because this was
+the change that could have broken it.
+
+TWO THINGS THE HARNESSES CAUGHT THAT WOULD HAVE SHIPPED:
+
+  1. The CONTROLLER did not know the parameter existed. gbParams.c described it, so the host listed
+     it, but GenBridgeController's getParamNormalized/setParamNormalized had no case for it - the
+     panel would have read 0 for ever and a host could not have restored it. Found by flipping the
+     default and seeing the panel not change.
+  2. The saved state did not carry it. A session in host-input mode would have reopened on a device.
+     There is now a source=host key, written only in that mode so an older build reading the blob
+     gets nothing and stays on a device - which is what every project saved before today meant.
+
+vst3check gained an end-to-end check of the mode that needs no hardware: a ramp in, the same ramp out,
+both channels, sample for sample. Its control matters as much as the check - ten blocks in DEVICE
+mode with the same input present must produce SILENCE, or a passthrough that ignored the parameter
+entirely would pass. It also asserts the mode reports no latency of its own.
+
+WHAT IS NOT YET KNOWN, and it is the interesting one: whether the measured figure is right to report
+in full. The round trip in this mode includes the host's own input path, which Live may already be
+compensating for - so the correction could double-count it. External Instrument's Hardware Latency
+field has the same ambiguity and answers it by ear. The method is already in this file: record a take
+against a click and look at where the transient sits.
+
+TWO FAULTS IN THAT MODE, BOTH FOUND FROM THE LOG RATHER THAN BY READING (2026-09-09, same day)
+
+"NO AUDIO COMING THROUGH", AND THE MODE WAS FLIPPING BACK. The log showed it plainly:
+
+    capture source: HOST INPUT - no device opened, latency 357 samples
+    HOST INPUT: activateBus(aux input 0) -> ACTIVE
+    capture source: HOST INPUT - no device opened, latency 357 samples
+    reconfigure: slot 4, saved uid 'KRONOS'          <- device mode again
+    open KRONOS _ USB _ L&R ... reported latency 1124
+
+gb_parse_state() writes captureSource directly, and Live calls setState REPEATEDLY - twelve times in
+that session, each one visible as a "restored device settings" line. A blob without a source= key
+meant "device", so every restore quietly switched the plug-in out of the mode the user had chosen -
+and because the change happened on this side, the PARAMETER still said Host input, so the host had no
+reason to send anything and the two stayed out of step for good.
+
+Fixed in both directions: source= is now written ALWAYS, both values, so a blob says what it means
+rather than saying nothing; and when a restore does change the mode, the processor sends "gbSource"
+to the controller, which is the same mechanism gbDeviceSlot already uses for exactly this problem.
+
+"MEASURE DOES NOTHING", and it was one condition:
+
+    if (!self->instrument || !self->running) { return; }
+
+self->running is set by open_capture_locked() and by nothing else, so in a mode that deliberately
+opens no device it is false for ever. Measure returned there, silently, with no log line to say why.
+That test meant "is there audio" until the host-input mode existed and then quietly meant "is a
+device open" - the two had been the same question since the plug-in was written.
+
+There is now gb_capturing(), which is the question that was actually being asked, and gb_audio_key(),
+which is the other half of the same problem: a measurement is keyed on (audio source, MIDI
+destination), and in host-input mode the audio source has no device UID. It is keyed on
+"(host input)" instead, so a figure measured that way cannot be confused with one measured through a
+device - a different path and a different number. Three other places tested self->running or read
+deviceSelector the same way: the pair the offset is folded into, the latency published after a
+measurement, and the log line that names it.
+
+AND THE SILENT FAILURE GOT A VOICE. "If I set GenBridge to the same channel as GenBridge, no sound
+passing through" - which is Live doing the right thing: a plug-in side-chain pointed at its own
+track's output is a feedback loop, so the host mutes it and hands over buffers of nothing. Correct
+behaviour, invisible symptom: from the panel it looks exactly like a dead synth, a wrong MIDI
+destination or a broken plug-in.
+
+The bridge now counts how long the host's input has been silent and publishes it, and the panel says
+so in amber after two seconds - long enough that a gap between notes does not trip it, short enough
+to be useful while someone is trying routings. Two seconds of nothing in this mode is a routing
+question, and now the panel asks it.
+
+Where the panel has no status slot at all it says "waiting for the processor" rather than either
+answer. That is not pedantry: the first version claimed "audio from the host" whenever it could not
+tell, which is a guess dressed as a report - and it showed up immediately in a harness that does not
+wire the connection point.
+
+THE MODE WORKS, AND LIVE SETTLED THE ROUTING QUESTION (2026-09-09, CT on real hardware)
+
+A MIDI TRACK'S SIDE-CHAIN CHOOSER DOES NOT OFFER Ext. In. That is the answer to the one-track ideal:
+it is not available, and it is presumably why Live's own External Instrument device asks for the
+hardware input in its own panel rather than through a routing. The audio-track hop - an audio track
+on that input, monitoring In, tapped as the side-chain source - works, and costs a track.
+
+MEASURED 19.8 ms THROUGH A KRONOS in that arrangement, and the compensation "seems to work".
+
+THE TAKE LANDS SLIGHTLY EARLY, which is the double-count this file predicted when the mode was built:
+
+    "whether the measured figure is right to report in full. The round trip in this mode includes the
+     host's own input path, which Live may already be compensating for."
+
+Early is the direction that confirms it. Over-reporting makes the host pull the recorded material
+further back than it should, so a take that lands early means the figure contains something Live has
+already accounted for - its own input path. Under-reporting would land it late.
+
+WHAT CANNOT BE DONE ABOUT IT AUTOMATICALLY, yet: VST3 gives a plug-in no way to ask what the host's
+input latency is. getLatencySamples() is what WE tell the HOST; there is no reciprocal call. So the
+candidates are (a) leave it to the trim, which is what the trim is for and what works today, or
+(b) subtract something we can see - hostMaxFrames is the obvious guess, since an input buffer is
+usually one block - and a guess is exactly what this file keeps warning about.
+
+THE MEASUREMENT THAT WOULD DECIDE IT: record a take with the measured figure in force, and read HOW
+EARLY it is in samples. If that equals Live's buffer size, the term is identified and can be
+subtracted with a reason rather than a hope. If it does not, the trim stays the answer. One take, and
+it is a number rather than an argument.
+
+AND THE 2.0 ms IS THE CALLBACK LEAD, NOT A HOST BUFFER (2026-09-09, from CT's numbers)
+
+    measured                19.8 ms
+    lands correctly at      17.8 ms
+    difference               2.0 ms   = 96 samples at 48 kHz
+    Live buffer            256 samples = 5.33 ms
+    Live input latency       8.42 ms
+    Live output latency      5.92 ms
+
+None of Live's own figures is 2.0 ms, so the double-count this file predicted - the host's input path
+being compensated twice - is NOT what happened. 96 frames is (256 - 64) / 2, which is the MEAN
+CALLBACK LEAD: the average distance into a host callback at which a block starts, when the host
+delivers its 256-frame callback as four 64-frame blocks.
+
+THAT CORRECTION ALREADY EXISTS, and the host-input mode switched it off. gb_bridge_block_begin()
+called gb_observe_burst() only while self->running - true of a device, false in a mode that opens
+none - so observedMaxFrames stayed 0, gb_mean_callback_lead() returned 0, and the constant bias it
+exists to remove went into every measurement. The comment on that subtraction describes this exact
+symptom on this exact synth: "both a KRONOS and an Analog Rytm recorded 4 ms early on exactly that".
+
+The test is now gb_capturing() rather than self->running, which is what it always meant - the burst
+observation measures how the HOST delivers blocks, its own property and nothing to do with whether a
+device is open. The same mistake, in the same shape, as the one that stopped Measure working: a
+question about audio asked as a question about a device.
+
+PREDICTION, so the next run either confirms it or does not: with this build the measurement should
+come back at about 17.8 ms rather than 19.8 - the plug-in subtracting the lead itself - and the take
+should land with no trim at all. A new log line names the terms: "measure: callback lead N frames
+(host burst B, this call C)". If B is 256 and C is 64, the lead is 96 and the arithmetic above is
+confirmed on the rig rather than on paper.
+
+WHAT IT MEANS FOR THE MODE: nothing has to be subtracted for the host's input path. That figure was
+right as measured; only our own bias was missing.

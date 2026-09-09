@@ -164,6 +164,12 @@
 #define GB_MEASURE_TIMED_OUT  (-1)
 #define GB_MEASURE_TOO_EARLY  (-2)
 
+// THE AUDIO HALF OF A MEASURED PAIR WHEN THERE IS NO DEVICE. A round trip is a property of (audio
+// source, MIDI destination) together, and in host-input mode the audio source is not a device with a
+// UID - it is whatever the host has routed in. Naming it keeps a figure measured that way from being
+// confused with one measured through a device, which is a different path and a different number.
+#define GB_HOST_INPUT_KEY     "(host input)"
+
 #define GB_DEFAULT_FRAMES     (128)
 #define GB_DEFAULT_RATE       (48000.0)
 #define GB_MAX_REMEMBERED     (32)
@@ -479,10 +485,32 @@ struct tGbBridge {
     size_t                 stateLength;
     size_t                 stateCapacity;
 
+    // WHERE THE AUDIO COMES FROM: GB_SOURCE_DEVICE or GB_SOURCE_HOST. Read by the audio thread on
+    // every block and written by the parameter pass just before it, so atomic - and read by the
+    // worker, which decides whether to open anything at all.
+    _Atomic int            captureSource;
+
+    // How long the host's input has been silent, in frames. AUDIO THREAD ONLY - it is written and
+    // read on the same block, and only published as a flag.
+    uint64_t               hostSilentFrames;
+
     // Which variant this is. The audio path is identical either way; what it decides is whether
     // there is a MIDI destination, a measurement and a correction at all.
     bool                   instrument;
 };
+
+// IS THERE AUDIO TO WORK WITH? Not "is a device running" - that was the same question until the
+// host-input mode existed, and the difference is why Measure did nothing in it: gb_start_measurement()
+// tested self->running, which only open_capture_locked() ever sets.
+static inline bool gb_capturing(tGbBridge * self) {
+    return (atomic_load(&self->captureSource) == GB_SOURCE_HOST) || atomic_load(&self->running);
+}
+
+// The audio half of the (audio, MIDI) pair, whichever mode is in force.
+static inline const char * gb_audio_key(tGbBridge * self) {
+    return (atomic_load(&self->captureSource) == GB_SOURCE_HOST) ? GB_HOST_INPUT_KEY
+                                                                 : self->deviceSelector;
+}
 
 // ── What the three files that make up the bridge call in each other ─────────
 //

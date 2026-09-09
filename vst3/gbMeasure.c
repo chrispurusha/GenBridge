@@ -71,7 +71,10 @@ static int gb_trip_result(tGbBridge * self);
 // piano, and nothing measuring from outside can tell the difference. Hence the manual offset:
 // the measurement gets you within a few milliseconds and a person settles the rest.
 void gb_start_measurement(tGbBridge * self) {
-    if (!self->instrument || !self->running) {
+    // AUDIO, NOT A DEVICE. This tested self->running until 2026-09-09, which meant the same thing
+    // until the host-input mode existed and then silently meant "a device is open" - so pressing
+    // Measure in that mode returned here and did nothing at all, with no log line to say why.
+    if (!self->instrument || !gb_capturing(self)) {
         return;
     }
 
@@ -327,6 +330,13 @@ void gb_run_measurement(tGbBridge * self, float ** out, int32_t frames, uint64_t
         // Rytm recorded 4 ms early on exactly that. A constant has no variance, so this is the
         // one form of the term that removes the bias without reintroducing the scatter.
         double   lead    = gb_mean_callback_lead(self);
+
+        // NAMED IN THE LOG, because this term is invisible in the result and was wrong in the
+        // host-input mode for a day. burst and call are what it is computed from: a host handing
+        // over its whole callback in one block has no lead at all, and one splitting a 256 into
+        // 64s has (256 - 64) / 2 = 96 frames of it.
+        gb_log_line("measure: callback lead %.0f frames (host burst %u, this call %u)",
+                    lead, self->observedMaxFrames, self->lastCallFrames);
         double   oursNow = ((self->measureOnsetOurs > 0.0) ? self->measureOnsetOurs
                            : gb_internal_latency_frames(self)) + lead;
         uint32_t ours    = (oursNow > 0.0) ? (uint32_t)oursNow : 0;
@@ -512,7 +522,7 @@ void gb_store_measurement(tGbBridge * self) {
                  measuredMs, GB_OFFSET_MIN_MS, GB_OFFSET_MAX_MS, seeded);
     }
 
-    tMeasured * entry = gb_measured_for(self, self->deviceSelector, destination, true);
+    tMeasured * entry = gb_measured_for(self, gb_audio_key(self), destination, true);
 
     if (entry != NULL) {
         entry->hardwareSamples = (uint32_t)result;
@@ -530,7 +540,7 @@ void gb_store_measurement(tGbBridge * self) {
     pthread_mutex_lock(&self->configLock);
     self->hardwareSamples = (uint32_t)result;
 
-    uint32_t nowLatency = self->running ? gb_report_latency(self) : 0;
+    uint32_t nowLatency = gb_capturing(self) ? gb_report_latency(self) : 0;
 
     pthread_mutex_unlock(&self->configLock);
 
@@ -568,7 +578,7 @@ void gb_store_measurement(tGbBridge * self) {
              (double)atomic_load(&self->measureFloorSeen), (double)atomic_load(&self->measureTriggerPeak),
              (unsigned)(atomic_load(&self->ring.underflows) - self->measureUnderrunsAtStart),
              atomic_load(&self->resyncs) - self->measureResyncsAtStart,
-             self->deviceSelector, destination);
+             gb_audio_key(self), destination);
 
     gb_publish_measurement(self);
 

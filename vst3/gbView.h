@@ -36,7 +36,7 @@ void   gb_view_set_status_slot(void * view, int statusSlot);
 void   gb_view_destroy(void * view);
 void   gb_view_set_values(void * view, double device, double rate, double frames, double trim,
                           double mode, double firstChannel, double midiDest, double offset,
-                          double midiChannel, double testNote);
+                          double midiChannel, double testNote, double source);
 
 #ifdef __cplusplus
 }

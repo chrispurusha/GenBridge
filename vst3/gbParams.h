@@ -56,18 +56,24 @@ enum {
     kParamMeasure,       // instrument only: rising edge runs a latency measurement
     kParamOffsetMs,      // instrument only: manual correction to the measured figure
     kParamTestNote,      // instrument only: which note Measure plays
+    kParamSource,        // instrument only: capture from a DEVICE, or from the host's own input
     kParamCount
 };
 
 // HOW MANY OF THEM THE EFFECT LEAVES OUT. The effect has no MIDI out, so no destination, no channel,
-// no measurement, no correction to one and no test note: FIVE of the eleven above.
+// no measurement, no correction to one and no test note - and no capture source either, since taking
+// the host's input and handing it back is not a thing an effect can usefully do: SIX of the twelve.
+//
+// THE INSTRUMENT-ONLY ENTRIES MUST STAY LAST, because that is the whole of this arithmetic. A new
+// parameter that both variants have goes BEFORE kParamMidiDest; one only the instrument has goes at
+// the end, and this number goes up with it.
 //
 // IT SAID FOUR UNTIL 2026-09-09, so the effect advertised seven parameters and had six - and the
 // seventh, kParamMidiDest, answered getParameterInfo() with kInvalidArgument. A host is entitled to
 // walk 0..getParameterCount()-1 and expect every one of them to exist; what it does with the refusal
 // is its own business, and none of the possibilities are good. Found by putting the count and the
 // table in one file, which is the argument for having done that.
-#define GB_PARAMS_INSTRUMENT_ONLY    (5)
+#define GB_PARAMS_INSTRUMENT_ONLY    (6)
 
 #define GB_CHANNELS           (2)
 
@@ -85,6 +91,15 @@ enum {
 // that far even though most devices are stereo. Slots past the device's real channel count simply
 // fail to open, which the panel shows.
 #define GB_MAX_FIRST_CHANNEL  (32)
+
+// WHERE THE AUDIO COMES FROM. Two values, and the second is the External-Instrument mode: instead of
+// opening a CoreAudio device, take the host's own input - Live's interface, routed into the plug-in's
+// side-chain - pass it through, and keep the MIDI and the latency measurement exactly as they are.
+//
+// In that mode the ring, the resampler and the drift loop are all switched off, because the host's
+// input and its output are the same clock. Reconciling two clocks is the only reason they exist.
+#define GB_SOURCE_DEVICE      (0)
+#define GB_SOURCE_HOST        (1)
 
 // The manual correction, in milliseconds, mapped onto a normalised parameter. A measurement cannot
 // separate the synth's response from its patch's attack, so the number always wants a human able to

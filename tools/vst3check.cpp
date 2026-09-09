@@ -51,6 +51,7 @@
 // in there: fill against setpoint, the drift correction in force, underruns and resyncs. Without it
 // a bad measurement is just a bad number.
 #include "../vst3/gbStatus.h"
+#include "../vst3/gbDraw.h"   // GB_CANVAS_W/H - the aspect the editor size must match
 #include <CoreMIDI/CoreMIDI.h>
 #include <dlfcn.h>
 #include <unistd.h>
@@ -1351,13 +1352,30 @@ int main(int argc, char ** argv) {
             controller->getState(&guiSaved);
             check("controller writes a GUI state", guiSaved.buf.find("editor=") != std::string::npos);
 
+            // THE WIDTH IS RESTORED AND THE HEIGHT IS DERIVED, which is what this pair now checks.
+            //
+            // 748 against 700 is the aspect of the canvas BEFORE the Capture Source row was added -
+            // 520x556 - and restoring it is precisely the bug CT hit on 2026-09-09: the window came
+            // back at the old shape, the panel is scaled by WIDTH alone, and the rows past the
+            // bottom edge were simply not there until a resize put the aspect right. So the saved
+            // height is now ignored and recomputed from the current canvas, which makes any future
+            // change of GB_CANVAS_H self-correcting for sessions saved before it.
+            char expected[64];
+
+            snprintf(expected, sizeof(expected), "editor=700,%.0f",
+                     700.0 * (GB_CANVAS_H / GB_CANVAS_W));
+
             guiLoaded.buf = "GENBRIDGEGUI1\neditor=700,748\nfuturekey=a newer build wrote this\n";
             check("controller loads a GUI state", controller->setState(&guiLoaded) == kResultOk);
 
             MemStream guiBack;
 
             controller->getState(&guiBack);
-            check("editor size survives the round trip", guiBack.buf.find("editor=700,748") != std::string::npos);
+            printf("    restored 700x748, wrote back: %s\n",
+                   guiBack.buf.substr(guiBack.buf.find("editor="), 20).c_str());
+            check("the saved WIDTH is restored", guiBack.buf.find("editor=700,") != std::string::npos);
+            check("and the height is derived from the CURRENT canvas, not the saved one",
+                  guiBack.buf.find(expected) != std::string::npos);
 
             // Straight out of a project file, so it is checked rather than trusted: a size the user
             // cannot see or cannot fit on screen has no way back short of editing the project.
@@ -1370,7 +1388,7 @@ int main(int argc, char ** argv) {
 
             controller->getState(&afterAbsurd);
             check("an out-of-range saved size is refused",
-                  afterAbsurd.buf.find("editor=700,748") != std::string::npos);
+                  afterAbsurd.buf.find(expected) != std::string::npos);
         }
 
         // THE MICROPHONE BUG. A project naming a device that is not plugged in must open NOTHING.
@@ -1603,9 +1621,31 @@ int main(int argc, char ** argv) {
         if (inst != nullptr) {
             inst->initialize(&hostApp);
 
-            check("no audio input bus", inst->getBusCount(kAudio, kInput) == 0);
+            // ONE AUDIO INPUT, AND IT MUST BE A SIDE-CHAIN. This said "no audio input bus" until
+            // 2026-09-09, which was the right assertion while there was none: a MAIN input on an
+            // instrument makes a host go looking for a source and refuse the plug-in when there is
+            // none, which is the trap G2-Edit fell into.
+            //
+            // The instrument now declares one for the External-Instrument mode - the host's own
+            // interface input, passed through and timed. What protects against the old trap is no
+            // longer the ABSENCE of the bus but its SHAPE, so that is what is checked here: kAux,
+            // and NOT default-active, so a host with no use for it leaves it alone.
+            check("one audio input bus", inst->getBusCount(kAudio, kInput) == 1);
             check("one audio output bus", inst->getBusCount(kAudio, kOutput) == 1);
             check("one event input bus", inst->getBusCount(kEvent, kInput) == 1);
+
+            BusInfo sideChain;
+
+            if (inst->getBusInfo(kAudio, kInput, 0, sideChain) == kResultOk) {
+                printf("    audio input bus: %s, %d channels, busType %d, flags 0x%x\n",
+                       to_ascii(sideChain.name).c_str(), sideChain.channelCount,
+                       (int)sideChain.busType, (unsigned)sideChain.flags);
+                check("the instrument's audio input is a side-chain", sideChain.busType == kAux);
+                check("and is NOT default-active",
+                      (sideChain.flags & BusInfo::kDefaultActive) == 0);
+            } else {
+                check("instrument audio input bus is describable", false);
+            }
 
             BusInfo eventBus;
 
@@ -2191,6 +2231,199 @@ int main(int argc, char ** argv) {
 
         fresh->terminate();
         fresh->release();
+    }
+
+    // ---- the External-Instrument mode: capture from the HOST'S input ----
+    //
+    // Capture Source = Host input takes the audio the host hands over and passes it through, instead
+    // of opening a CoreAudio device: no ring, no resampler, no drift loop, because the host's input
+    // and its output are the same clock. That is checkable here in a way the device path never was -
+    // there is no hardware in it, so a known signal in must come back out.
+    //
+    // WHAT WOULD OTHERWISE GO UNNOTICED: this path is on the audio thread and takes no lock, and the
+    // failure it is most likely to have is silence - a null input treated as an error, a channel
+    // index off by one, or the mode not being reached at all because the parameter did not arrive.
+    printf("\nhost-input capture (the External Instrument mode)\n");
+    {
+        TUID instCid;
+        bool haveInst = false;
+
+        memset(instCid, 0, sizeof(instCid));
+
+        for (int32 i = 0; (factory2 != nullptr) && (i < factory->countClasses()); i++) {
+            PClassInfo2 info;
+
+            if ((factory2->getClassInfo2(i, &info) == kResultOk)
+                && (strcmp(info.category, kVstAudioEffectClass) == 0)
+                && (strstr(info.subCategories, "Instrument") != nullptr)) {
+                memcpy(instCid, info.cid, sizeof(TUID));
+                haveInst = true;
+                break;
+            }
+        }
+
+        IComponent * inst = nullptr;
+
+        if (haveInst) {
+            factory->createInstance(instCid, IComponent::iid, (void **)&inst);
+        }
+
+        if (inst != nullptr) {
+            IAudioProcessor * ip = nullptr;
+
+            inst->initialize(&hostApp);
+            inst->queryInterface(IAudioProcessor::iid, (void **)&ip);
+
+            if (ip != nullptr) {
+                ProcessSetup setup;
+
+                memset(&setup, 0, sizeof(setup));
+                setup.processMode        = kRealtime;
+                setup.symbolicSampleSize = kSample32;
+                setup.maxSamplesPerBlock = 128;
+                setup.sampleRate         = 48000.0;
+                ip->setupProcessing(setup);
+                inst->setActive(true);
+
+                float inL[128], inR[128], outL[128], outR[128];
+                float * inCh[2]  = { inL, inR };
+                float * outCh[2] = { outL, outR };
+
+                // A RAMP, NOT A CONSTANT: a constant would pass a check that copied one sample over
+                // the whole block, or that swapped the channels, and a ramp fails both.
+                for (int i = 0; i < 128; i++) {
+                    inL[i] = (float)i / 128.0f;
+                    inR[i] = -inL[i];
+                }
+                float          silentPeak = 0.0f;
+                AudioBusBuffers inBus, outBus;
+                ProcessData     data;
+
+                // Ten blocks in DEVICE mode first, with the input present the whole time: nothing
+                // should come back, because that mode reads the ring and the ring has no device
+                // behind it. This is the control - without it, a passthrough that ignored the
+                // parameter entirely would pass the check below.
+                for (int block = 0; block < 10; block++) {
+                    memset(&data, 0, sizeof(data));
+                    memset(&inBus, 0, sizeof(inBus));
+                    memset(&outBus, 0, sizeof(outBus));
+                    memset(outL, 0, sizeof(outL));
+                    memset(outR, 0, sizeof(outR));
+
+                    inBus.numChannels       = 2;
+                    inBus.channelBuffers32  = inCh;
+                    outBus.numChannels      = 2;
+                    outBus.channelBuffers32 = outCh;
+
+                    data.numSamples         = 128;
+                    data.numInputs          = 1;
+                    data.inputs             = &inBus;
+                    data.numOutputs         = 1;
+                    data.outputs            = &outBus;
+                    data.symbolicSampleSize = kSample32;
+                    data.processMode        = kRealtime;
+
+                    ip->process(data);
+
+                    for (int i = 0; i < 128; i++) {
+                        float m = (outL[i] < 0.0f) ? -outL[i] : outL[i];
+
+                        if (m > silentPeak) { silentPeak = m; }
+                    }
+                }
+                check("device mode ignores the host's input", silentPeak == 0.0f);
+
+                // Now the mode itself. Capture Source is the LAST parameter id, so it is read from
+                // the table rather than written here as a number - the two must not drift.
+                IEditController * ec = nullptr;
+                ParamID           sourceId = 0;
+                bool              foundSource = false;
+                TUID              ctrlCid;
+
+                inst->getControllerClassId(ctrlCid);
+                factory->createInstance(ctrlCid, IEditController::iid, (void **)&ec);
+
+                if (ec != nullptr) {
+                    ec->initialize(&hostApp);
+
+                    for (int32 i = 0; i < ec->getParameterCount(); i++) {
+                        ParameterInfo pi;
+
+                        if ((ec->getParameterInfo(i, pi) == kResultOk)
+                            && (to_ascii(pi.title) == "Capture Source")) {
+                            sourceId    = pi.id;
+                            foundSource = true;
+                            break;
+                        }
+                    }
+                }
+                check("the instrument exposes a Capture Source parameter", foundSource);
+
+                if (foundSource) {
+                    OneChange toHost(sourceId, 1.0);
+                    float     matched = 0.0f;
+                    bool      exact   = true;
+
+                    for (int block = 0; block < 4; block++) {
+                        memset(&data, 0, sizeof(data));
+                        memset(&inBus, 0, sizeof(inBus));
+                        memset(&outBus, 0, sizeof(outBus));
+                        memset(outL, 0, sizeof(outL));
+                        memset(outR, 0, sizeof(outR));
+
+                        inBus.numChannels       = 2;
+                        inBus.channelBuffers32  = inCh;
+                        outBus.numChannels      = 2;
+                        outBus.channelBuffers32 = outCh;
+
+                        data.numSamples         = 128;
+                        data.numInputs          = 1;
+                        data.inputs             = &inBus;
+                        data.numOutputs         = 1;
+                        data.outputs            = &outBus;
+                        data.symbolicSampleSize = kSample32;
+                        data.processMode        = kRealtime;
+                        data.inputParameterChanges = (block == 0) ? (IParameterChanges *)&toHost
+                                                                  : nullptr;
+
+                        ip->process(data);
+                    }
+
+                    // The trim defaults to unity, so out must equal in sample for sample - and the
+                    // right channel must be the right channel.
+                    for (int i = 0; i < 128; i++) {
+                        if ((outL[i] != inL[i]) || (outR[i] != inR[i])) {
+                            exact = false;
+                        }
+
+                        float m = (outL[i] < 0.0f) ? -outL[i] : outL[i];
+
+                        if (m > matched) { matched = m; }
+                    }
+                    check("host input reaches the output", matched > 0.0f);
+                    check("and arrives unchanged, both channels", exact);
+
+                    // THE MODE ADDS NOTHING OF ITS OWN, and the reported latency is where that
+                    // shows. With no device open there is no ring, no resampler and no converter to
+                    // account for, so what the host is told is the measured correction alone - zero
+                    // until something has been measured. A non-zero figure here would mean the
+                    // pipeline term is still being added over a pipeline that does not exist.
+                    uint32 hostModeLatency = ip->getLatencySamples();
+
+                    printf("    latency in host-input mode: %u samples\n", hostModeLatency);
+                    check("host-input mode reports no latency of its own", hostModeLatency == 0);
+                }
+
+                if (ec != nullptr) {
+                    ec->terminate();
+                    ec->release();
+                }
+                inst->setActive(false);
+                ip->release();
+            }
+            inst->terminate();
+            inst->release();
+        }
     }
 
     // ---- activation ----

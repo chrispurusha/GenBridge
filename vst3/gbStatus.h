@@ -116,6 +116,13 @@ typedef struct {
 
     _Atomic float   peakLeft;
     _Atomic float   peakRight;
+
+    // IS THE HOST ACTUALLY SENDING ANYTHING? Only meaningful in the host-input mode, where the
+    // difference between "routed and quiet" and "not routed at all" is invisible from the panel and
+    // is exactly what a user hits first: a side-chain pointed at the plug-in's OWN track is a
+    // feedback loop, so Live mutes it and the result is silence with nothing on screen to explain it.
+    // 1 while audio has arrived recently, 0 after about two seconds of nothing.
+    atomic_int      hostInputPresent;
 } tGbStatus;
 
 #define GB_STATUS_SLOTS    (32)

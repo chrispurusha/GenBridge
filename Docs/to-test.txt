@@ -3,6 +3,61 @@ GenBridge TO TEST
 Finished code that is built but not yet checked against a real host or real hardware.
 Confirmed -> delete the line. Check failed -> move it to todo.txt.
 
+- THE CALLBACK LEAD IN HOST-INPUT MODE (2026-09-09, predicted and unconfirmed). Re-measure the same
+  synth in the same arrangement: the figure should now come back near 17.8 ms rather than 19.8, and
+  the take should land with the trim at zero. /tmp/genbridge.log carries "measure: callback lead N
+  frames (host burst B, this call C)" - B 256 and C 64 would confirm the arithmetic on the rig. If
+  the figure is unchanged at 19.8, the lead is not the term and the 2.0 ms is something else.
+- SUPERSEDED, kept for the reasoning - HOW EARLY, IN SAMPLES (2026-09-09). The External-Instrument mode measures 19.8 ms through a Kronos
+  and the take lands slightly early - the double-count of Live's own input path that was predicted
+  when the mode was built. Record a take against a click with the measured figure in force, read the
+  offset in SAMPLES, and compare it against Live's buffer size. Equal means the term is identified
+  and can be subtracted with a reason; not equal means the trim stays the answer and the figure is
+  right as measured. This is the one measurement standing between the mode and being finished.
+- MEASURE IN HOST-INPUT MODE (2026-09-09, second attempt - the first did nothing because the
+  measurement tested "is a device open"). Press it with the synth routed in: the settle, floor and
+  listen phases should run and a figure should come back. If it still does nothing, the log now has
+  the reason - and if it says nothing at all, the trigger is not reaching the processor.
+- THE ROUTING QUESTION THE TWO-TRACK SETUP RAISES: with a traditional External Instrument on the
+  track feeding our side-chain, LIVE is compensating that track by its own Hardware Latency field
+  while we measure through it - so the figure is the synth plus the interface MINUS whatever Live has
+  already taken off. Set that field to 0 while measuring, or feed our side-chain from the hardware
+  input directly, which is the arrangement the mode exists for.
+- THE EXTERNAL-INSTRUMENT MODE, END TO END WITH A SYNTH (2026-09-09). Set Source to "Host input",
+  route the interface input carrying the synth into the plug-in's side-chain, and play: audio should
+  pass through with no device opened - the Device, Rate, Buffer, Mode and Input rows greyed, the
+  header green and reading "external instrument". /tmp/genbridge.log should show a HOST INPUT line
+  with signal PRESENT the moment audio flows.
+- THEN PRESS MEASURE IN THAT MODE, which is the whole point of it: a figure should come back for the
+  synth and the interface with no ring or converter of ours in it. Compare it against the same synth
+  measured the old way (Source = an audio device, same interface): the two should differ by roughly
+  the ring and the device buffer, and the host-input one should be the smaller.
+- AND THE QUESTION THAT ONLY A RECORDING CAN ANSWER: whether the measured figure should be reported
+  in FULL. The round trip in this mode includes the host's own input path, which Live may already
+  compensate - so the correction may double-count it. Record a take against a click with the measured
+  figure in force and look at where the transient sits; if it lands early by about Live's input
+  buffer, that term has to come off. Live's "Keep Latency" setting is part of this question (see the
+  2026-09-07 entry).
+- THAT A SESSION IN THE MODE REOPENS IN IT: save with Source = Host input, reopen, and confirm the
+  panel comes back on Host input with the device rows still greyed. The state carries a source=host
+  key; a project saved before today has none and must come back on a device.
+- THE SIDE-CHAIN PROBE IN LIVE (2026-09-09), which decides whether the External-Instrument mode is
+  buildable at all. touch /tmp/genbridge-log, put the GenBridge INSTRUMENT on a MIDI track, and look
+  first at whether Live offers the input at all - a side-chain / "Audio From" chooser on the
+  device, naming an interface input. Route one in, play something audible into it, and read
+  /tmp/genbridge.log for the HOST INPUT lines. Three outcomes, and they mean different things:
+    numInputs 1, buffers yes, signal PRESENT  -> build the mode; the rest is passthrough and panel
+    numInputs 1, buffers yes, signal none     -> Live routes but sends silence: check the routing,
+                                                 then whether silenceFlags is set (it is logged)
+    numInputs 0, buffers NO                   -> Live will not feed an instrument's aux bus. The
+                                                 mode needs another shape - most likely the EFFECT
+                                                 variant gaining the MIDI half rather than the
+                                                 instrument gaining audio
+  Also worth noting whether an activateBus line appears, and whether Live's own log complains about
+  the bus layout: ~/Library/Preferences/Ableton/Live */Log.txt.
+- THAT THE PROBE COSTS THE SHIPPING PLUG-IN NOTHING: the same session should behave exactly as
+  before in every other respect - a device opens, audio flows, the measurement runs. The only new
+  thing is a bus nothing is connected to, and one log line.
 - THE C CONVERSION (2026-09-09), which is verified everywhere except in a host: vst3check is line
   for line what the C++ build produced, the editor screenshots are byte-identical and 35 of 50 moved
   functions normalise to the original exactly - but nothing has been loaded into Ableton. Open a

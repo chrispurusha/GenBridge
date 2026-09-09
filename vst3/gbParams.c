@@ -181,6 +181,14 @@ bool gb_param_info(int32_t index, bool instrument, tGbParamInfo * out) {
             out->list              = true;
             return true;
 
+        case kParamSource:
+            out->id = kParamSource;
+            name_it(out, "Capture Source", "Source", NULL);
+            out->stepCount         = 1;
+            out->defaultNormalized = 0.0;      // a device, which is what every saved project means
+            out->list              = true;
+            return true;
+
         default:
             return false;
     }
@@ -241,6 +249,10 @@ bool gb_param_text(uint32_t id, double normalized, char * out, unsigned long len
 
         case kParamMeasure:
             snprintf(out, len, "%s", (normalized < 0.5) ? "Ready" : "Measuring");
+            return true;
+
+        case kParamSource:
+            snprintf(out, len, "%s", (normalized < 0.5) ? "Audio device" : "Host input");
             return true;
 
         case kParamOffsetMs:

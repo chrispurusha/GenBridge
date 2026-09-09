@@ -35,8 +35,10 @@ extern "C" {
 
 // The logical canvas. Every coordinate below is in these units and is scaled to whatever surface
 // the host gives us, so the panel is the same shape at any window size.
+// TALL ENOUGH FOR THE INSTRUMENT, which is the variant with the most rows - the effect simply ends
+// higher. It grew by one ROW_STEP on 2026-09-09 when the Capture Source row was added.
 #define GB_CANVAS_W    (520.0)
-#define GB_CANVAS_H    (556.0)
+#define GB_CANVAS_H    (592.0)
 
 // A click landed on a control that the HOST must be told about, because these are VST3 parameters
 // and changing one behind the host's back would leave its automation and its saved state wrong.
@@ -53,6 +55,7 @@ typedef enum {
     eGbEditOffset,
     eGbEditMidiChannel,
     eGbEditTestNote,
+    eGbEditSource,        // an audio device, or the host's own input - the External Instrument mode
 } tGbEdit;
 
 typedef struct {
@@ -99,7 +102,7 @@ bool gb_draw_menu_active(void);
 // Current parameter values, so the editor draws what the host believes rather than its own idea.
 void gb_draw_set_values(double device, double rate, double frames, double trim,
                         double mode, double firstChannel, double midiDest, double offset,
-                        double midiChannel, double testNote);
+                        double midiChannel, double testNote, double source);
 
 #ifdef __cplusplus
 }

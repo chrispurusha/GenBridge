@@ -236,8 +236,23 @@ public:
             // refuses to load. That is the trap G2-Edit fell into.
             //
             // The effect variant declares one and ignores it, which is what an effect must do.
+            //
+            // THE INSTRUMENT NOW DECLARES ONE TOO, AND IT IS A SIDE-CHAIN (2026-09-09, a probe).
+            //
+            // The mode being aimed at is Live's External Instrument with the hardware latency
+            // MEASURED rather than typed: the host's own interface input arrives here, the plug-in
+            // passes it through, plays the synth over MIDI and times the round trip. None of the
+            // ring, resampler or drift loop is needed for it - the host's input and output are the
+            // same clock, which is the one thing this plug-in exists to reconcile when they are not.
+            //
+            // WHETHER LIVE WILL ROUTE ANYTHING INTO IT IS THE OPEN QUESTION, and it is not one to
+            // settle by reasoning: this project's findings record that Live's routing model has been
+            // wrong every time it was argued about rather than observed. So the bus is declared as
+            // kAux and kDefaultInactive - the conventional side-chain shape, which a host that has no
+            // use for it leaves alone - and process() logs what actually turns up. Nothing else is
+            // changed until that log says something.
             if ((dir == kInput) && instrument) {
-                return 0;
+                return 1;
             }
 
             return 1;
@@ -271,15 +286,23 @@ public:
             return kInvalidArgument;
         }
 
-        if ((dir == kInput) && instrument) {
-            return kInvalidArgument;
-        }
-
         info.mediaType    = kAudio;
         info.direction    = dir;
         info.channelCount = GB_CHANNELS;
-        info.busType      = kMain;
-        info.flags        = BusInfo::kDefaultActive;
+
+        // AUX AND INACTIVE for the instrument's input, kMain and active for everything else. A
+        // side-chain a host has not been asked to fill costs nothing; a MAIN input on an instrument
+        // is the shape that makes a host go looking for a source and complain when there is none.
+        if ((dir == kInput) && instrument) {
+            info.busType = kAux;
+            info.flags   = 0;                       // NOT kDefaultActive - the host opts in
+
+            name_to_utf16("Host Input", info.name, 128);
+
+            return kResultOk;
+        }
+        info.busType = kMain;
+        info.flags   = BusInfo::kDefaultActive;
 
         name_to_utf16((dir == kInput) ? "Unused In" : "Device Out", info.name, 128);
 
@@ -291,8 +314,17 @@ public:
         return kNotImplemented;
     }
 
+    // WORTH A LOG LINE WHILE THE SIDE-CHAIN IS A QUESTION. This is where a host says it intends to
+    // use a bus, so it is the first evidence of whether Live has offered the input to a user at all -
+    // and it arrives before any audio would.
     tresult PLUGIN_API activateBus(MediaType type, BusDirection dir, int32 index, TBool state) SMTG_OVERRIDE {
-        (void)type; (void)dir; (void)index; (void)state;
+        if (instrument && (type == kAudio) && (dir == kInput)) {
+            gb_log_line("HOST INPUT: activateBus(aux input %d) -> %s", (int)index,
+                        state ? "ACTIVE" : "inactive");
+        }
+
+        (void)index;
+
         return kResultOk;
     }
 
@@ -339,16 +371,22 @@ public:
 
     // ---- IAudioProcessor ----
 
+    // BOTH VARIANTS NOW HAVE ONE AUDIO INPUT - the effect's main one, which it ignores, and the
+    // instrument's side-chain. A host is also entitled to propose ZERO inputs for a side-chain it
+    // does not intend to fill, and refusing that would be refusing a perfectly ordinary layout.
     tresult PLUGIN_API setBusArrangements(SpeakerArrangement * inputs, int32 numIns,
                                           SpeakerArrangement * outputs, int32 numOuts) SMTG_OVERRIDE {
         (void)inputs;
 
-        int32 wantIns = instrument ? 0 : 1;
-
-        if ((numIns == wantIns) && (numOuts == 1) && (outputs[0] == SpeakerArr::kStereo)) {
-            return kResultOk;
+        if ((numOuts != 1) || (outputs[0] != SpeakerArr::kStereo)) {
+            return kResultFalse;
         }
-        return kResultFalse;
+
+        if (instrument) {
+            return ((numIns == 0) || (numIns == 1)) ? kResultOk : kResultFalse;
+        }
+
+        return (numIns == 1) ? kResultOk : kResultFalse;
     }
 
     tresult PLUGIN_API getBusArrangement(BusDirection dir, int32 index, SpeakerArrangement & arr) SMTG_OVERRIDE {
@@ -415,6 +453,8 @@ public:
         float ** out    = data.outputs[0].channelBuffers32;
         int32    frames = data.numSamples;
 
+        report_host_input(data);
+
         if (frames <= 0) {
             return kResultOk;
         }
@@ -430,12 +470,80 @@ public:
             take_events(data, blockHostTime);
         }
 
-        gb_bridge_render(bridge, out, frames, blockHostTime);
+        // THE HOST'S OWN INPUT, HANDED STRAIGHT ON. Which of the two the bridge uses is its
+        // decision (Capture Source); this only makes sure both are available to it. numInputs is 0
+        // whenever the host has routed nothing, and a null here is what the bridge treats as
+        // silence rather than as an error.
+        const float * const * in         = nullptr;
+        int32                 inChannels = 0;
+
+        if ((data.numInputs > 0) && (data.inputs != nullptr)
+            && (data.inputs[0].channelBuffers32 != nullptr)) {
+            in         = data.inputs[0].channelBuffers32;
+            inChannels = data.inputs[0].numChannels;
+        }
+
+        gb_bridge_render(bridge, out, in, inChannels, frames, blockHostTime);
 
         return kResultOk;
     }
 
 private:
+    // ── The side-chain probe (2026-09-09) ───────────────────────────────────────────────────────
+    //
+    // Does anything actually arrive on the instrument's aux input under a real host? The whole
+    // External-Instrument mode rests on the answer, and nothing in the code can give it.
+    //
+    // ONCE, AND ON CHANGE. process() runs about a hundred times a second; a line per block would be
+    // a file nobody can read and would perturb the very timing this plug-in measures. So: the shape
+    // of what was handed over is logged the first time and thereafter only when it changes, and
+    // "silent or not" is one pass over the first channel with an early exit.
+    void report_host_input(ProcessData & data) {
+        if (!instrument) {
+            return;
+        }
+        int32 channels = ((data.numInputs > 0) && (data.inputs != nullptr))
+                         ? data.inputs[0].numChannels : -1;
+        bool  buffers  = ((channels > 0) && (data.inputs[0].channelBuffers32 != nullptr)
+                          && (data.inputs[0].channelBuffers32[0] != nullptr));
+        bool  audible  = false;
+
+        if (buffers) {
+            const float * in = data.inputs[0].channelBuffers32[0];
+
+            for (int32 i = 0; i < data.numSamples; i++) {
+                if ((in[i] > 1.0e-6f) || (in[i] < -1.0e-6f)) {
+                    audible = true;
+                    break;
+                }
+            }
+        }
+
+        // THE SILENCE FLAG IS PART OF THE ANSWER, not decoration: a host that routes nothing may
+        // still hand over buffers, and VST3 lets it say so in silenceFlags rather than by zeroing
+        // them. "Buffers but always silent" and "no buffers at all" are different failures.
+        bool declaredSilent = (buffers && (data.inputs[0].silenceFlags != 0));
+
+        if ((data.numInputs == lastInputBuses) && (channels == lastInputChannels)
+            && (audible == lastInputAudible) && (declaredSilent == lastInputSilentFlag)) {
+            return;
+        }
+        lastInputBuses     = data.numInputs;
+        lastInputChannels  = channels;
+        lastInputAudible   = audible;
+        lastInputSilentFlag = declaredSilent;
+
+        gb_log_line("HOST INPUT: numInputs %d, channels %d, buffers %s, silenceFlags %s, signal %s",
+                    (int)data.numInputs, (int)channels, buffers ? "yes" : "NO",
+                    declaredSilent ? "set (host says silent)" : "clear",
+                    audible ? "PRESENT" : "none");
+    }
+
+    int32 lastInputBuses{-1};
+    int32 lastInputChannels{-2};
+    bool  lastInputAudible{false};
+    bool  lastInputSilentFlag{false};
+
     // WALKING THE HOST'S QUEUES, which is the one thing about a parameter change that is VST3's
     // business rather than the plug-in's. What each value MEANS is gb_bridge_parameter()'s.
     void take_parameter_changes(ProcessData & data, uint64_t blockHostTime) {
@@ -708,6 +816,26 @@ public:
                     gb_editor_refresh_values(editorView);
                 }
             }
+        } else if (strcmp(id, "gbSource") == 0) {
+            // A STATE RESTORE CHANGED THE CAPTURE SOURCE, and the parameter is the host's copy of
+            // it. Without this the panel and the processor drift apart the first time Live
+            // re-applies a state that disagrees - and Live does that often.
+            int64 wantsHost = -1;
+
+            if ((message->getAttributes()->getInt("value", wantsHost) == kResultOk)
+                && (wantsHost >= 0)) {
+                source = (wantsHost > 0) ? 1.0 : 0.0;
+
+                if (componentHandler != nullptr) {
+                    componentHandler->beginEdit(kParamSource);
+                    componentHandler->performEdit(kParamSource, source);
+                    componentHandler->endEdit(kParamSource);
+                }
+
+                if (editorView != nullptr) {
+                    gb_editor_refresh_values(editorView);
+                }
+            }
         } else if (strcmp(id, "gbOffset") == 0) {
             // A measurement or a device change moved the correction inside the processor. The panel
             // reads this parameter, and the next +/- steps from it, so a stale value here would be
@@ -783,6 +911,7 @@ public:
 
         midiChannel = (double)active.midiChannel / (double)(GB_CHANNEL_SLOTS - 1);
         note        = (double)active.testNote / 127.0;
+        source      = active.hostInput ? 1.0 : 0.0;
 
         // THE CORRECTION IS PER DEVICE, so unlike the MIDI half above it has nothing to restore
         // until a device is known - gb_parse_active() resolves it by matching the saved pair. With
@@ -860,9 +989,20 @@ public:
                 // nonsensical size would leave an editor the user cannot see or cannot fit on a
                 // screen, with no way back to the default short of editing the project file. The
                 // bounds are checkSizeConstraint()'s own.
-                if ((w >= (GB_CANVAS_W * 0.75)) && (w <= (GB_CANVAS_W * 2.0)) && (h > 0.0)) {
+                //
+                // THE HEIGHT IS DERIVED, NOT RESTORED, and that is not tidiness. The panel is drawn
+                // on a fixed logical canvas scaled by WIDTH alone, so a window whose height does not
+                // match GB_CANVAS_H's aspect simply loses whatever falls past its bottom edge. A
+                // saved height is the aspect of the canvas AS IT WAS: adding one row on 2026-09-09
+                // took GB_CANVAS_H from 556 to 592, and every project saved before that reopened too
+                // short - the last rows missing until the user resized the window and
+                // checkSizeConstraint() put the aspect right. Deriving it here makes any future
+                // change of canvas height self-correcting for sessions saved before it.
+                (void)h;
+
+                if ((w >= (GB_CANVAS_W * 0.75)) && (w <= (GB_CANVAS_W * 2.0))) {
                     editorWidth  = w;
-                    editorHeight = h;
+                    editorHeight = w * (GB_CANVAS_H / GB_CANVAS_W);
                 }
             }
         }
@@ -966,6 +1106,7 @@ public:
             case kParamMeasure:  return measure;
             case kParamOffsetMs: return offset;
             case kParamTestNote: return note;
+            case kParamSource:   return source;
             default:
                 // A controller pass-through: the host owns its value, and pitch bend rests centred.
                 if ((id >= GB_CC_BASE) && (id < (GB_CC_BASE + GB_CC_COUNT))) {
@@ -990,6 +1131,7 @@ public:
             case kParamMeasure:  measure  = value; return kResultOk;
             case kParamOffsetMs: offset   = value; return kResultOk;
             case kParamTestNote: note     = value; return kResultOk;
+            case kParamSource:   source   = value; return kResultOk;
             default:
                 if ((id >= GB_CC_BASE) && (id < (GB_CC_BASE + GB_CC_COUNT))) {
                     return kResultOk;      // passed straight to the hardware, nothing to keep here
@@ -1085,6 +1227,11 @@ private:
     ParamValue          measure{0.0};
     ParamValue          offset{0.5};       // zero correction sits in the middle of the range
     ParamValue          note{(double)GB_MEASURE_NOTE / 127.0};   // the note Measure plays
+
+    // WHERE THE AUDIO COMES FROM: 0 an audio device, 1 the host's own input. A parameter the
+    // controller has to hold like any other - the panel reads its value from here, and a host
+    // restoring a project sets it here.
+    ParamValue          source{0.0};
 };
 
 // ------------------------------------------------------------------------------------------------

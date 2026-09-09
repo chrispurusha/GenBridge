@@ -116,9 +116,15 @@ typedef enum { eGbNoteOn = 0, eGbNoteOff, eGbPolyPressure } tGbNoteKind;
 void gb_bridge_note(tGbBridge * self, tGbNoteKind kind, int16_t channel, int16_t pitch,
                     float value, int32_t sampleOffset, uint64_t blockHostTime);
 
-// Fill the host's block from the ring. Silence is a perfectly good answer and is what comes back
-// while a device change is in flight.
-void gb_bridge_render(tGbBridge * self, float ** out, int32_t frames, uint64_t blockHostTime);
+// Fill the host's block. Silence is a perfectly good answer and is what comes back while a device
+// change is in flight.
+//
+// `in` IS THE HOST'S OWN INPUT, or NULL when it gave none. It is used in one mode and ignored in the
+// other: capturing from a DEVICE fills the block from the ring and never looks at it, while
+// capturing from the HOST passes it straight through - see GB_SOURCE_HOST. Passing it on every
+// block rather than latching it keeps the decision in one place and costs a pointer.
+void gb_bridge_render(tGbBridge * self, float ** out, const float * const * in, int32_t inChannels,
+                      int32_t frames, uint64_t blockHostTime);
 
 // ── The saved state ─────────────────────────────────────────────────────────
 //
@@ -148,6 +154,7 @@ typedef struct {
     unsigned channels;
     float    trim;
     double   offsetMs;
+    bool     hostInput;      // capture from the host's own input rather than from a device
     bool     valid;
 } tGbActive;
 

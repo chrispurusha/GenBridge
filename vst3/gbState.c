@@ -215,6 +215,8 @@ bool gb_parse_state(tGbBridge * self, const char * blob, size_t length) {
         return false;
     }
 
+    int wasSource = atomic_load(&self->captureSource);
+
     self->rememberedCount    = 0;
     self->measuredCount      = 0;
     self->deviceSelector[0]  = '\0';
@@ -232,6 +234,7 @@ bool gb_parse_state(tGbBridge * self, const char * blob, size_t length) {
     // pair record is cleared with it, so the device open that follows treats this as a new pair
     // and seeds the offset from whatever the restored table holds for it.
     atomic_store(&self->offsetMs, 0.0);
+    atomic_store(&self->captureSource, GB_SOURCE_DEVICE);
     self->offsetUid[0]  = '\0';
     self->offsetDest[0] = '\0';
 
@@ -265,6 +268,10 @@ bool gb_parse_state(tGbBridge * self, const char * blob, size_t length) {
             if ((frames > 0) && (frames <= (GB_MAX_BLOCK_FRAMES))) {
                 self->observedMaxFrames = frames;
             }
+        } else if (line_key(&line, "source=", &value, &valueLen)) {
+            copy_field(scratch, sizeof(scratch), value, valueLen);
+            atomic_store(&self->captureSource,
+                         (strcmp(scratch, "host") == 0) ? GB_SOURCE_HOST : GB_SOURCE_DEVICE);
         } else if (line_key(&line, "testnote=", &value, &valueLen)) {
             copy_field(scratch, sizeof(scratch), value, valueLen);
 
@@ -296,6 +303,17 @@ bool gb_parse_state(tGbBridge * self, const char * blob, size_t length) {
     // list had a different shape - decides what gets opened, until it either turns up or the
     // user chooses something else.
     atomic_store(&self->savedDevicePending, self->deviceSelector[0] != '\0');
+
+    // AND THE CONTROLLER HAS TO BE TOLD IF THIS CHANGED THE MODE, for the same reason gbDeviceSlot
+    // exists: the parameter is the host's copy, and a state restore reaches this side only. Live
+    // calls setState repeatedly, so a blob that disagreed with the panel used to leave the two
+    // permanently out of step - the panel saying Host input while the processor had gone back to
+    // opening a device, and no further parameter change coming because nothing the HOST knew about
+    // had changed.
+    if (atomic_load(&self->captureSource) != wasSource) {
+        gb_send_message(self, "gbSource",
+                        (atomic_load(&self->captureSource) == GB_SOURCE_HOST) ? 1 : 0);
+    }
 
     return true;
 }
@@ -494,6 +512,13 @@ const char * gb_bridge_state(tGbBridge * self, size_t * length) {
         gb_current_midi_name(self, midiNameNow, sizeof(midiNameNow));
         text_add(self, "midi=%s\n", midiNameNow);
         text_add(self, "midich=%d\n", atomic_load(&self->midiChannel));
+
+        // ALWAYS WRITTEN, both values. A key that only appears in one mode says nothing in the
+        // other, and a host that re-applies a state - Live does it repeatedly, for undo snapshots
+        // among other things - would then read "no key" as "device" and quietly switch the plug-in
+        // out of the mode the user chose. An older build ignores the key it does not know.
+        text_add(self, "source=%s\n",
+                 (atomic_load(&self->captureSource) == GB_SOURCE_HOST) ? "host" : "device");
         text_add(self, "testnote=%d\n", atomic_load(&self->testNote));
 
         // THE MANUAL TRIM, AND THE MEASUREMENTS IT TRIMS. Neither belongs on a dev= line: the offset
@@ -598,8 +623,9 @@ void gb_state_parse_active(const char * blob, size_t length, tGbActive * out) {
     out->testNote = GB_MEASURE_NOTE;
     out->frames   = GB_DEFAULT_FRAMES;
     out->rate     = GB_DEFAULT_RATE;
-    out->channels = GB_CHANNELS;
-    out->trim     = 1.0f;
+    out->channels  = GB_CHANNELS;
+    out->trim      = 1.0f;
+    out->hostInput = false;
 
     int version = 0;
 
@@ -634,6 +660,9 @@ void gb_state_parse_active(const char * blob, size_t length, tGbActive * out) {
         } else if (line_key(&line, "midich=", &value, &valueLen)) {
             copy_field(scratch, sizeof(scratch), value, valueLen);
             out->midiChannel = atoi(scratch);
+        } else if (line_key(&line, "source=", &value, &valueLen)) {
+            copy_field(scratch, sizeof(scratch), value, valueLen);
+            out->hostInput = (strcmp(scratch, "host") == 0);
         } else if (line_key(&line, "testnote=", &value, &valueLen)) {
             copy_field(scratch, sizeof(scratch), value, valueLen);
             out->testNote = atoi(scratch);

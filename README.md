@@ -404,6 +404,41 @@ correction in ms, destination-name length, then the destination and the UID run 
 destination is quite entitled to contain a comma, and a third comma would have been a guess that
 fails on somebody's interface.
 
+### The External Instrument mode (audio from the host)
+
+**Capture Source = Host input** stops the plug-in opening a device of its own and takes the audio the
+*host* hands it instead. That is Live's External Instrument arrangement with one difference: the
+hardware latency is measured rather than typed. None of the ring, the resampler or the drift loop
+runs in this mode - the host's input and its output are the same clock, and reconciling two clocks is
+the only reason any of that exists.
+
+To set it up in Live:
+
+1. Put the **GenBridge Instrument** on a MIDI track and set **Source** to *Host input*. The Device,
+   Rate, Buffer, Mode and Input rows grey out - there is no device being opened for them to describe.
+2. Set the plug-in's own **MIDI Out** row to the synth's MIDI destination, and **Channel** to
+   whatever it listens on. This is the plug-in sending MIDI itself, not Live's `MIDI To`.
+3. Feed the plug-in's **side-chain** from an **audio track** whose input is the hardware input the
+   synth is plugged into, monitoring **In**. Tap it **Pre FX** or **Post FX** so the tap survives
+   muting that track.
+
+   A MIDI track's side-chain chooser does **not** offer `Ext. In` - that is why Live's own External
+   Instrument device asks for the hardware input in its own panel rather than through a routing.
+   Confirmed on Live 12; the audio-track hop is the way in, and it costs nothing but a track.
+4. **Never point the side-chain at the plug-in's own track.** That is a feedback loop, Live mutes it,
+   and the result is silence - the panel now says `NO AUDIO from the host` in amber rather than
+   leaving you to guess.
+5. Press **Measure** with the synth able to sound and nothing else feeding the side-chain.
+
+**Anything in that audio path doing its own latency compensation will bias the measurement.** An
+External Instrument device used as the source is the case to watch: Live is already pulling its
+return earlier by whatever its *Hardware Latency* field says, so the figure comes back short by that
+much. Set it to zero while measuring, or feed the side-chain from the hardware input directly.
+
+The measurement is keyed on `(host input)` rather than a device UID in this mode, so a figure taken
+this way is never confused with one taken through a capture device - a different path and a different
+number.
+
 ### Measuring the hardware round trip
 
 The instrument sends MIDI out and takes audio back, so a recorded part lands late by however long

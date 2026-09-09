@@ -173,6 +173,7 @@ static double gMidiDest  = 0.0;
 static double gOffset    = 0.5;
 static double gTestNote  = 60.0 / 127.0;
 static double gMidiChan  = 0.0;
+static double gSource    = 0.0;    // 0 = an audio device, 1 = the host's own input
 
 
 // Which processor's figures this panel shows. -1 until the host has connected the two ends, which
@@ -192,10 +193,37 @@ void gb_draw_set_status_slot(int slot) {
 // clicked.
 #define ROW_TOP          (56.0)
 #define ROW_STEP         (36.0)
-#define ROW_COUNT        (7)          // the last two are MIDI destination and channel, instrument only
+
+// THE ROWS, IN ORDER, AND THE ONE THAT DECIDES THE OTHERS COMES FIRST.
+//
+// Capture Source is instrument-only and sits at the top because it settles what the four rows under
+// it are for: with Host input chosen there is no device to pick, no rate to ask for and no buffer to
+// set, and those rows grey out. The MIDI pair at the bottom is instrument-only too.
+//
+// AN ENUM RATHER THAN LITERALS, because the row index is used in two places - the drawing and the
+// hit test - and a control that is drawn at one index and tested at another is a control that cannot
+// be clicked. That was already the note above; inserting a row at the top is exactly the change that
+// would have broken it.
+typedef enum {
+    eRowSource = 0,
+    eRowDevice,
+    eRowRate,
+    eRowFrames,
+    eRowMode,
+    eRowFirstChannel,
+    eRowMidiDest,
+    eRowMidiChannel,
+    eRowCount
+} tGbRow;
+
+// Where a row actually sits. On the effect there is no Source row, so everything below it moves up.
+static int row_of(tGbRow which) {
+    return gInstrument ? (int)which : ((int)which - 1);
+}
 
 static int row_count(void) {
-    return gInstrument ? ROW_COUNT : (ROW_COUNT - 2);
+    // The effect drops three: the source, and the two MIDI rows.
+    return gInstrument ? (int)eRowCount : ((int)eRowCount - 3);
 }
 
 static double row_y(int row) {
@@ -224,6 +252,28 @@ static double telemetry_y(void) { return (gInstrument ? offset_y() : level_y()) 
 static bool row_is_menu(int row) {
     (void)row;
     return true;    // every stepper row is a drop-down; the offset below them keeps its arrows
+}
+
+// IS THIS ROW STILL ABOUT ANYTHING? With Host input chosen there is no device being opened, so the
+// device, its rate, its buffer, its channel mode and its input pair are all describing something
+// that does not exist. They stay on screen - a control that vanishes is a control the user has to
+// go looking for - but they are drawn dim and they do not answer a click.
+static bool row_live(tGbRow which) {
+    if (gSource < 0.5) {
+        return true;
+    }
+
+    switch (which) {
+        case eRowDevice:
+        case eRowRate:
+        case eRowFrames:
+        case eRowMode:
+        case eRowFirstChannel:
+            return false;
+
+        default:
+            return true;
+    }
 }
 
 static tRectangle row_prev(int row) {
@@ -521,7 +571,8 @@ void gb_input_device_name(int index, char * out, unsigned long len) {
 
 void gb_draw_set_values(double device, double rate, double frames, double trim,
                         double mode, double firstChannel, double midiDest, double offset,
-                        double midiChannel, double testNote) {
+                        double midiChannel, double testNote, double source) {
+    gSource   = source;
     gMidiDest = midiDest;
     gOffset   = offset;
     gMidiChan = midiChannel;
@@ -560,25 +611,36 @@ static void label(double x, double y, const char * text) {
     render_text(mainArea, (tRectangle){ { x, y }, { 0.0, TEXT_H } }, text);
 }
 
-static void value_box(int row, const char * text) {
+static void value_box(int row, const char * text, bool live) {
     tRectangle box = row_value(row);
 
-    set_rgb_colour((tRgb){ 0.16, 0.16, 0.18 });
+    set_rgb_colour(live ? (tRgb){ 0.16, 0.16, 0.18 } : (tRgb){ 0.22, 0.22, 0.24 });
     render_rectangle(mainArea, box);
 
-    set_rgb_colour((tRgb){ 0.92, 0.92, 0.94 });
+    // A DIM VALUE IS STILL A VALUE. What a greyed row shows is what the plug-in would go back to,
+    // which is worth reading - so it drops a tier rather than blanking, the same treatment the
+    // sibling projects' panels give a figure that is held rather than live.
+    set_rgb_colour(live ? (tRgb){ 0.92, 0.92, 0.94 } : (tRgb){ 0.48, 0.48, 0.50 });
     render_text(mainArea, (tRectangle){ { box.coord.x + 8.0, box.coord.y + 5.0 }, { 0.0, TEXT_H } }, text);
 }
 
-static void stepper(int row, const char * labelText, const char * valueText) {
-    label(20.0, row_y(row) + 5.0, labelText);
+static void stepper_row(tGbRow which, const char * labelText, const char * valueText) {
+    int  row  = row_of(which);
+    bool live = row_live(which);
+
+    if (live) {
+        label(20.0, row_y(row) + 5.0, labelText);
+    } else {
+        set_rgb_colour((tRgb){ 0.46, 0.46, 0.48 });
+        render_text(mainArea, (tRectangle){ { 20.0, row_y(row) + 5.0 }, { 0.0, TEXT_H } }, labelText);
+    }
 
     if (!row_is_menu(row)) {
         draw_button(mainArea, row_prev(row), "<", (tRgb){ 0.30, 0.30, 0.33 });
         draw_button(mainArea, row_next(row), ">", (tRgb){ 0.30, 0.30, 0.33 });
     }
 
-    value_box(row, valueText);
+    value_box(row, valueText, live);
 }
 
 // A LABELLED FIGURE AT A FIXED COLUMN. Everything below used to be built with snprintf into one
@@ -649,7 +711,31 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
     set_rgb_colour((tRgb){ 0.95, 0.95, 0.97 });
     render_text(mainArea, (tRectangle){ { 20.0, 18.0 }, { 0.0, 20.0 } }, "GenBridge");
 
-    if ((status != NULL) && atomic_load(&status->offlineRender)) {
+    if (gSource >= 0.5) {
+        // THE HOST-INPUT MODE HAS NO DEVICE TO REPORT ON, and every line below assumes there is one -
+        // "no device selected" in amber is alarming and wrong here, since nothing is meant to be
+        // selected. What matters instead is whether the host has routed anything in.
+        //
+        // AND THAT IS WORTH SAYING OUT LOUD, because the commonest way to get this wrong is silent:
+        // a side-chain pointed at the plug-in's OWN track is a feedback loop, so Live mutes it and
+        // hands over buffers of nothing. Without this line that looks exactly like a dead synth, a
+        // wrong MIDI destination or a broken plug-in.
+        if (status == NULL) {
+            // NOT AN ANSWER, so it does not claim one. Without a status slot the panel knows nothing
+            // about what the processor is receiving, and saying "audio from the host" here would be
+            // a guess dressed as a report.
+            set_rgb_colour((tRgb){ 0.72, 0.72, 0.74 });
+            snprintf(buffer, sizeof(buffer), "%s", "external instrument - waiting for the processor");
+        } else if (atomic_load(&status->hostInputPresent) == 0) {
+            set_rgb_colour((tRgb){ 0.85, 0.60, 0.25 });
+            snprintf(buffer, sizeof(buffer), "%s",
+                     "external instrument - NO AUDIO from the host: check the side-chain routing");
+        } else {
+            set_rgb_colour((tRgb){ 0.45, 0.75, 0.50 });
+            snprintf(buffer, sizeof(buffer), "%s",
+                     "external instrument - audio from the host, latency measured");
+        }
+    } else if ((status != NULL) && atomic_load(&status->offlineRender)) {
         // AHEAD OF "capturing", because during an offline render it is still nominally capturing
         // and that is precisely the misleading thing to show. A bounce faster than realtime drains
         // the ring - the device cannot be hurried - so the render is silent whatever else is true.
@@ -683,16 +769,23 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
     // unplugged it points at a stranger - and the row would calmly name a microphone underneath a
     // header saying we are waiting for an interface. The processor is honouring the saved device, so
     // the row shows the saved device.
+    // THE SOURCE ROW COMES FIRST because it decides what the rows under it are for. Instrument only:
+    // handing the host its own input back is not something an effect can usefully do.
+    if (gInstrument) {
+        stepper_row(eRowSource, "Source",
+                    (gSource < 0.5) ? "Audio device" : "Host input (external instrument)");
+    }
+
     if ((status != NULL) && (atomic_load(&status->waitingForDevice) != 0)) {
         snprintf(buffer, sizeof(buffer), "%s", status->waitingName);
     } else {
         gb_input_device_name(gb_device_slot(gDevice), buffer, sizeof(buffer));
     }
-    stepper(0, "Device", buffer);
+    stepper_row(eRowDevice, "Device", buffer);
 
     snprintf(buffer, sizeof(buffer), "%.0f Hz",
              gGbRates[(int)(gRate * (double)(gGbRateCount - 1) + 0.5)]);
-    stepper(1, "Rate", buffer);
+    stepper_row(eRowRate, "Rate", buffer);
 
     // WHAT THE DEVICE TOOK, NOT ONLY WHAT WAS ASKED FOR. A CoreAudio device is entitled to refuse a
     // buffer size - its driver has a minimum, and a device another process already holds keeps the
@@ -721,9 +814,9 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
             snprintf(buffer, sizeof(buffer), "%d samples", asked);
         }
     }
-    stepper(2, "Buffer", buffer);
+    stepper_row(eRowFrames, "Buffer", buffer);
 
-    stepper(3, "Mode", (gMode < 0.5) ? "Mono" : "Stereo");
+    stepper_row(eRowMode, "Mode", (gMode < 0.5) ? "Mono" : "Stereo");
 
     // Shown as the channel numbers a person would read off the back of the interface, so 1-based -
     // and as a pair when in stereo, because "channel 3" meaning "3 and 4" is exactly the sort of
@@ -736,13 +829,13 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
         snprintf(buffer, sizeof(buffer), "%d - %d", first + 1, first + 2);
     }
 
-    stepper(4, "Input", buffer);
+    stepper_row(eRowFirstChannel, "Input", buffer);
 
     // The instrument's own row, and the measurement it enables.
     if (gInstrument) {
         gb_midi_destination_name((int)(gMidiDest * (double)(GB_MIDI_MAX_DEST - 1) + 0.5),
                                  buffer, sizeof(buffer));
-        stepper(5, "MIDI Out", buffer);
+        stepper_row(eRowMidiDest, "MIDI Out", buffer);
 
         int channel = (int)(gMidiChan * (double)(GB_CHANNEL_SLOTS - 1) + 0.5);
 
@@ -752,7 +845,7 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
             snprintf(buffer, sizeof(buffer), "%d", channel);
         }
 
-        stepper(6, "Channel", buffer);
+        stepper_row(eRowMidiChannel, "Channel", buffer);
     }
 
     // ---- trim ----
@@ -1099,6 +1192,10 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
                     request->normalized = (double)choice / (double)(GB_CHANNEL_SLOTS - 1);
                     break;
 
+                case eGbEditSource:
+                    request->normalized = (double)choice;       // 0 device, 1 host input
+                    break;
+
                 default:
                     request->which = eGbEditNone;
                     return false;
@@ -1111,10 +1208,15 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
     // The VALUE between the arrows opens a menu; the arrows themselves still step. Both reach the
     // same parameter, so nothing is lost either way - see the note on gMouse above for why both.
     {
-        struct { tGbEdit which; int row; } menus[] = {
-            { eGbEditDevice,       0 }, { eGbEditRate,        1 }, { eGbEditFrames,  2 },
-            { eGbEditMode,         3 }, { eGbEditFirstChannel, 4 }, { eGbEditMidiDest, 5 },
-            { eGbEditMidiChannel,  6 },
+        struct { tGbEdit which; tGbRow row; } menus[] = {
+            { eGbEditSource,       eRowSource       },
+            { eGbEditDevice,       eRowDevice       },
+            { eGbEditRate,         eRowRate         },
+            { eGbEditFrames,       eRowFrames       },
+            { eGbEditMode,         eRowMode         },
+            { eGbEditFirstChannel, eRowFirstChannel },
+            { eGbEditMidiDest,     eRowMidiDest     },
+            { eGbEditMidiChannel,  eRowMidiChannel  },
         };
         // Each row lists only what can actually be chosen on the CURRENT device, so the limits that
         // used to be enforced by clamping the arrows are now expressed by the list simply not
@@ -1123,12 +1225,24 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
         int channels = gb_input_device_channels(gb_device_slot(gDevice));
 
         for (unsigned m = 0; m < (sizeof(menus) / sizeof(menus[0])); m++) {
-            if ((menus[m].row >= row_count()) || !hit(row_value(menus[m].row), x, y)) {
+            // A ROW THE HOST-INPUT MODE HAS GREYED DOES NOT ANSWER A CLICK. Drawing it dim and then
+            // opening its menu anyway would be the worst of both: it says the control is inert and
+            // then behaves as though it is not.
+            if (!row_live(menus[m].row) || (row_of(menus[m].row) >= row_count())
+                || (row_of(menus[m].row) < 0)
+                || !hit(row_value(row_of(menus[m].row)), x, y)) {
                 continue;
             }
             int count = 0;
 
             switch (menus[m].which) {
+                case eGbEditSource:
+                    count = 2;
+                    snprintf(gMenuLabels[0], sizeof(gMenuLabels[0]), "%s", "Audio device");
+                    snprintf(gMenuLabels[1], sizeof(gMenuLabels[1]), "%s",
+                             "Host input (external instrument)");
+                    break;
+
                 case eGbEditDevice:
                     count = gb_input_device_count();
 
@@ -1216,7 +1330,7 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
             }
 
             if (count > 0) {
-                gb_open_menu(menus[m].which, count, row_value(menus[m].row));
+                gb_open_menu(menus[m].which, count, row_value(row_of(menus[m].row)));
             }
             return false;
         }
