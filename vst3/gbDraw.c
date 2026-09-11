@@ -27,7 +27,7 @@
 // This comment used to say the opposite - that steppers were chosen because a drop-down "means
 // linking the popup, menu-bar and click-region machinery". That was measured and found untrue:
 // SynthLib's contextMenu.c includes nothing beyond the headers this file already uses, and
-// clickRegion.c was already in do-vst3's list. The build cost was one line.
+// clickRegion.c was already in do-vst3's list (do-plugin's now). The build cost was one line.
 //
 // What decided it was not cost but behaviour. A stepper walks THROUGH every value on the way to the
 // one you want, and each step here is a real device change - so stepping past a device opened it,
@@ -36,7 +36,7 @@
 //
 // EVERY CONTROL IS A VST3 PARAMETER, and a click returns a request rather than acting. The host has
 // to be told through beginEdit/performEdit/endEdit or its automation and its saved state end up
-// disagreeing with what the plug-in is actually doing - see gbEditor.mm.
+// disagreeing with what the plug-in is actually doing - see gb_on_edit() in gbPlugin.c.
 
 #include <math.h>      // round, to snap the offset to the fine grid after a coarse step
 #include <stdio.h>
@@ -453,7 +453,7 @@ void gb_device_list_invalidate(void) {
 int gb_slot_for_uid(const char * uid) {
     uint32_t            count = 0;
     const tDeviceInfo * list  = device_list(&count);
-    int                 seen  = 1;      // slot 0 is None - see resolve_slot() in gbVst3.cpp
+    int                 seen  = 1;      // slot 0 is None - see gb_resolve_slot() in gbBridge.c
 
     if ((uid == NULL) || (uid[0] == '\0')) {
         return -1;
@@ -522,7 +522,7 @@ int gb_input_device_count(void) {
 int gb_input_device_channels(int index) {
     uint32_t            count = 0;
     const tDeviceInfo * list  = device_list(&count);
-    int                 seen  = 1;      // slot 0 is None - see resolve_slot() in gbVst3.cpp
+    int                 seen  = 1;      // slot 0 is None - see gb_resolve_slot() in gbBridge.c
 
     if (index <= 0) {
         return 0;       // None has no channels, and 0 means "unknown" to the callers, which is right
@@ -545,7 +545,7 @@ int gb_input_device_channels(int index) {
 void gb_input_device_name(int index, char * out, unsigned long len) {
     uint32_t            count = 0;
     const tDeviceInfo * list  = device_list(&count);
-    int                 seen  = 1;      // slot 0 is None - see resolve_slot() in gbVst3.cpp
+    int                 seen  = 1;      // slot 0 is None - see gb_resolve_slot() in gbBridge.c
 
     snprintf(out, len, "%s", "None");
 
@@ -1070,7 +1070,7 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
     y += 20.0;
 
     // fill/setpoint, and the recommended setpoint after it WHEN THE TWO DIFFER. The floor is advice
-    // rather than a limit (see the clamp note in gbVst3.cpp), and advice nobody can read is just a
+    // rather than a limit (see "THE FLOOR IS ADVICE" in gbBridge.c), and advice nobody can read is just a
     // silent override with extra steps — so a setpoint below the recommendation says so here, in
     // the same row as the underrun count that tells the user whether it is working.
     {

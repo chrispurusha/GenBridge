@@ -127,9 +127,9 @@ enum {
 // controllers would make the pedal arrive on a different channel from the notes it belongs to.
 //
 // THE THREE NUMBERS BELOW ARE THE SDK'S, WRITTEN OUT. They are Vst::kAfterTouch, Vst::kPitchBend
-// and Vst::kCountCtrlNumber from ivstmidicontrollers.h, which is a C++ header - so the wrapper
-// asserts at compile time that these still match it rather than this file guessing. See the
-// static_assert in gbVst3.cpp: if the SDK ever renumbers them, the build stops.
+// and Vst::kCountCtrlNumber from ivstmidicontrollers.h, which is a C++ header - so SynthLib's VST3
+// wrapper asserts its own SYNTHLIB_MIDI_* numbers against the SDK, and gbPlugin.c asserts these
+// against those. If the SDK ever renumbers them, the build stops rather than this file guessing.
 #define GB_CC_AFTERTOUCH      (128)
 #define GB_CC_PITCHBEND       (129)
 #define GB_CC_PER_CHANNEL     (130)      // 128 controllers, plus aftertouch and bend

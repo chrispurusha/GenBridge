@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Build the GenBridge proof of concept.
 #
-# A script rather than an Xcode project, for the same reason G2-Edit's do-vst3 is one: this is a
+# A script rather than an Xcode project, for the same reason G2-Edit's do-plugin is one: this is a
 # handful of C files and two system frameworks, and a build system would only be in the way. When
 # the plug-in wrapper arrives it can bring an Xcode project with it if it needs one.
 

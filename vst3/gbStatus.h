@@ -110,7 +110,7 @@ typedef struct {
 
     // The setpoint the conservative floor would have chosen, whether or not that is what is in
     // force. Published so the panel can show a manual setting ALONGSIDE the recommendation instead
-    // of the plug-in quietly overruling one with the other — see the clamp note in gbVst3.cpp.
+    // of the plug-in quietly overruling one with the other — see "THE FLOOR IS ADVICE" in gbBridge.c.
     _Atomic double  recommendedFrames;
     _Atomic double  driftPpm;
 

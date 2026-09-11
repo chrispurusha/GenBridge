@@ -1060,7 +1060,7 @@ Two things the steppers never needed, and they are the real work:
     menu still opens and its items are still clickable; they just never highlight under the cursor.
     Adding tracking is about ten lines and the existing 30 Hz timer already covers the repaint, but
     it touches the editor view, which is where every unresolved resize/occlusion caveat in
-    to-test.txt already lives.
+    to-test.md already lives.
 
 The menu itself is small: tMenuItem is {label, colour, action(int index), ...}, so a flat device list
 needs no submenus, no flyouts and no hover-dwell timer. Labels come from gb_input_device_name(), and
@@ -1170,7 +1170,7 @@ different device on reload. Fixing only the controller default would have left t
 The processor was never at fault: reconfigure() already refused to open anything on an unresolved
 UID, with a comment recording why. It was being overridden by the parameter.
 
-FIX, and it is NOT the plan todo.txt carried. That plan had the controller hold a waitingForUid and
+FIX, and it is NOT the plan todo.md carried. That plan had the controller hold a waitingForUid and
 send the processor a hold message over IConnectionPoint, with a separate signal to tell a genuine
 user choice from a host restore. None of that was needed. The processor can tell them apart on its
 own: THE FIRST DEVICE PARAMETER TO ARRIVE AFTER A STATE RESTORE IS THE HOST'S, EVERY LATER ONE IS THE

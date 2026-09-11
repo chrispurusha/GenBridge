@@ -1,7 +1,19 @@
 GenBridge TO TEST
 
 Finished code that is built but not yet checked against a real host or real hardware.
-Confirmed -> delete the line. Check failed -> move it to todo.txt.
+Confirmed -> delete the line. Check failed -> move it to todo.md.
+
+- ***VST3 AND AUDIO UNIT, ON SYNTHLIB'S SHARED WRAPPERS (2026-09-11)*** - gbVst3.cpp and gbEditor.mm
+  are gone; vst3/gbPlugin.c describes the bridge to SynthLib/plugin/, and ./do-plugin builds
+  GenBridge.vst3 and GenBridge.component (aufx GBfx CPur, aumu GBin CPur). Checked offline:
+  tools/vst3check 91/91, auval clean on both components, both editors open in tools/vst3host and in
+  G2-Edit's tools/auhost. STILL TO CHECK in Live: (1) an existing set reopens on the same devices, MIDI
+  destination and offset - the class ids are unchanged and the saved state is byte-identical; (2) two
+  instances on two tracks each show their OWN figures and their own values; (3) Measure arms and
+  re-arms; (4) the editor comes back at the size each set left it; (5) pedal, bend and mod wheel
+  reach the hardware on the right channel - pass-throughs now send EVERY point in a block rather
+  than only the last. In Logic: the Audio Unit loads (sandboxSafe is false, so it may be hosted out
+  of process), the instrument's side-chain can be fed, and a bounce reports "rendering offline".
 
 - THE CALLBACK LEAD IN HOST-INPUT MODE (2026-09-09, predicted and unconfirmed). Re-measure the same
   synth in the same arrangement: the figure should now come back near 17.8 ms rather than 19.8, and

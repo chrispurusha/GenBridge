@@ -38,10 +38,11 @@ extern "C" {
 // hardware, measuring its round trip, remembering the settings and reporting a latency. None of
 // that needs C++ and none of it needs the SDK.
 //
-// What DOES need C++ is the COM plumbing - vtables, FUnknown, the reference counting - and that is
-// all gbVst3.cpp is: it turns a ProcessData into the four calls below, a ParameterInfo into what
-// gbParams.c says, and an IBStream into a block of bytes. When a question is "what does this
-// plug-in do", the answer is in these files; when it is "what does VST3 require", it is in that one.
+// What a PLUG-IN FORMAT needs is not here either. SynthLib's shared wrappers (SynthLib/plugin/) are
+// the VST3 and the Audio Unit, and gbPlugin.c describes this bridge to them: a block becomes the
+// four calls below, a parameter is what gbParams.c says, and the saved state is a block of bytes.
+// When a question is "what does this plug-in do", the answer is in these files; when it is "what does
+// a format require", it is in SynthLib.
 //
 // The struct is OPAQUE on purpose. It carries C11 _Atomic members, which C++ cannot parse, and
 // keeping the definition in gbBridgePrivate.h is what lets the C side use the right tool without

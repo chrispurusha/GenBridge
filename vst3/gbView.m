@@ -19,9 +19,9 @@
 
 // The drawing surface, and nothing else.
 //
-// Plain Objective-C, not Objective-C++: nothing here needs C++, and gbEditor.mm is Objective-C++
-// only because IPlugView is a C++ interface that has to hand a Cocoa view to the host. Keeping the
-// languages separated that way is G2-Edit's arrangement and it is worth copying.
+// Plain Objective-C, not Objective-C++: nothing here needs C++. The window around it is SynthLib's -
+// an IPlugView on VST3, an AUCocoaUIBase container on an Audio Unit - and this view is what both of
+// them put inside, so the editor is written once for both formats.
 //
 // METAL, so a PLAIN NSView. Under Metal there is no context for the view to own - it is
 // layer-hosting and the CAMetalLayer is the surface - which is why there is no NSOpenGLView here
@@ -38,6 +38,7 @@
 
 @interface GbView : NSView
 @property (nonatomic, assign) tGbEditCallback callback;
+@property (nonatomic, assign) tGbSyncCallback sync;
 @property (nonatomic, assign) void *          user;
 @property (nonatomic, strong) NSTimer *       timer;
 @property (nonatomic, assign) int            statusSlot;
@@ -221,8 +222,14 @@
     // to do every frame and removes any need to track whose turn it is.
     gfx_attach_window((__bridge void *)self);
 
+    // THIS EDITOR'S INSTANCE, fetched fresh: its status slot and its parameter values.
+    if (self.sync != NULL) {
+        self.sync(self.user, (__bridge void *)self);
+    }
+
     // Both of these are file-scope in the draw layer, so they are asserted per frame rather than
-    // once - with two editors open, whichever drew last would otherwise speak for both.
+    // once - with two editors open, whichever drew last would otherwise speak for both. The values
+    // gb_view_set_values() hands on are file-scope too, which is why the sync above is per frame.
     gb_draw_set_status_slot(self.statusSlot);
     gb_draw_set_instrument(self.isInstrument ? true : false);
 
@@ -255,7 +262,11 @@
     // the Measure and Offset controls when it believes it is drawing an instrument. With an effect
     // and an instrument both open, the effect's 30 Hz repaint had already set that flag false by the
     // time a click arrived on the instrument, so those two controls silently did nothing while every
-    // other control worked.
+    // other control worked. The values go with them, for the same reason: a click on a stepper steps
+    // from whatever the draw layer holds.
+    if (self.sync != NULL) {
+        self.sync(self.user, (__bridge void *)self);
+    }
     gb_draw_set_status_slot(self.statusSlot);
     gb_draw_set_instrument(self.isInstrument ? true : false);
     gb_draw_set_mouse(x, y);        // a click is a position too, and a trackpad tap sends no move
@@ -325,13 +336,17 @@
 
 @end
 
-void * gb_view_create(double width, double height, tGbEditCallback callback, void * user,
-                      int statusSlot, bool instrument) {
+// RETAINED (+1), as SynthLib's createView() contract requires: the wrapper owns the view from here and
+// releases it after taking it out of the window - -removeFromSuperview above is where it lets go of
+// its timer and its drawing surface.
+void * gb_view_create(double width, double height, tGbEditCallback callback, tGbSyncCallback sync,
+                      void * user, bool instrument) {
     GbView * view = [[GbView alloc] initWithFrame:NSMakeRect(0.0, 0.0, width, height)];
 
     view.callback     = callback;
+    view.sync         = sync;
     view.user         = user;
-    view.statusSlot   = statusSlot;
+    view.statusSlot   = -1;           // slot 0 is a real one; nothing is known until the sync says
     view.isInstrument = instrument ? YES : NO;
 
     return (__bridge_retained void *)view;
@@ -341,20 +356,6 @@ void gb_view_set_status_slot(void * view, int statusSlot) {
     if (view != NULL) {
         ((__bridge GbView *)view).statusSlot = statusSlot;
     }
-}
-
-void gb_view_destroy(void * view) {
-    if (view == NULL) {
-        return;
-    }
-
-    GbView * v = (__bridge_transfer GbView *)view;
-
-    [[NSNotificationCenter defaultCenter] removeObserver:v];
-    [v.timer invalidate];
-    v.timer = nil;
-    [v removeFromSuperview];
-    gfx_detach_window((__bridge void *)v);
 }
 
 void gb_view_set_values(void * view, double device, double rate, double frames, double trim,

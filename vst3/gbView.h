@@ -26,14 +26,20 @@
 extern "C" {
 #endif
 
-// A click that the host must be told about, handed back to gbEditor.mm which owns the controller.
+// A click the host must be told about, handed back to gbPlugin.c.
 typedef void (*tGbEditCallback)(void * user, const tGbEditRequest * request);
 
-// Returns an NSView *, as a void * so the C++ side need not import AppKit.
-void * gb_view_create(double width, double height, tGbEditCallback callback, void * user,
-                      int statusSlot, bool instrument);
+// CALLED BEFORE EVERY FRAME AND EVERY CLICK, on the main thread, to put THIS editor's status slot and
+// parameter values into the draw layer - which keeps both file-scope, so with two editors open
+// whichever set them last would otherwise speak for both. The callback answers with
+// gb_view_set_status_slot() and gb_view_set_values().
+typedef void (*tGbSyncCallback)(void * user, void * view);
+
+// Returns an NSView *, RETAINED, as a void * so C need not import AppKit - SynthLib's wrappers own it
+// from there and release it after taking it out of the host's window.
+void * gb_view_create(double width, double height, tGbEditCallback callback, tGbSyncCallback sync,
+                      void * user, bool instrument);
 void   gb_view_set_status_slot(void * view, int statusSlot);
-void   gb_view_destroy(void * view);
 void   gb_view_set_values(void * view, double device, double rate, double frames, double trim,
                           double mode, double firstChannel, double midiDest, double offset,
                           double midiChannel, double testNote, double source);

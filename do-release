@@ -1,7 +1,7 @@
 #!/bin/zsh
 
-# Builds a universal (arm64 + x86_64) GenBridge.vst3 and packages it as a .dmg
-# ready to attach to a GitHub release.
+# Builds universal (arm64 + x86_64) GenBridge.vst3 and GenBridge.component and
+# packages them as a .dmg ready to attach to a GitHub release.
 #
 # Versions are semver: V<major>.<minor>.<patch>-beta.<n>. The .dmg is normally
 # built BEFORE the tag exists, so name the part you are bumping and the next
@@ -29,10 +29,12 @@
 # WHAT IS DIFFERENT FROM G2-Edit's do-release, which this is modelled on:
 #
 #   - There is no application. GenBridge is a plug-in and nothing else, so the
-#     .dmg holds one bundle and there is no /Applications symlink to drag onto.
-#   - There is therefore no Xcode project and no xcodebuild. do-vst3 is the whole
-#     build, which also means no separate "skip the plug-in" switch: skipping it
-#     would leave an empty disk image.
+#     .dmg holds the plug-in in its two formats - a VST3 and an Audio Unit, each
+#     registering both the effect and the instrument - and there is no
+#     /Applications symlink to drag onto.
+#   - There is therefore no Xcode project and no xcodebuild. do-plugin is the
+#     whole build, which also means no separate "skip the plug-in" switch:
+#     skipping it would leave an empty disk image.
 #   - The version reaches the bundle through $GENBRIDGE_VERSION rather than
 #     MARKETING_VERSION, and is checked afterwards in BOTH the Info.plist and the
 #     compiled-in class info, because a host shows the user the latter.
@@ -54,6 +56,7 @@ DIST="${DIST:a}"
 cd ${0:a:h}
 
 VST3_NAME="GenBridge.vst3"
+AU_NAME="GenBridge.component"
 VOL_NAME="GenBridge"
 
 # OUTSIDE THE PROJECT, AND REMOVED ON THE WAY OUT. Both halves matter, and the
@@ -76,7 +79,7 @@ trap 'rm -rf "$DERIVED" "$STAGE"' EXIT
 
 # --- version -------------------------------------------------------------
 
-# Git tags are the source of truth. The 0.1.0 default baked into do-vst3 is a
+# Git tags are the source of truth. The 0.1.0 default baked into do-plugin is a
 # developer-build fallback and is deliberately ignored here.
 #
 # --sort=-v:refname orders by version rather than alphabetically, so beta.10 is
@@ -183,61 +186,89 @@ echo "==> clean build, universal"
 # The derived path is a fresh temporary directory per run (see the note at the
 # top), so a release can never pick up something left behind by an earlier build.
 
-# BUILT IN ITS OWN TEMPORARY TREE, and NOT installed. do-vst3 normally drops
-# the bundle straight into /Library/Audio/Plug-Ins/VST3, which is right for a
+# BUILT IN ITS OWN TEMPORARY TREE, and NOT installed. do-plugin normally drops
+# the bundles straight into /Library/Audio/Plug-Ins, which is right for a
 # developer build and wrong here: cutting a release would silently replace the
-# copy you have been testing with, at a version you have not checked yet.
-# GENBRIDGE_NO_INSTALL keeps the two apart.
+# copies you have been testing with, at a version you have not checked yet.
+# --no-install keeps the two apart, and naming an output directory does too.
 if ! GENBRIDGE_VERSION="$VERSION_CLEAN" \
-     GENBRIDGE_NO_INSTALL=1 \
-     GENBRIDGE_VST3_OUT="$DERIVED/$VST3_NAME" \
-     ./do-vst3 >/dev/null; then
-    echo "error: the VST3 build failed - run ./do-vst3 on its own for the reason" >&2
+     GENBRIDGE_PLUGIN_OUT_DIR="$DERIVED" \
+     ./do-plugin --no-install >/dev/null; then
+    echo "error: the plug-in build failed - run ./do-plugin on its own for the reason" >&2
     echo "       (needs the VST3 SDK; set VST3_SDK if it is not in ~/Documents/vst3sdk)" >&2
     exit 1
 fi
 
 VST3_BUNDLE="$DERIVED/$VST3_NAME"
+AU_BUNDLE="$DERIVED/$AU_NAME"
 
-if [[ ! -d $VST3_BUNDLE ]]; then
-    echo "error: do-vst3 reported success but $VST3_BUNDLE is not there" >&2
-    exit 1
-fi
+for bundle in "$VST3_BUNDLE" "$AU_BUNDLE"; do
+    if [[ ! -d $bundle ]]; then
+        echo "error: do-plugin reported success but $bundle is not there" >&2
+        exit 1
+    fi
+done
 
 # --- verify --------------------------------------------------------------
 
 VST3_BINARY="$VST3_BUNDLE/Contents/MacOS/GenBridge"
+AU_BINARY="$AU_BUNDLE/Contents/MacOS/GenBridge"
 ARCHS=$(lipo -archs "$VST3_BINARY" 2>/dev/null || echo "")
 
 echo "==> built $ARCHS"
 
 # A single-architecture plug-in would load for half the users and be invisible to
-# the other half.
-if [[ $ARCHS != *arm64* || $ARCHS != *x86_64* ]]; then
-    echo "error: expected a universal binary, got '$ARCHS'" >&2
-    exit 1
-fi
+# the other half - checked for both formats, which are two separate binaries.
+for binary in "$VST3_BINARY" "$AU_BINARY"; do
+    archs=$(lipo -archs "$binary" 2>/dev/null || echo "")
 
-# BOTH PLACES THE VERSION LIVES. The Info.plist is what Finder shows; the string
-# compiled into the class info is what the HOST shows, and it is the one a user
-# quotes in a bug report. They come from the same variable, so a mismatch here
-# means the define did not reach the compiler - silently, and only visible inside
-# a DAW days later.
-PLIST_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
-                    "$VST3_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "")
+    if [[ $archs != *arm64* || $archs != *x86_64* ]]; then
+        echo "error: expected a universal binary, got '$archs' for ${binary:h:h:h:t}" >&2
+        exit 1
+    fi
+done
 
-if [[ $PLIST_VERSION != $VERSION_CLEAN ]]; then
-    echo "error: Info.plist says '$PLIST_VERSION', expected '$VERSION_CLEAN'" >&2
-    exit 1
-fi
+# BOTH PLACES THE VERSION LIVES, IN BOTH BUNDLES. The Info.plist is what Finder
+# shows; the string compiled into the class info is what the HOST shows, and it
+# is the one a user quotes in a bug report. They come from the same variable, so
+# a mismatch here means the define did not reach the compiler - silently, and
+# only visible inside a DAW days later.
+for bundle in "$VST3_BUNDLE" "$AU_BUNDLE"; do
+    PLIST_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+                        "$bundle/Contents/Info.plist" 2>/dev/null || echo "")
 
-if ! strings -a "$VST3_BINARY" | grep -qx -- "$VERSION_CLEAN"; then
-    echo "error: '$VERSION_CLEAN' is not in the binary - the version define did" >&2
-    echo "       not reach the compiler, so the host would report the wrong one." >&2
-    exit 1
-fi
+    if [[ $PLIST_VERSION != $VERSION_CLEAN ]]; then
+        echo "error: ${bundle:t}'s Info.plist says '$PLIST_VERSION', expected '$VERSION_CLEAN'" >&2
+        exit 1
+    fi
 
-echo "==> bundle version $PLIST_VERSION, in the plist and the class info"
+    if ! strings -a "$bundle/Contents/MacOS/GenBridge" | grep -qx -- "$VERSION_CLEAN"; then
+        echo "error: '$VERSION_CLEAN' is not in ${bundle:t} - the version define did" >&2
+        echo "       not reach the compiler, so the host would report the wrong one." >&2
+        exit 1
+    fi
+done
+
+echo "==> bundle version $PLIST_VERSION, in both plists and both binaries"
+
+# THE AUDIO UNIT'S TWO COMPONENTS, checked in the plist rather than the binary:
+# macOS finds an Audio Unit by reading its Info.plist and never looks further, so
+# a component missing from the array is an instrument no host will ever list.
+for want in "0:aufx:GBfx" "1:aumu:GBin"; do
+    index=${want%%:*}
+    rest=${want#*:}
+    type=$(/usr/libexec/PlistBuddy -c "Print :AudioComponents:$index:type" \
+               "$AU_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "")
+    subtype=$(/usr/libexec/PlistBuddy -c "Print :AudioComponents:$index:subtype" \
+                  "$AU_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "")
+
+    if [[ "$type:$subtype" != "$rest" ]]; then
+        echo "error: the Audio Unit's component $index is '$type:$subtype', expected '$rest'" >&2
+        exit 1
+    fi
+done
+
+echo "==> the Audio Unit registers aufx GBfx CPur and aumu GBin CPur"
 
 # BOTH VARIANTS, CHECKED RATHER THAN ASSUMED. One bundle registers four classes - the effect and the
 # instrument, each with its controller - so there is nothing extra to build here, but there is
@@ -259,12 +290,15 @@ echo "==> registers both variants: GenBridge (effect) and GenBridge Instrument"
 
 # Ad-hoc signature. Not a substitute for notarization, but it keeps the bundle
 # internally consistent so a host will load it once quarantine is cleared.
-# do-vst3 signs already; re-signing after the version check costs nothing and
+# do-plugin signs already; re-signing after the version check costs nothing and
 # means the thing that ships is the thing that was verified.
 echo "==> ad-hoc signing"
-xattr -cr "$VST3_BUNDLE"
-codesign --force --sign - "$VST3_BUNDLE"
-codesign --verify --strict "$VST3_BUNDLE"
+
+for bundle in "$VST3_BUNDLE" "$AU_BUNDLE"; do
+    xattr -cr "$bundle"
+    codesign --force --sign - "$bundle"
+    codesign --verify --strict "$bundle"
+done
 
 # --- stage ---------------------------------------------------------------
 
@@ -276,6 +310,7 @@ echo "==> staging disk image contents"
 STAGE=$(mktemp -d)
 
 cp -R "$VST3_BUNDLE" "$STAGE/"
+cp -R "$AU_BUNDLE" "$STAGE/"
 
 # --- licences ------------------------------------------------------------
 #
@@ -324,12 +359,14 @@ $VOL_NAME $VERSION_CLEAN
 
 WHAT IS IN HERE
 
-  $VST3_NAME     one plug-in, which appears in your host as TWO devices:
+  $VST3_NAME       the VST3 plug-in    - Ableton Live, Bitwig, Cubase, Reaper...
+  $AU_NAME  the Audio Unit       - Logic, GarageBand, MainStage...
+
+  The same plug-in in two formats; install whichever your host uses, or both.
+  Each appears in your host as TWO devices:
 
       GenBridge              an audio effect - captures a device into a track
       GenBridge Instrument   an instrument - captures, and sends MIDI out
-
-  There is only one file to install. Both devices come from it.
 
 GenBridge captures audio from an audio device your DAW is NOT using - a synth's
 own USB output, a second interface - and plays it into a track, staying in sync
@@ -368,17 +405,25 @@ There is a second, per-user folder at ~/Library/Audio/Plug-Ins/VST3 which also
 works. Use one or the other - a copy in both means your host may list GenBridge
 twice and load whichever it finds first.
 
+THE AUDIO UNIT goes in the Components folder instead, the same way:
+
+    cp -R "/Volumes/${${VOL_NAME}[1,15]} $VERSION_CLEAN/$AU_NAME" /Library/Audio/Plug-Ins/Components/
+
+or Go > Go to Folder, /Library/Audio/Plug-Ins/Components, and drag it in.
+
 STEP 2 - UNLOCK
 
 This plug-in is not notarized by Apple, so macOS blocks it and your host will
-refuse to load it, usually with no useful explanation. Paste this line into
-Terminal and press Return:
+refuse to load it, usually with no useful explanation. Paste these lines into
+Terminal and press Return after each - the second only if you installed the
+Audio Unit:
 
     xattr -dr com.apple.quarantine /Library/Audio/Plug-Ins/VST3/"$VST3_NAME"
+    xattr -dr com.apple.quarantine /Library/Audio/Plug-Ins/Components/"$AU_NAME"
 
-(prefix that with sudo too, if the copy above needed it)
+(prefix them with sudo too, if the copy above needed it)
 
-It prints nothing if it worked.
+They print nothing if they worked.
 
 You only need to do this once, and again after each update.
 
@@ -392,6 +437,11 @@ is usually enough. Two devices appear, both by Chris Purusha:
 
 If only one of them appears, your host has cached an older scan - force a
 rescan in its plug-in preferences.
+
+macOS keeps its own list of Audio Units and can go on offering the version it
+saw first. If an update does not seem to have taken, this makes it look again:
+
+    killall -9 AudioComponentRegistrar
 
 STEP 4 - SETTING IT UP
 
@@ -465,7 +515,7 @@ mystery. Record the track onto an audio track in real time and export that.
 REQUIREMENTS
 
 macOS 11.5 or later, Apple Silicon or Intel.
-A VST3 host. The plug-in does not work on its own.
+A VST3 or Audio Unit host. The plug-in does not work on its own.
 
 LICENCES
 
@@ -508,10 +558,10 @@ hdiutil create \
 echo
 echo "done: $DMG ($(du -h "$DMG" | cut -f1))"
 echo "architectures: $ARCHS"
-echo "contents: $VST3_NAME - registers GenBridge (effect) + GenBridge Instrument"
+echo "contents: $VST3_NAME + $AU_NAME - each registers GenBridge (effect) + GenBridge Instrument"
 echo "licences: GPLv3 + FreeType FTL + Steinberg MIT, in Licences/"
 echo "signature: ad-hoc, NOT notarized - users must clear quarantine"
-echo "your installed copy in /Library/Audio/Plug-Ins/VST3 was NOT touched"
+echo "your installed copies in /Library/Audio/Plug-Ins were NOT touched"
 
 if [[ -n $NEW_TAG ]]; then
     echo

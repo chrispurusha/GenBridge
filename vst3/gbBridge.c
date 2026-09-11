@@ -1843,9 +1843,9 @@ static void gb_close_capture(tGbBridge * self) {
 // THE API THE WRAPPER CALLS
 //
 // Everything above is the bridge talking to itself. What follows is the whole of its outside edge -
-// the calls gbVst3.cpp makes, in the order VST3 makes them - and it is deliberately small. A
-// ProcessData becomes four calls, an IBStream becomes a block of bytes, and nothing in this file
-// has ever heard of either.
+// the calls gbPlugin.c makes, in the order a host makes them - and it is deliberately small. A block
+// becomes four calls, a saved state a block of bytes, and nothing in this file has ever heard of
+// either plug-in format.
 // ════════════════════════════════════════════════════════════════════════════
 
 tGbBridge * gb_bridge_create(bool instrument) {

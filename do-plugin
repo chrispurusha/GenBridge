@@ -1,0 +1,460 @@
+#!/bin/zsh
+# Build the GenBridge plug-ins.
+#
+#   ./do-plugin            both formats, and installs them
+#   ./do-plugin vst3       the VST3 alone
+#   ./do-plugin au         the Audio Unit alone
+#   ./do-plugin --no-install
+#
+# GenBridge.vst3 and GenBridge.component, each registering BOTH variants - the effect and the
+# instrument - from one binary. do-vst3 was the VST3 half of this until 2026-09-11, when GenBridge
+# moved onto SynthLib's shared plug-in wrappers and gained an Audio Unit from the same sources.
+#
+# A script rather than an Xcode target: each bundle is a single dylib and needs no build system to
+# say so - G2-Edit's do-plugin, which this follows, gives the same reason.
+#
+# ONE SOURCE LIST, TWO WRAPPERS. Everything above the FORMAT-SPECIFIC heading is GenBridge itself and
+# is compiled ONCE and linked into both; below it is only what differs between a VST3 and an Audio
+# Unit - and all of THAT is SynthLib's, in SynthLib/plugin/. GenBridge's own part of the plug-in layer
+# is vst3/gbPlugin.c, which describes the bridge to both.
+#
+# THE AUDIO UNIT NEEDS NO SDK. Only the VST3 half wants ~/Documents/vst3sdk (or $VST3_SDK), so
+# `./do-plugin au` works on a machine that has never downloaded it.
+#
+# EACH BUNDLE IS INSTALLED AS SOON AS IT IS BUILT, over whatever was there, and unquarantined - a host
+# loads the copy in its plug-in folder and never the one in build/. Set GENBRIDGE_NO_INSTALL=1 or pass
+# --no-install to leave the installed copies alone; do-release does.
+#
+# $SYNTHLIB_DIR points the build at another SynthLib checkout - for building against a SynthLib change
+# made in another project before it has been pushed. It defaults to this project's own submodule.
+
+set -e
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SDK="${VST3_SDK:-$HOME/Documents/vst3sdk}"
+SL="${SYNTHLIB_DIR:-$HERE/SynthLib}"
+
+FORMATS=()
+INSTALL=1
+
+if [[ -n "$GENBRIDGE_NO_INSTALL" ]]; then
+    INSTALL=0
+fi
+
+for arg in "$@"; do
+    case "$arg" in
+        vst3|VST3)       FORMATS+=(vst3) ;;
+        au|AU|audiounit) FORMATS+=(au) ;;
+        all)             FORMATS=(vst3 au) ;;
+        --no-install)    INSTALL=0 ;;
+        *)
+            print -u2 "usage: ${0:t} [vst3|au|all] [--no-install]"
+            exit 2
+            ;;
+    esac
+done
+
+if [[ ${#FORMATS[@]} -eq 0 ]]; then
+    FORMATS=(vst3 au)
+fi
+
+# WHERE THE BUNDLES GO. Overridable so a release builds inside its own temporary tree.
+DEFAULT_OUT_DIR="$HERE/build"
+OUT_DIR="${GENBRIDGE_PLUGIN_OUT_DIR:-$DEFAULT_OUT_DIR}"
+
+# A BUILD SENT SOMEWHERE ELSE IS NOT A BUILD TO INSTALL. Naming the output always means "put it there,
+# for a purpose of my own" - an A/B against an older revision, a release's tree - and installing it as
+# well put a second bundle declaring the SAME class ids into a folder a host scans. That exact mistake
+# was made on MidiSyncTool and cost real time to find.
+if [[ "$OUT_DIR" != "$DEFAULT_OUT_DIR" ]] && [[ $INSTALL -eq 1 ]]; then
+    print "Not installing: GENBRIDGE_PLUGIN_OUT_DIR names a build of its own, not the working copy."
+    INSTALL=0
+fi
+
+PLUGIN_NAME="GenBridge"
+
+# THE VERSION THE BUNDLES AND THE HOST BOTH REPORT. do-release overrides it from the tag; the default is
+# for an ordinary developer build.
+GENBRIDGE_VERSION="${GENBRIDGE_VERSION:-0.1.0}"
+
+# The Audio Unit wants the same version as a number, 0xMMMMmmbb. Worked out HERE and passed to the
+# compiler as well, so the plist and the component's own answer cannot disagree.
+VERSION_CORE="${GENBRIDGE_VERSION%%-*}"
+VERSION_PARTS=(${(s:.:)VERSION_CORE})
+AU_VERSION=$(( (${VERSION_PARTS[1]:-0} << 16) | (${VERSION_PARTS[2]:-0} << 8) | ${VERSION_PARTS[3]:-0} ))
+
+# THESE MUST MATCH vst3/gbPlugin.c - the codes, and the bundle identifier especially: the wrapper looks
+# its own bundle up by it to tell a host where the editor's view class lives, so a mismatch is a
+# plug-in that loads, works, and has no editor.
+AU_MANUFACTURER="CPur"
+AU_EFFECT_TYPE="aufx"
+AU_EFFECT_SUBTYPE="GBfx"
+AU_INSTRUMENT_TYPE="aumu"
+AU_INSTRUMENT_SUBTYPE="GBin"
+AU_BUNDLE_ID="com.chrispurusha.genbridge.au"
+VST3_BUNDLE_ID="com.chrispurusha.genbridge.vst3"
+
+# THE OBJECTIVE-C CLASS THE AUDIO UNIT PUBLISHES ITS EDITOR UNDER. Class names are global to the
+# process, so this has to be GenBridge's own and not G2 Alike's - see synthlibPluginAuView.m.
+AU_VIEW_CLASS="GenBridgeAUView"
+
+VST3_INSTALL_DIR="${GENBRIDGE_VST3_INSTALL:-/Library/Audio/Plug-Ins/VST3}"
+AU_INSTALL_DIR="${GENBRIDGE_AU_INSTALL:-/Library/Audio/Plug-Ins/Components}"
+
+if (( ${FORMATS[(I)vst3]} )) && [[ ! -d "$SDK/pluginterfaces" ]]; then
+    print -u2 "error: VST3 SDK not found at $SDK"
+    print -u2 "       set VST3_SDK to its location, or build the Audio Unit alone with: ${0:t} au"
+    exit 1
+fi
+
+FREETYPE_LIB="$SL/ThirdParty/freetype/build/libfreetype.a"
+
+if [[ ! -f "$FREETYPE_LIB" ]]; then
+    print -u2 "error: freetype not built at $FREETYPE_LIB"
+    print -u2 "       see the build notes in G2-Edit/Docs/Third Party build notes.md"
+    exit 1
+fi
+
+# ------------------------------------------------------------------------------------------------
+# GenBridge itself - compiled once, linked into every format
+# ------------------------------------------------------------------------------------------------
+
+# poc/ is the bridge core, shared with the command line tool - deliberately NOT genbridge.c or
+# selftest.c, which are the CLI and its harness. vst3/ is everything else: the bridge's behaviour, its
+# saved format, its parameters, its panel, and gbPlugin.c describing all of it to the wrappers.
+SOURCES=(
+    # SHARED, in SynthLib but NOT in SynthLib/src - see the header of audio/device.c.
+    "$SL/audio/device.c"
+    "$SL/audio/ring.c"
+    "$SL/plugin/pluginStubs.c"
+
+    # The parameter store, the saved-state blob and the parameter formatting, used by BOTH wrappers -
+    # so a project saved from the Audio Unit and one saved from the VST3 hold the same bytes.
+    "$SL/plugin/synthlibPluginState.c"
+
+    "$HERE/poc/resampler.c"
+    "$HERE/poc/drift.c"
+    "$HERE/vst3/gbLog.c"
+    "$HERE/vst3/gbParams.c"
+    "$HERE/vst3/gbBridge.c"
+    "$HERE/vst3/gbMeasure.c"
+    "$HERE/vst3/gbState.c"
+    "$HERE/vst3/gbStatus.c"
+    "$HERE/vst3/gbMidi.c"
+    "$HERE/vst3/gbDraw.c"
+    "$HERE/vst3/gbPlugin.c"
+
+    # SynthLib, and only the parts a plug-in panel needs - not the menu bar, the file browsers or
+    # synthlibWindow.c, which owns a GLFW window a plug-in has no business creating. MANUAL: nothing
+    # here is a synchronised folder, so a new SynthLib file that becomes necessary goes in by hand.
+    "$SL/src/utilsGraphics.c"
+    "$SL/src/renderBackend.c"
+    # COMPILES TO NOTHING ON macOS - renderBackendSelect.h leaves the GL backend out of every Apple
+    # build. Kept because it is the whole renderer for the Windows and Linux builds to come.
+    "$SL/src/renderBackendGL.c"
+    "$SL/src/geometry.c"
+    "$SL/src/utils.c"
+    "$SL/src/synthlibHost.c"
+    "$SL/src/synthlibMidi.c"
+    "$SL/src/contextMenu.c"
+    "$SL/src/clickRegion.c"
+    "$SL/src/inputState.c"
+    "$SL/src/synthlibVersion.c"
+)
+
+# Plain Objective-C: the drawing surface needs the runtime but no C++.
+OBJC_SOURCES=(
+    "$HERE/vst3/gbView.m"
+    "$SL/src/renderBackendMetal.m"
+)
+
+# ------------------------------------------------------------------------------------------------
+# FORMAT-SPECIFIC - all of it SynthLib's
+# ------------------------------------------------------------------------------------------------
+
+# pluginterfaces/ only, plus the files that do nothing but instantiate the interface ids the headers
+# declare. No CMake, no vstgui, no public.sdk helper classes.
+VST3_CXX_SOURCES=(
+    "$SL/plugin/synthlibPluginVst3.cpp"
+    "$SDK/pluginterfaces/base/funknown.cpp"
+    "$SDK/pluginterfaces/base/coreiids.cpp"
+    "$SDK/public.sdk/source/vst/vstinitiids.cpp"
+    "$SDK/public.sdk/source/common/commoniids.cpp"
+    "$SDK/pluginterfaces/base/ustring.cpp"
+    "$SDK/pluginterfaces/base/conststringtable.cpp"
+)
+
+VST3_OBJCXX_SOURCES=(
+    "$SL/plugin/synthlibPluginVst3View.mm"
+)
+
+# AUv2, straight against the C API - no AUBase, no CoreAudio Utility Classes.
+AU_C_SOURCES=(
+    "$SL/plugin/synthlibPluginAu.c"
+)
+
+AU_OBJC_SOURCES=(
+    "$SL/plugin/synthlibPluginAuView.m"
+)
+
+# ------------------------------------------------------------------------------------------------
+# Flags
+# ------------------------------------------------------------------------------------------------
+
+WARNFLAGS=(-Wall -Wextra)
+
+# SYNTHLIB_PLUGIN_BUILD is SynthLib's "this is a plug-in, there is no GLFW". It was G2_VST3_BUILD until
+# G2-Edit's plug-in gained a second format; renderBackendGL.c accepted either until this project moved.
+#
+# AN ARRAY, not a string: the version define carries its own quotes through to clang, which survives a
+# string only until the first word split.
+DEFS=(-DSYNTHLIB_PLUGIN_BUILD=1 -DGB_VERSION_STRING="\"$GENBRIDGE_VERSION\"" -DGB_AU_VERSION=$AU_VERSION)
+
+# glfw is here for its HEADERS ONLY - SynthLib's key and mouse constants come from them - so the library
+# is never linked. freetype is a real dependency, taken static so each bundle stays self-contained.
+INCLUDES=(-I"$HERE/poc" -I"$HERE/vst3" -I"$SL/src" -I"$SL/audio" -I"$SL/plugin"
+          -I"$SL/ThirdParty/glfw/include" -I"$SL/ThirdParty/freetype/include")
+
+VST3_INCLUDES=(-I"$SDK")
+
+ARCHS=(-arch arm64 -arch x86_64)
+MIN=-mmacosx-version-min=11.5
+
+COMMON_LIBS=(-framework CoreAudio -framework CoreMIDI -framework CoreFoundation -framework Cocoa
+             -framework Metal -framework QuartzCore)
+AU_LIBS=(-framework AudioToolbox -framework AudioUnit)
+
+OBJDIR="$(mktemp -d)"
+trap 'rm -rf "$OBJDIR"' EXIT
+
+print "GenBridge $GENBRIDGE_VERSION - ${FORMATS} (arm64 + x86_64)"
+
+# ------------------------------------------------------------------------------------------------
+# Compile
+# ------------------------------------------------------------------------------------------------
+
+COMMON_OBJECTS=()
+
+for src in "${SOURCES[@]}"; do
+    obj="$OBJDIR/$(basename "${src%.*}").o"
+    clang $ARCHS $MIN -O2 -std=gnu11 "${WARNFLAGS[@]}" "${DEFS[@]}" "${INCLUDES[@]}" -c "$src" -o "$obj"
+    COMMON_OBJECTS+=("$obj")
+done
+
+for src in "${OBJC_SOURCES[@]}"; do
+    obj="$OBJDIR/$(basename "${src%.*}").om"
+    clang $ARCHS $MIN -O2 -std=gnu11 -fobjc-arc "${WARNFLAGS[@]}" "${DEFS[@]}" "${INCLUDES[@]}" \
+          -x objective-c -c "$src" -o "$obj"
+    COMMON_OBJECTS+=("$obj")
+done
+
+# ------------------------------------------------------------------------------------------------
+# Bundle up
+# ------------------------------------------------------------------------------------------------
+
+# Ad-hoc signed: there is no paid Apple membership behind this, so a host may still need the
+# quarantine flag cleared before it will load the bundle.
+sign_bundle() {
+    codesign --force --sign - "$1" 2>/dev/null || print -u2 "warning: ad-hoc signing failed for $1"
+}
+
+# REPLACED, not copied over: cp -R onto an existing bundle MERGES, so a file dropped from the build
+# would survive in the installed copy and go on being loaded long after it left the source tree. A
+# failure here is a warning - the bundle in build/ is complete either way.
+install_bundle() {
+    local bundle=$1
+    local dest=$2
+    local other=$3
+    local name="${bundle:t}"
+
+    if [[ $INSTALL -ne 1 ]]; then
+        return
+    fi
+
+    if [[ ! -d $dest ]]; then
+        print -u2 "warning: $dest does not exist - not installing $name"
+        return
+    fi
+
+    # A COPY IN THE OTHER FOLDER OUTRANKS NOTHING - hosts scan both and may load whichever they reach
+    # first. That is a very convincing way to spend an afternoon fixing a bug that was fixed already.
+    if [[ -d "$other/$name" ]]; then
+        print -u2 "warning: another copy is installed at $other/$name - your host may load that one"
+    fi
+
+    if ! rm -rf "$dest/$name" 2>/dev/null || ! cp -R "$bundle" "$dest/" 2>/dev/null; then
+        print -u2 "warning: could not install into $dest (permission?) - $name left in $OUT_DIR"
+        return
+    fi
+    xattr -dr com.apple.quarantine "$dest/$name" 2>/dev/null || true
+    print "    installed: $dest/$name"
+    INSTALLED+=("$dest/$name")
+}
+
+BUILT=()
+INSTALLED=()
+
+build_vst3() {
+    local out="$OUT_DIR/$PLUGIN_NAME.vst3"
+    local bin="$out/Contents/MacOS/$PLUGIN_NAME"
+    local objects=("${COMMON_OBJECTS[@]}")
+
+    print "==> VST3"
+
+    for src in "${VST3_CXX_SOURCES[@]}"; do
+        local obj="$OBJDIR/vst3_$(basename "${src%.*}").oxx"
+        clang++ $ARCHS $MIN -O2 -std=gnu++17 "${WARNFLAGS[@]}" "${DEFS[@]}" \
+                "${INCLUDES[@]}" "${VST3_INCLUDES[@]}" -c "$src" -o "$obj"
+        objects+=("$obj")
+    done
+
+    for src in "${VST3_OBJCXX_SOURCES[@]}"; do
+        local obj="$OBJDIR/vst3_$(basename "${src%.*}").omm"
+        clang++ $ARCHS $MIN -O2 -std=gnu++17 -fobjc-arc "${WARNFLAGS[@]}" "${DEFS[@]}" \
+                "${INCLUDES[@]}" "${VST3_INCLUDES[@]}" -x objective-c++ -c "$src" -o "$obj"
+        objects+=("$obj")
+    done
+
+    rm -rf "$out"
+    mkdir -p "$out/Contents/MacOS"
+    clang++ $ARCHS $MIN -bundle "${objects[@]}" "$FREETYPE_LIB" "${COMMON_LIBS[@]}" -o "$bin"
+
+    # A bundle needs its Info.plist and the four-character PkgInfo, or the host will not look inside.
+    cat > "$out/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>$PLUGIN_NAME</string>
+    <key>CFBundleIdentifier</key><string>$VST3_BUNDLE_ID</string>
+    <key>CFBundleName</key><string>$PLUGIN_NAME</string>
+    <key>CFBundlePackageType</key><string>BNDL</string>
+    <key>CFBundleSignature</key><string>????</string>
+    <key>CFBundleShortVersionString</key><string>$GENBRIDGE_VERSION</string>
+    <key>CFBundleVersion</key><string>$GENBRIDGE_VERSION</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>LSMinimumSystemVersion</key><string>11.5</string>
+</dict>
+</plist>
+PLIST
+
+    printf 'BNDL????' > "$out/Contents/PkgInfo"
+    sign_bundle "$out"
+    BUILT+=("$out")
+    install_bundle "$out" "$VST3_INSTALL_DIR" "$HOME/Library/Audio/Plug-Ins/VST3"
+}
+
+build_au() {
+    local out="$OUT_DIR/$PLUGIN_NAME.component"
+    local bin="$out/Contents/MacOS/$PLUGIN_NAME"
+    local objects=("${COMMON_OBJECTS[@]}")
+
+    print "==> Audio Unit"
+
+    for src in "${AU_C_SOURCES[@]}"; do
+        local obj="$OBJDIR/au_$(basename "${src%.*}").o"
+        clang $ARCHS $MIN -O2 -std=gnu11 "${WARNFLAGS[@]}" "${DEFS[@]}" "${INCLUDES[@]}" \
+              -c "$src" -o "$obj"
+        objects+=("$obj")
+    done
+
+    for src in "${AU_OBJC_SOURCES[@]}"; do
+        local obj="$OBJDIR/au_$(basename "${src%.*}").om"
+        clang $ARCHS $MIN -O2 -std=gnu11 -fobjc-arc "${WARNFLAGS[@]}" "${DEFS[@]}" "${INCLUDES[@]}" \
+              -DSYNTHLIB_AU_VIEW_CLASS=$AU_VIEW_CLASS -x objective-c -c "$src" -o "$obj"
+        objects+=("$obj")
+    done
+
+    rm -rf "$out"
+    mkdir -p "$out/Contents/MacOS"
+    clang++ $ARCHS $MIN -bundle "${objects[@]}" "$FREETYPE_LIB" \
+            "${COMMON_LIBS[@]}" "${AU_LIBS[@]}" -o "$bin"
+
+    # THE AudioComponents ARRAY IS HOW macOS FINDS AN AUDIO UNIT AT ALL - the component manager reads
+    # the plist, not the binary. Two entries, one per variant; the wrapper tells them apart by subtype.
+    #
+    # `name` is "Manufacturer: Plug-in", split on the colon, and a host's menus group by the halves.
+    #
+    # sandboxSafe IS FALSE, deliberately and unlike G2 Alike: GenBridge opens audio devices and MIDI
+    # ports of its own, which a sandboxed host's process is not entitled to. A host that sandboxes then
+    # runs it in a separate helper process rather than loading it into one it would break in.
+    cat > "$out/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>$PLUGIN_NAME</string>
+    <key>CFBundleIdentifier</key><string>$AU_BUNDLE_ID</string>
+    <key>CFBundleName</key><string>$PLUGIN_NAME</string>
+    <key>CFBundlePackageType</key><string>BNDL</string>
+    <key>CFBundleSignature</key><string>????</string>
+    <key>CFBundleShortVersionString</key><string>$GENBRIDGE_VERSION</string>
+    <key>CFBundleVersion</key><string>$GENBRIDGE_VERSION</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>LSMinimumSystemVersion</key><string>11.5</string>
+    <key>AudioComponents</key>
+    <array>
+        <dict>
+            <key>name</key><string>Chris Purusha: GenBridge</string>
+            <key>description</key><string>GenBridge - captures an audio device into a track</string>
+            <key>factoryFunction</key><string>SynthLibAUFactory</string>
+            <key>type</key><string>$AU_EFFECT_TYPE</string>
+            <key>subtype</key><string>$AU_EFFECT_SUBTYPE</string>
+            <key>manufacturer</key><string>$AU_MANUFACTURER</string>
+            <key>version</key><integer>$AU_VERSION</integer>
+            <key>sandboxSafe</key><false/>
+        </dict>
+        <dict>
+            <key>name</key><string>Chris Purusha: GenBridge Instrument</string>
+            <key>description</key><string>GenBridge Instrument - plays hardware and captures it back</string>
+            <key>factoryFunction</key><string>SynthLibAUFactory</string>
+            <key>type</key><string>$AU_INSTRUMENT_TYPE</string>
+            <key>subtype</key><string>$AU_INSTRUMENT_SUBTYPE</string>
+            <key>manufacturer</key><string>$AU_MANUFACTURER</string>
+            <key>version</key><integer>$AU_VERSION</integer>
+            <key>sandboxSafe</key><false/>
+        </dict>
+    </array>
+</dict>
+</plist>
+PLIST
+
+    printf 'BNDL????' > "$out/Contents/PkgInfo"
+    sign_bundle "$out"
+    BUILT+=("$out")
+    install_bundle "$out" "$AU_INSTALL_DIR" "$HOME/Library/Audio/Plug-Ins/Components"
+
+    # THE REGISTRY CACHES, and a REPLACED component is worse than a new one: a host goes on using the
+    # version the registrar last saw. Killing it is the documented way to force a rescan.
+    if [[ $INSTALL -eq 1 ]]; then
+        killall -9 AudioComponentRegistrar 2>/dev/null || true
+    fi
+}
+
+mkdir -p "$OUT_DIR"
+
+for fmt in "${FORMATS[@]}"; do
+    case "$fmt" in
+        vst3) build_vst3 ;;
+        au)   build_au ;;
+    esac
+done
+
+print ""
+
+for bundle in "${BUILT[@]}"; do
+    print "Built: $bundle  ($(lipo -archs "$bundle/Contents/MacOS/$PLUGIN_NAME"))"
+done
+
+if [[ ${#INSTALLED[@]} -gt 0 ]]; then
+    print "Installed ${#INSTALLED[@]} of ${#BUILT[@]}; a host picks them up on its next scan."
+elif [[ $INSTALL -eq 1 ]]; then
+    print "NOTHING WAS INSTALLED - see the warnings above."
+else
+    print "Not installed."
+fi
+
+print ""
+print "Device selection, in order: the host-saved UID, then \$GENBRIDGE_DEVICE."
+print "A host launched from the Dock inherits no shell environment, so the variable"
+print "only helps a scripted run."

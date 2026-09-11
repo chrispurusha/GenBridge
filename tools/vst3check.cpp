@@ -43,6 +43,7 @@
 #include <vector>
 #include <CoreAudio/CoreAudio.h>
 #include <CoreAudio/HostTime.h>
+#include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach_time.h>
 
 // THE PLUG-IN'S OWN LIVE FIGURES, read straight out of it. vst3check dlopen()s the bundle into its
@@ -80,6 +81,31 @@ static void check(const char * what, bool ok) {
 
     if (!ok) {
         gFailures++;
+    }
+}
+
+// WAIT THE WAY A HOST WAITS: with the main run loop turning. Since GenBridge moved onto SynthLib's
+// wrappers (2026-09-11), what it tells the host - a latency change, a parameter it corrected itself -
+// is posted to the main thread, which is where both plug-in formats require it to be said. A host's
+// main thread is always running its loop; a checker that usleep()s instead never delivers any of it,
+// and would report a plug-in that spoke up as one that said nothing.
+//
+// FOR THE WHOLE INTERVAL, not until the loop finds nothing to do: with no source to service,
+// CFRunLoopRunInMode() returns at once, and the waits below exist to give a device time to open.
+static void wait_ms(int ms) {
+    CFAbsoluteTime until = CFAbsoluteTimeGetCurrent() + ((CFTimeInterval)ms / 1000.0);
+
+    for (;;) {
+        CFTimeInterval left = until - CFAbsoluteTimeGetCurrent();
+
+        if (left <= 0.0) {
+            break;
+        }
+        CFTimeInterval slice = (left < 0.01) ? left : 0.01;
+
+        if (CFRunLoopRunInMode(kCFRunLoopDefaultMode, slice, true) == kCFRunLoopRunFinished) {
+            usleep((useconds_t)(slice * 1.0e6));
+        }
     }
 }
 
@@ -391,7 +417,7 @@ static std::string uid_for_device_name(const std::string & wanted) {
         if (wanted != nameBuf) {
             continue;
         }
-        // INPUT-CAPABLE ONLY, because that is the list the plug-in shows (gbVst3.cpp skips a device
+        // INPUT-CAPABLE ONLY, because that is the list the plug-in shows (gbDraw.c's skips a device
         // with no input channels). Two devices can share a display name and differ only in
         // direction - this rig has an output-only and an input-only "CalDigit Thunderbolt 3 Audio" -
         // so matching on name alone picked the one the plug-in does not list, produced a UID it
@@ -1284,7 +1310,9 @@ int main(int argc, char ** argv) {
         // checkSizeConstraint() that preceded this one BOTH PASS these checks, because reproducing
         // them needs the host's real sequence of calls - how many times it asks per pointer move,
         // which rect it proposes, and when onSize() lands between them - and that was guessed at
-        // twice, wrongly. gb_editor_log() in gbEditor.mm records the real sequence; until a log from
+        // twice, wrongly. gb_editor_log() in the old gbEditor.mm recorded the real sequence; the
+        // shared SynthLib view that replaced it (2026-09-11) logs nothing, so add a log there first.
+        // Until a log from
         // a host that shows the fault exists, do not trust a test here to have caught it.
         {
             IPlugView * sizer = controller->createView(ViewType::kEditor);
@@ -1420,6 +1448,12 @@ int main(int argc, char ** argv) {
                 if (gate != nullptr) {
                     fclose(gate);
                 }
+
+                // THE GATE IS RE-POLLED ONCE A SECOND (gbLog.c), so a line logged within a second of
+                // an earlier one still finds it absent. This check passed only while nothing had
+                // logged in the second before it; since 2026-09-11 every instance logs as it is
+                // created, and the instance made just above for the resize checks had.
+                wait_ms(1100);
             }
             {
                 FILE * existing = fopen("/tmp/genbridge.log", "r");
@@ -2169,12 +2203,16 @@ int main(int argc, char ** argv) {
         // forgetting, and was actually nothing ever writing it down.
         MemStream withMidi;
 
+        // THE CHECK'S OWN VIRTUAL DESTINATION, not a synth. This named "KRONOS SOUND" and so failed on
+        // any day the Kronos was switched off - reporting the restore as broken when there was simply
+        // nothing of that name to restore to. The sink is made before the plug-in loads and exists for
+        // the whole run, so it is always there to be found by name.
         withMidi.buf =
-            "GENBRIDGE3\n"
-            "active=AppleUSBAudioEngine:LINE 6:HELIX:   2933118:2,3\n"
-            "midi=KRONOS SOUND\n"
-            "midich=5\n"
-            "dev=256,48000.0,30.000,2,1,0.6000,AppleUSBAudioEngine:LINE 6:HELIX:   2933118:2,3\n";
+            std::string("GENBRIDGE3\n")
+            + "active=AppleUSBAudioEngine:LINE 6:HELIX:   2933118:2,3\n"
+            + "midi=" + kSinkName + "\n"
+            + "midich=5\n"
+            + "dev=256,48000.0,30.000,2,1,0.6000,AppleUSBAudioEngine:LINE 6:HELIX:   2933118:2,3\n";
 
         TUID instCid2;
         bool haveInst = false;
@@ -2222,7 +2260,7 @@ int main(int argc, char ** argv) {
                    to_ascii(midiText).c_str(), to_ascii(chText).c_str());
 
             check("MIDI destination restored by name",
-                  to_ascii(midiText).find("KRONOS") != std::string::npos);
+                  to_ascii(midiText).find(kSinkName) != std::string::npos);
             check("MIDI channel restored", to_ascii(chText) == "5");
 
             instFresh->terminate();
@@ -2438,7 +2476,7 @@ int main(int argc, char ** argv) {
     if (processor != nullptr) {
         check("setActive(true)", component->setActive(true) == kResultOk);
 
-        usleep(500000);      // long enough for a device open to have happened, had one been due
+        wait_ms(500);        // long enough for a device open to have happened, had one been due
 
         uint32 latency = processor->getLatencySamples();
 
@@ -2527,8 +2565,11 @@ int main(int argc, char ** argv) {
                 // Ten seconds is a ceiling, not a wait: the loop leaves as soon as the latency goes
                 // non-zero, so a normal device costs no more than it did before.
                 for (int k = 0; (k < 100) && (processor->getLatencySamples() == 0); k++) {
-                    usleep(100000);
+                    wait_ms(100);
                 }
+
+                // And long enough after it for the host to have been told - see wait_ms().
+                wait_ms(100);
 
                 printf("    asked for slot %d (%s)\n", slot, wanted.c_str());
 
@@ -2591,7 +2632,7 @@ int main(int argc, char ** argv) {
                                          (uint64_t)((128.0 / 48000.0) * 1.0e9)));
                 }
 
-                usleep(300000);              // let the worker act on the request
+                wait_ms(300);                // let the worker act on the request, and tell the host
 
                 uint32 latencyAfter = processor->getLatencySamples();
 
@@ -2616,7 +2657,7 @@ int main(int argc, char ** argv) {
                 // every couple of seconds. This is that loop, reproduced.
                 component->setActive(false);
                 component->setActive(true);
-                usleep(300000);
+                wait_ms(300);
 
                 printf("    after a reactivation: %u samples\n", processor->getLatencySamples());
                 // WITHIN A TOLERANCE, NOT EXACTLY. What this is guarding against is the retune

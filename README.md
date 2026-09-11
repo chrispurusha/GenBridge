@@ -181,15 +181,25 @@ one device here that drifts on its own.
 ## The plug-in
 
 ```
-./do-vst3
+./do-plugin              # GenBridge.vst3 and GenBridge.component, and installs both
+./do-plugin vst3         # one format
+./do-plugin au
+./do-plugin --no-install
 ```
 
-That builds **and installs** to `/Library/Audio/Plug-Ins/VST3/`, clearing the quarantine flag on the
-way - a plug-in that is not where a host looks for it has not really been built, and the alternative
-is remembering a copy command after every build. The installed bundle is *replaced* rather than
-copied over, because `cp -R` onto an existing bundle merges: a file dropped from the build would
-survive in the installed copy and go on being loaded. `GENBRIDGE_NO_INSTALL=1` builds without
-touching it, and `GENBRIDGE_VST3_INSTALL` points somewhere else.
+Two formats since 2026-09-11 - a **VST3** and an **Audio Unit** (AUv2) - built from the same objects,
+each registering both the effect and the instrument. The Audio Unit is `aufx GBfx CPur` (effect) and
+`aumu GBin CPur` (instrument), and `auval -v aufx GBfx CPur` / `auval -v aumu GBin CPur` both pass.
+Only the VST3 half needs the SDK, so `./do-plugin au` works without one.
+
+It builds **and installs** to `/Library/Audio/Plug-Ins/VST3/` and `/Library/Audio/Plug-Ins/Components/`,
+clearing the quarantine flag on the way - a plug-in that is not where a host looks for it has not
+really been built, and the alternative is remembering a copy command after every build. An installed
+bundle is *replaced* rather than copied over, because `cp -R` onto an existing bundle merges: a file
+dropped from the build would survive in the installed copy and go on being loaded. Installing the
+Audio Unit also restarts `AudioComponentRegistrar`, which is the only way to make macOS notice a
+replaced component. `--no-install` (or `GENBRIDGE_NO_INSTALL=1`) builds without touching either, and
+`GENBRIDGE_VST3_INSTALL` / `GENBRIDGE_AU_INSTALL` point somewhere else.
 
 The **system-wide** folder, not the per-user one, matching what the `.dmg` tells users to do. It is
 `root:admin` and group-writable, so an administrator account writes to it without `sudo`, and it is
@@ -202,20 +212,23 @@ A host that is already running keeps the copy it loaded until it rescans or rest
 
 `./do-release` packages a `.dmg` for a GitHub release - same interface as G2-Edit's, versions from
 semver git tags, output to the Desktop, and it never creates the tag. It builds with
-`GENBRIDGE_NO_INSTALL=1` so cutting a release cannot replace the copy you are testing with, checks
-the version reached both the `Info.plist` and the compiled-in class info, and refuses to ship
-without the licence notices FreeType and the VST3 SDK require - see `THIRD_PARTY.md`.
+`--no-install` so cutting a release cannot replace the copies you are testing with, checks the
+version reached both `Info.plist`s and both binaries and that the Audio Unit lists both components,
+ships both formats, and refuses to ship without the licence notices FreeType and the VST3 SDK
+require - see `THIRD_PARTY.md`.
 
 Built the way G2-Edit's is: a script rather than an Xcode target, against `pluginterfaces/` only,
-with no CMake, no vstgui and no `public.sdk` helper classes beyond the four translation units that
-do nothing but instantiate interface IDs - `funknown.cpp`, `coreiids.cpp`, `vstinitiids.cpp` and
-`commoniids.cpp`. The bridge core is compiled in unchanged - the resampler and the drift loop from
+with no CMake, no vstgui and no `public.sdk` helper classes beyond the handful of translation units
+that do nothing but instantiate interface IDs and FUnknown's own helpers. The Audio Unit needs
+nothing but the system frameworks. The bridge core is compiled in unchanged - the resampler and the drift loop from
 `poc/`, and the device and the ring from `SynthLib/audio/`, which the command line tool builds from
 too. Only the CLI itself and the self-test stay behind.
 
-**The plug-in is C. `vst3/gbVst3.cpp` is the only C++ file in it, and it holds the COM plumbing and
-nothing else** - vtables, reference counting, class registration, and the conversions into VST3's own
-shapes. What GenBridge *does* is in `vst3/gbBridge.c` (the device, the ring, the clock),
+**The plug-in is C, and none of it is either format.** The formats are SynthLib's shared wrappers in
+`SynthLib/plugin/` - the VST3 COM plumbing, the Audio Unit's C interface and both editor windows -
+the same ones G2-Edit's plug-in uses, and `vst3/gbPlugin.c` is the whole of GenBridge's side: two
+variants, a parameter description, and what a block, a note or a saved state turns into. What
+GenBridge *does* is in `vst3/gbBridge.c` (the device, the ring, the clock),
 `vst3/gbMeasure.c` (the round-trip measurement), `vst3/gbState.c` (the saved format),
 `vst3/gbParams.c` (what the parameters are) and `vst3/gbDraw.c` (the panel), which is also what lets
 the same code be read - and in places shared - by the sibling projects. The rule is simple enough to
@@ -250,7 +263,7 @@ cd SynthLib && git submodule update --init ThirdParty/glfw ThirdParty/freetype
 `libusb` is deliberately left out: it is G2-Edit's USB transport and GenBridge has no use for it.
 Only freetype needs building, and it must be built at the same 11.5 deployment target as everything
 else or the linker warns that the object file was built for a newer macOS. The cmake invocation is
-in `G2-Edit/Docs/Third Party build notes.txt`; the build directory must be deleted before re-running
+in `G2-Edit/Docs/Third Party build notes.md`; the build directory must be deleted before re-running
 cmake, because the value is cached. glfw is needed for its **headers only** - SynthLib's key and
 mouse constants come from them - so it is not built at all.
 

@@ -29,7 +29,7 @@
 // change in the plug-in can be diffed the same way one in the application is.
 //
 // THIS EXISTED TWICE BEFORE AND WAS LOST TWICE, because both times it was written into a scratchpad
-// rather than the repository (see G2-Edit's todo.txt, "the hand-written test host in the
+// rather than the repository (see G2-Edit's todo.md, "the hand-written test host in the
 // scratchpad"). It is in the repository for that reason as much as any other - and a third copy was
 // very nearly written into a scratchpad here before this one was found.
 //
@@ -260,6 +260,15 @@ int main(int argc, const char ** argv) {
             } else {
                 printf("component: could not be created (the editor will draw an empty patch)\n");
             }
+        }
+
+        // THE CONTROLLER THE COMPONENT NAMES, as a real host finds it - not the last controller class
+        // in the factory. With two variants registered those are different things: the loop above
+        // took the INSTRUMENT's controller while --audio 0 took the EFFECT's processor, and since
+        // 2026-09-11 an editor draws from its own processor's instance, so the mismatched pair drew
+        // defaults. getControllerClassId() is what every host uses; this now does too.
+        if ((component != nullptr) && (component->getControllerClassId(controllerCid) == kResultOk)) {
+            haveController = true;
         }
 
         if (!haveController) {
