@@ -43,10 +43,13 @@
 
 #include "gbBridge.h"
 #include "gbDraw.h"
-#include "gbLog.h"
+#include "synthlibLog.h"
 #include "gbMidi.h"
 #include "gbParams.h"
-#include "gbView.h"
+#include "synthlibPanelView.h"
+
+// Names the log - touch /tmp/genbridge-log, read /tmp/genbridge.log. See SynthLib's plugin/synthlibLog.h.
+const char gSynthLibLogName[] = "genbridge";
 
 // THE CONTROLLER PASS-THROUGHS ARE NUMBERED THE WAY SYNTHLIB NUMBERS MIDI CONTROLS, which is VST3's
 // numbering - and SynthLib asserts that against the SDK itself, so these three keep all three agreeing.
@@ -610,7 +613,7 @@ static void gb_probe_host_input(tGbPlugin * g, const float * const * in, uint32_
     g->probed        = true;
     g->probeChannels = numIn;
     g->probeAudible  = audible;
-    gb_log_line("HOST INPUT: channels %u, buffers %s, signal %s", numIn, buffers ? "yes" : "NO",
+    synthlib_log_line("HOST INPUT: channels %u, buffers %s, signal %s", numIn, buffers ? "yes" : "NO",
                 audible ? "PRESENT" : "none");
 }
 
@@ -694,22 +697,29 @@ static void gb_on_edit(void * user, const tGbEditRequest * request) {
     }
 }
 
+// THE PANEL: SynthLib's shared view (synthlibPanelView.m) drawing gbDraw.c. What follows is all that
+// is GenBridge's about it - which draw calls, and what "this editor's state" means.
+//
 // EVERY FRAME, BEFORE ANYTHING IS DRAWN OR HIT-TESTED: this editor's instance's status slot and values
 // into the draw layer, which keeps both file-scope. Pushing them only on a change let whichever of two
 // open editors pushed last speak for both.
 //
 // THE HOST'S VALUES, not the bridge's - synthlib_plugin_param_value() answers with what the host's own
 // panel shows, which on VST3 is the controller's copy and moves the moment an edit is made.
-static void gb_on_sync(void * user, void * view) {
+//
+// WHICH VARIANT comes from the panel table rather than the instance, so it is right even for a view
+// with no instance behind it (see gb_create_view()): the hit test only offers Measure and Offset on
+// the instrument.
+static void gb_sync(void * user, bool instrument) {
     tGbPlugin * g = (tGbPlugin *)user;
 
-    gb_view_set_status_slot(view, (g != NULL) ? atomic_load(&g->statusSlot) : -1);
+    gb_draw_set_status_slot((g != NULL) ? atomic_load(&g->statusSlot) : -1);
+    gb_draw_set_instrument(instrument);
 
     if (g == NULL) {
         return;
     }
-    gb_view_set_values(view,
-                       synthlib_plugin_param_value(g, kParamDevice),
+    gb_draw_set_values(synthlib_plugin_param_value(g, kParamDevice),
                        synthlib_plugin_param_value(g, kParamRate),
                        synthlib_plugin_param_value(g, kParamFrames),
                        synthlib_plugin_param_value(g, kParamTrim),
@@ -722,10 +732,53 @@ static void gb_on_sync(void * user, void * view) {
                        synthlib_plugin_param_value(g, kParamSource));
 }
 
+static void gb_sync_effect(void * user) {
+    gb_sync(user, false);
+}
+
+static void gb_sync_instrument(void * user) {
+    gb_sync(user, true);
+}
+
+static void gb_panel_frame(void * user, int pixelWidth, int pixelHeight) {
+    (void)user;
+    gb_draw_frame(pixelWidth, pixelHeight);
+}
+
+static bool gb_panel_click(void * user, double x, double y) {
+    tGbEditRequest request;
+
+    if (gb_draw_click(x, y, &request) == false) {
+        return false;
+    }
+    gb_on_edit(user, &request);
+    return true;
+}
+
+static const tSynthLibPanel gPanelEffect = {
+    .canvasWidth = GB_CANVAS_W,
+    .init        = gb_draw_init,
+    .sync        = gb_sync_effect,
+    .frame       = gb_panel_frame,
+    .click       = gb_panel_click,
+    .pointer     = gb_draw_set_mouse,
+    .menuActive  = gb_draw_menu_active,
+};
+
+static const tSynthLibPanel gPanelInstrument = {
+    .canvasWidth = GB_CANVAS_W,
+    .init        = gb_draw_init,
+    .sync        = gb_sync_instrument,
+    .frame       = gb_panel_frame,
+    .click       = gb_panel_click,
+    .pointer     = gb_draw_set_mouse,
+    .menuActive  = gb_draw_menu_active,
+};
+
 // `inst` IS NULL only on a VST3 host that never connected processor and controller while two copies
 // were loaded; the panel then draws with no figures and its clicks go nowhere, which is honest.
 static void * gb_create_view(const tSynthLibPluginDesc * desc, void * inst, double width, double height) {
-    return gb_view_create(width, height, gb_on_edit, gb_on_sync, inst, desc->isInstrument);
+    return synthlib_panel_view_create(desc->isInstrument ? &gPanelInstrument : &gPanelEffect, inst, width, height);
 }
 
 // THE MACHINE'S REMEMBERED WIDTH, the starting point for an editor a project has never opened - a VST3

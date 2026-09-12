@@ -37,7 +37,7 @@
 
 #include "gbBridgePrivate.h"
 #include "gbDraw.h"
-#include "gbLog.h"
+#include "synthlibLog.h"
 #include "gbStatus.h"
 
 // FILE-LOCAL, AND FORWARD-DECLARED. A class let its members call each other in
@@ -103,7 +103,7 @@ void gb_lock_config_from_host(tGbBridge * self, const char * who) {
     double waited = gb_now_ms() - began;
 
     if (waited >= 20.0) {
-        gb_log_line("HOST THREAD BLOCKED: %s waited %.0f ms for configLock - a device open was in "
+        synthlib_log_line("HOST THREAD BLOCKED: %s waited %.0f ms for configLock - a device open was in "
                  "flight. This is what a spinning cursor looks like from in here", who, waited);
     }
 }
@@ -852,7 +852,7 @@ static void gb_worker_loop(tGbBridge * self) {
         }
 
         if (atomic_exchange(&self->measurePanic, false)) {
-            gb_log_line("measure requested");
+            synthlib_log_line("measure requested");
             gb_send_all_notes_off(self);
         }
 
@@ -899,7 +899,7 @@ static void gb_worker_loop(tGbBridge * self) {
             double filtPart = resampler_latency_frames() / ratio;
             double offPart  = (atomic_load(&self->offsetMs) / 1000.0) * atomic_load(&self->snapHostRate);
 
-            gb_log_line("latency %u smp (%.1f ms) = pipeline %.0f (setpoint would say %.0f: ring "
+            synthlib_log_line("latency %u smp (%.1f ms) = pipeline %.0f (setpoint would say %.0f: ring "
                      "%.0f + device %.0f + filter %.0f) + measured %.0f (%.1f ms)",
                      atomic_load(&self->reportedLatency), (double)atomic_load(&self->reportedLatency) / perMs,
                      atomic_load(&self->pipelineAvg), ringPart + devPart + filtPart,
@@ -952,11 +952,11 @@ void gb_reconfigure(tGbBridge * self) {
             atomic_store(&self->reportedLatency, nowLatency);
             gb_send_latency_changed(self);
         }
-        gb_log_line("capture source: HOST INPUT - no device opened, latency %u samples", nowLatency);
+        synthlib_log_line("capture source: HOST INPUT - no device opened, latency %u samples", nowLatency);
         return;
     }
 
-    gb_log_line("reconfigure: slot %d, saved uid '%s'", index, self->deviceSelector);
+    synthlib_log_line("reconfigure: slot %d, saved uid '%s'", index, self->deviceSelector);
 
     // THE PARAMETER IS THE ONLY SELECTOR. It used to be one of two, with a saved UID as the
     // other, and they disagreed: the panel drew the parameter while the processor had opened
@@ -983,12 +983,12 @@ void gb_reconfigure(tGbBridge * self) {
                 index = slot;
                 gb_send_message(self, "gbDeviceSlot", slot);
             }
-            gb_log_line("saved device '%s' present - opening it", chosen.name);
+            synthlib_log_line("saved device '%s' present - opening it", chosen.name);
         } else {
             // Device not present, don't modify deviceSelector - preserve the saved intent.
             // gb_publish_waiting(self, true, (savedDeviceName[0] == '\0') ? deviceSelector
             //                                               : savedDeviceName);
-            gb_log_line("saved device '%s' not present - waiting (not modifying deviceSelector)",
+            synthlib_log_line("saved device '%s' not present - waiting (not modifying deviceSelector)",
                      (self->savedDeviceName[0] == '\0') ? self->deviceSelector : self->savedDeviceName);
         }
     } else if (index >= 0) {
@@ -1001,7 +1001,7 @@ void gb_reconfigure(tGbBridge * self) {
     // slot and sets the parameter to match, so what arrives next agrees with what opened here.
     if (!found && (index < 0) && !(self->deviceSelector[0] == '\0')) {
         found = device_find(self->deviceSelector, true, &chosen);
-        gb_log_line("no parameter yet - restoring saved uid: %s", found ? chosen.name : "not present");
+        synthlib_log_line("no parameter yet - restoring saved uid: %s", found ? chosen.name : "not present");
     }
 
     // NOTHING IS OPENED UNTIL SOMETHING HAS ACTUALLY BEEN CHOSEN.
@@ -1016,13 +1016,13 @@ void gb_reconfigure(tGbBridge * self) {
     // is both safer and more honest, and the panel says "no device selected" rather than naming
     // something the user never picked.
     if (!found && (index < 0)) {
-        gb_log_line("nothing selected yet - staying idle");
+        synthlib_log_line("nothing selected yet - staying idle");
     }
 
     if (!found) {
-        gb_log_line("slot %d resolved to nothing - staying closed", index);
+        synthlib_log_line("slot %d resolved to nothing - staying closed", index);
     } else {
-        gb_log_line("slot %d -> '%s'", index, chosen.name);
+        synthlib_log_line("slot %d -> '%s'", index, chosen.name);
     }
 
     // What gb_close_capture_locked(self) must NOT hand back, because we are about to reopen it. Zero
@@ -1042,7 +1042,7 @@ void gb_reconfigure(tGbBridge * self) {
             self->appliedDevice  = index;
         } else {
             self->running = false;
-            gb_log_line("open failed - selection unchanged, staying closed");
+            synthlib_log_line("open failed - selection unchanged, staying closed");
         }
     }
 
@@ -1057,7 +1057,7 @@ void gb_reconfigure(tGbBridge * self) {
     if (held >= 20.0) {
         // BROKEN DOWN, because "it held the lock for 1441 ms" says a refactor is needed and not
         // WHICH of the three things inside it to move first.
-        gb_log_line("reconfigure held configLock for %.0f ms (close+probe %.0f, rate+buffer %.0f, "
+        synthlib_log_line("reconfigure held configLock for %.0f ms (close+probe %.0f, rate+buffer %.0f, "
                  "open %.0f) - anything the host asked of this plug-in on its own thread waited "
                  "behind it", held,
                  (self->gPhaseIdle > heldFrom) ? (self->gPhaseIdle - heldFrom) : 0.0,
@@ -1070,7 +1070,7 @@ void gb_reconfigure(tGbBridge * self) {
     if (nowLatency != self->reportedLatency) {
         self->reportedLatency = nowLatency;
         gb_send_latency_changed(self);
-        gb_log_line("latency now %u samples - asked the host to re-read it", nowLatency);
+        synthlib_log_line("latency now %u samples - asked the host to re-read it", nowLatency);
     }
 }
 
@@ -1151,7 +1151,7 @@ static void gb_retune(tGbBridge * self) {
 
     // Reads both ways now: reclaiming frames when the host uses less than it declared, and
     // CLAIMING them when it hands over more per callback than either number suggested.
-    gb_log_line("retuned %s: host declares %u and takes %u per callback - setpoint %.0f -> %.0f, "
+    synthlib_log_line("retuned %s: host declares %u and takes %u per callback - setpoint %.0f -> %.0f, "
              "latency %u -> %u",
              (self->setpointFrames > before) ? "UP - the ring was smaller than one callback" : "down",
              self->hostMaxFrames, self->observedMaxFrames, before, self->setpointFrames, atomic_load(&self->reportedLatency),
@@ -1298,7 +1298,7 @@ static void gb_revert_retune(tGbBridge * self) {
 
     pthread_mutex_unlock(&self->configLock);
 
-    gb_log_line("retune reverted after an underrun: setpoint %.0f -> %.0f", before, self->setpointFrames);
+    synthlib_log_line("retune reverted after an underrun: setpoint %.0f -> %.0f", before, self->setpointFrames);
 
     if (nowLatency != self->reportedLatency) {
         self->reportedLatency = nowLatency;
@@ -1346,18 +1346,18 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
     uint32_t wantCount = settings->captureChannels;
 
     if (available == 0) {
-        gb_log_line("device '%s' reports no input channels", info->name);
+        synthlib_log_line("device '%s' reports no input channels", info->name);
         return false;
     }
 
     if (first >= available) {
-        gb_log_line("first channel %u past the device's %u - using channel 1", first + 1, available);
+        synthlib_log_line("first channel %u past the device's %u - using channel 1", first + 1, available);
         first = 0;
     }
 
     if ((first + wantCount) > available) {
         wantCount = available - first;      // at least 1, since first < available
-        gb_log_line("only %u channel(s) available from %u - capturing %u",
+        synthlib_log_line("only %u channel(s) available from %u - capturing %u",
                  available - first, first + 1, wantCount);
     }
 
@@ -1418,7 +1418,7 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
     bool deviceIsShared = device_is_running_somewhere(info->id);
 
     if (deviceIsShared && ((settings->rate > 0.0) || (settings->frames > 0))) {
-        gb_log_line("device '%s' is already running for another client - leaving its rate and"
+        synthlib_log_line("device '%s' is already running for another client - leaving its rate and"
                  " buffer size alone (asked for %.0f Hz, %u frames). Its buffer is whatever that"
                  " client set, and the ring and reported latency follow it",
                  info->name, settings->rate, settings->frames);
@@ -1457,7 +1457,7 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
         // so ask what it can do and say what happened.
         if (device_buffer_frame_range(info->id, &lowest, &highest)) {
             if (wanted < lowest) {
-                gb_log_line("device '%s' will not go below %u frames; %u requested",
+                synthlib_log_line("device '%s' will not go below %u frames; %u requested",
                          info->name, lowest, settings->frames);
                 wanted = lowest;
             } else if ((highest > 0) && (wanted > highest)) {
@@ -1526,7 +1526,7 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
             }
         }
 
-        gb_log_line("asked %s for %u frames and it gave %u - %s. Its range is %u..%u. The ring and "
+        synthlib_log_line("asked %s for %u frames and it gave %u - %s. Its range is %u..%u. The ring and "
                  "the reported latency follow the %u, which is why they look large against the "
                  "setting on the panel",
                  info->name, settings->frames, deviceFrames,
@@ -1595,11 +1595,11 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
     if (self->setpointFrames <= 0.0) {
         self->setpointFrames = self->recommendedSetpoint;           // auto
     } else if (self->setpointFrames < minimum) {
-        gb_log_line("setpoint %.0f is below the %.0f frame floor (recommended %.0f) — honouring it;"
+        synthlib_log_line("setpoint %.0f is below the %.0f frame floor (recommended %.0f) — honouring it;"
                  " watch the underrun count", self->setpointFrames, minimum, self->recommendedSetpoint);
     }
 
-    gb_log_line("open %s rate %.0f frames %u ratio %.6f floor %.0f setpoint %.0f devlat %u"
+    synthlib_log_line("open %s rate %.0f frames %u ratio %.6f floor %.0f setpoint %.0f devlat %u"
              " -> reported latency %u",
              info->name, deviceRate, deviceFrames, self->nominalRatio, minimum, self->setpointFrames,
              self->deviceLatency,
@@ -1634,7 +1634,7 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
 
     if (!device_open(&self->capture, info->id, true, first, self->captureChannels,
                      deviceFrames * 4, gb_capture_callback, self)) {
-        gb_log_line("device_open failed for '%s' (%u ch from %u)", info->name, atomic_load(&self->captureChannels),
+        synthlib_log_line("device_open failed for '%s' (%u ch from %u)", info->name, atomic_load(&self->captureChannels),
                  first + 1);
         return false;
     }
@@ -1767,7 +1767,7 @@ static void gb_close_capture_locked(tGbBridge * self) {
     // The RECORD is kept, so the eventual real close still hands the device back as it was
     // found. Only the pointless middle of a reopen is skipped.
     if ((self->restoreDevice != 0) && (self->restoreDevice == self->keepSettingsFor)) {
-        gb_log_line("reopening the same device - leaving its buffer alone rather than restoring "
+        synthlib_log_line("reopening the same device - leaving its buffer alone rather than restoring "
                  "%u frames and setting it straight back", self->restoreFrames);
     } else if (self->restoreDevice != 0) {
         if (self->restoreFrames > 0) {
@@ -1777,7 +1777,7 @@ static void gb_close_capture_locked(tGbBridge * self) {
         if (self->restoreRate > 0.0) {
             device_set_sample_rate(self->restoreDevice, self->restoreRate);
         }
-        gb_log_line("restored device settings: %u frames, %.0f Hz", self->restoreFrames, self->restoreRate);
+        synthlib_log_line("restored device settings: %u frames, %.0f Hz", self->restoreFrames, self->restoreRate);
 
         self->restoreDevice = 0;
         self->restoreFrames = 0;
@@ -1907,7 +1907,7 @@ void gb_bridge_connect(tGbBridge * self, const tGbHostOps * ops) {
     // The status slot, announced once. The panel reads the meters and the drift figures straight
     // out of that slot rather than being sent a message per frame.
     gb_send_slot(self);
-    gb_log_line("connected to controller, published status slot %d", atomic_load(&self->statusSlot));
+    synthlib_log_line("connected to controller, published status slot %d", atomic_load(&self->statusSlot));
 }
 
 void gb_bridge_disconnect(tGbBridge * self) {
@@ -1987,7 +1987,7 @@ void gb_bridge_setup_processing(tGbBridge * self, double sampleRate, int32_t max
     pthread_mutex_unlock(&self->configLock);
 
     if (offline != atomic_load(&self->offlineRender)) {
-        gb_log_line("host set process mode %s%s", offline ? "OFFLINE" : "realtime",
+        synthlib_log_line("host set process mode %s%s", offline ? "OFFLINE" : "realtime",
                     offline ? " - a bounce in this mode captures nothing, the device runs in real"
                               " time" : "");
     }
@@ -2161,7 +2161,7 @@ void gb_bridge_measure_trigger(tGbBridge * self, bool sawPress, bool held) {
     // flag true - the editor's own release arrives in the same block - so the button worked exactly
     // once and then never again.
     if (sawPress && !self->measureArmed && (self->measureState == eMeasureIdle)) {
-        // NOT LOGGED FROM HERE. gb_log_line() opens and closes the file on every call, and this is
+        // NOT LOGGED FROM HERE. synthlib_log_line() opens and closes the file on every call, and this is
         // the audio thread - three syscalls in the middle of a 2.7 ms block, at the exact moment a
         // measurement is about to start. It showed up as a resync during the run and the run then
         // discarded itself for not being clean: a measurement failing because of the act of

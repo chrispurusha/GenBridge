@@ -1449,7 +1449,7 @@ int main(int argc, char ** argv) {
                     fclose(gate);
                 }
 
-                // THE GATE IS RE-POLLED ONCE A SECOND (gbLog.c), so a line logged within a second of
+                // THE GATE IS RE-POLLED ONCE A SECOND (SynthLib's plugin/synthlibLog.c), so a line logged within a second of
                 // an earlier one still finds it absent. This check passed only while nothing had
                 // logged in the second before it; since 2026-09-11 every instance logs as it is
                 // created, and the instance made just above for the resize checks had.

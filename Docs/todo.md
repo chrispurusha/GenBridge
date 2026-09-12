@@ -6,10 +6,8 @@ Built-but-unchecked work goes in to-test.md.
 
 Shared with the sibling projects
 
-- DONE 2026-09-09 for the three identical files (device, ring, stubs -> SynthLib/audio and SynthLib/plugin), and 2026-09-11 for the editor window: gbEditor.mm is gone, replaced by SynthLib's shared IPlugView and AU view. STILL DUPLICATED: gbView.m/msView.m 91% - both now take the same edit and sync callbacks, so one shared view with a per-project draw hook is the obvious next step
-- gbLog.c and msLog.c are the same idea at 39% (GenBridge re-polls the gate every second and names the process in every line; MidiSyncTool caches once and does not) - one of the two is better and it should be the shared one, in SynthLib/plugin
+- DONE 2026-09-09 for the three identical files (device, ring, stubs -> SynthLib/audio and SynthLib/plugin), and 2026-09-11 for the editor window: gbEditor.mm is gone, replaced by SynthLib's shared IPlugView and AU view; and the same day the panel view: gbView.m/msView.m (91% alike) became SynthLib/plugin/synthlibPanelView.m, driven by a per-project tSynthLibPanel in gbPlugin.c
 - gbStatus and msStatus share the slot mechanism and differ only in the payload struct: worth one SynthLib slot allocator with a project-supplied payload rather than two
-- THE SUBMODULE HAS UNPUSHED WORK (2026-09-11): the plug-in contract v2 in SynthLib/plugin/ (and src/renderBackendGL.c) was made in G2-Edit's checkout and COPIED into this one - diff against G2-Edit/SynthLib, discard the copies (git -C SynthLib checkout -- .) before pulling once it is pushed, then advance the pin
 - vst3/ holds the plug-in layer for BOTH formats since 2026-09-11 and is misnamed - G2-Edit renamed its own to plugin/; move it with do-plugin's list, do-vst3host's -I and vst3check's includes in one change
 
 Features

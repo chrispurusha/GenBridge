@@ -3,6 +3,7 @@ GenBridge TO TEST
 Finished code that is built but not yet checked against a real host or real hardware.
 Confirmed -> delete the line. Check failed -> move it to todo.md.
 
+- ***THE PANEL VIEW IS SYNTHLIB'S (2026-09-11)*** - gbView.m is gone; the editor is SynthLib/plugin/synthlibPanelView.m drawing gbDraw.c, shared with MidiSyncTool, with GenBridge's own class name (GenBridgePanelView). Checked offline: the editor is pixel-identical before and after in tools/vst3host, auval passes on GBfx and GBin, and vst3check passes. STILL TO CHECK in Live: clicks, the drop-downs, a live resize, and that the panel stops repainting when its window is covered or minimised; and with an effect and an instrument both open, Measure and Offset still work on the instrument.
 - ***VST3 AND AUDIO UNIT, ON SYNTHLIB'S SHARED WRAPPERS (2026-09-11)*** - gbVst3.cpp and gbEditor.mm
   are gone; vst3/gbPlugin.c describes the bridge to SynthLib/plugin/, and ./do-plugin builds
   GenBridge.vst3 and GenBridge.component (aufx GBfx CPur, aumu GBin CPur). Checked offline:

@@ -35,7 +35,7 @@
 #include <string.h>
 
 #include "gbBridgePrivate.h"
-#include "gbLog.h"
+#include "synthlibLog.h"
 #include "gbMidi.h"
 #include "gbStatus.h"
 
@@ -407,7 +407,7 @@ static void gb_parse_device_line(tGbBridge * self, const char * body, size_t len
 
     // AND WHAT CAME BACK OUT OF IT. Paired with the "saving:" line, these two settle whether a
     // buffer size survived the round trip through the project file.
-    gb_log_line("restoring: device '%s' frames %u rate %.0f", uid, frames, rate);
+    synthlib_log_line("restoring: device '%s' frames %u rate %.0f", uid, frames, rate);
 
     entry->frames          = frames;
     entry->rate            = rate;
@@ -550,7 +550,7 @@ const char * gb_bridge_state(tGbBridge * self, size_t * length) {
 
         // NOT LOGGED FROM HERE, and that is not tidiness. This is called by a host far more often
         // than a save: Ableton takes an undo snapshot on ordinary UI actions, and the loop runs once
-        // per REMEMBERED device - up to 32 of them. gb_log_line() opens and closes the file on every
+        // per REMEMBERED device - up to 32 of them. synthlib_log_line() opens and closes the file on every
         // call, so a line here is dozens of file operations on the HOST'S MAIN THREAD every time
         // someone moves a control. It was added to answer one question ("did the buffer size ever
         // reach the project file?"), it answered it, and it would have been a fresh cause of the

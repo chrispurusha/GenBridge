@@ -43,7 +43,7 @@
 #include <CoreAudio/HostTime.h>
 
 #include "gbBridgePrivate.h"
-#include "gbLog.h"
+#include "synthlibLog.h"
 #include "gbStatus.h"
 
 // FILE-LOCAL, AND FORWARD-DECLARED. A class let its members call each other in
@@ -335,7 +335,7 @@ void gb_run_measurement(tGbBridge * self, float ** out, int32_t frames, uint64_t
         // host-input mode for a day. burst and call are what it is computed from: a host handing
         // over its whole callback in one block has no lead at all, and one splitting a 256 into
         // 64s has (256 - 64) / 2 = 96 frames of it.
-        gb_log_line("measure: callback lead %.0f frames (host burst %u, this call %u)",
+        synthlib_log_line("measure: callback lead %.0f frames (host burst %u, this call %u)",
                     lead, self->observedMaxFrames, self->lastCallFrames);
         double   oursNow = ((self->measureOnsetOurs > 0.0) ? self->measureOnsetOurs
                            : gb_internal_latency_frames(self)) + lead;
@@ -458,7 +458,7 @@ void gb_store_measurement(tGbBridge * self) {
     // the resync was often caused by the act of measuring. A disturbed trip simply does not
     // vote; the run is only refused when nothing clean survived.
     if ((result >= 0) && (atomic_load(&self->measureTripsUsed) <= 0)) {
-        gb_log_line("measurement discarded: no trip completed over a clean capture "
+        synthlib_log_line("measurement discarded: no trip completed over a clean capture "
                  "(%u underruns, %d resyncs during the run) - try again", underruns, resynced);
 
         tGbStatus * status = gb_status(self->statusSlot);
@@ -472,14 +472,14 @@ void gb_store_measurement(tGbBridge * self) {
 
     if (result < 0) {
         if (result == GB_MEASURE_TOO_EARLY) {
-            gb_log_line("measurement: onset at %d frames but our own share is %u - the note cannot "
+            synthlib_log_line("measurement: onset at %d frames but our own share is %u - the note cannot "
                      "have arrived before our buffering delivered it. Either the threshold was "
                      "crossed by something other than the test note, or the ring was not at its "
                      "setpoint. floor %.4f, triggered at %.4f",
                      atomic_load(&self->measureOnset), gb_internal_latency(self),
                      (double)atomic_load(&self->measureFloorSeen), (double)atomic_load(&self->measureTriggerPeak));
         } else {
-            gb_log_line("measurement: nothing came back within %.1f s - is the synth on the channel "
+            synthlib_log_line("measurement: nothing came back within %.1f s - is the synth on the channel "
                      "and audible?", GB_MEASURE_TIMEOUT_S);
         }
 
@@ -518,7 +518,7 @@ void gb_store_measurement(tGbBridge * self) {
                         : ((measuredMs > GB_OFFSET_MAX_MS) ? GB_OFFSET_MAX_MS : measuredMs);
 
     if (seeded != measuredMs) {
-        gb_log_line("measured %.1f ms is outside the offset range %.0f..%.0f - clamped to %.1f",
+        synthlib_log_line("measured %.1f ms is outside the offset range %.0f..%.0f - clamped to %.1f",
                  measuredMs, GB_OFFSET_MIN_MS, GB_OFFSET_MAX_MS, seeded);
     }
 
@@ -563,7 +563,7 @@ void gb_store_measurement(tGbBridge * self) {
                        ? ((double)self->measureTrips[i] / (self->hostRate / 1000.0)) : -1.0);
     }
 
-    gb_log_line("measured: %d of %d trips used [%s], range %.1f..%.1f ms, spread %d frames (%.1f ms). "
+    synthlib_log_line("measured: %d of %d trips used [%s], range %.1f..%.1f ms, spread %d frames (%.1f ms). "
              "last onset %d, our "
              "share %d (ring %.0f of %.0f), hardware %d (%.1f ms). floor %.4f, triggered at "
              "%.4f, underruns %u resyncs %d during. '%s' -> '%s'",

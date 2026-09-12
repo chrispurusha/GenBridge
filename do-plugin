@@ -134,7 +134,7 @@ SOURCES=(
 
     "$HERE/poc/resampler.c"
     "$HERE/poc/drift.c"
-    "$HERE/vst3/gbLog.c"
+    "$SL/plugin/synthlibLog.c"      # the file-gated log, shared with the sibling plug-in
     "$HERE/vst3/gbParams.c"
     "$HERE/vst3/gbBridge.c"
     "$HERE/vst3/gbMeasure.c"
@@ -164,7 +164,7 @@ SOURCES=(
 
 # Plain Objective-C: the drawing surface needs the runtime but no C++.
 OBJC_SOURCES=(
-    "$HERE/vst3/gbView.m"
+    "$SL/plugin/synthlibPanelView.m"   # the panel view, shared with the other sibling since 2026-09-11
     "$SL/src/renderBackendMetal.m"
 )
 
@@ -208,7 +208,7 @@ WARNFLAGS=(-Wall -Wextra)
 #
 # AN ARRAY, not a string: the version define carries its own quotes through to clang, which survives a
 # string only until the first word split.
-DEFS=(-DSYNTHLIB_PLUGIN_BUILD=1 -DGB_VERSION_STRING="\"$GENBRIDGE_VERSION\"" -DGB_AU_VERSION=$AU_VERSION)
+DEFS=(-DSYNTHLIB_PLUGIN_BUILD=1 -DGB_VERSION_STRING="\"$GENBRIDGE_VERSION\"" -DGB_AU_VERSION=$AU_VERSION -DSYNTHLIB_PANEL_VIEW_CLASS=GenBridgePanelView)
 
 # glfw is here for its HEADERS ONLY - SynthLib's key and mouse constants come from them - so the library
 # is never linked. freetype is a real dependency, taken static so each bundle stays self-contained.
