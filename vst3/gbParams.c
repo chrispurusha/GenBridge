@@ -16,6 +16,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
+// Notes: Docs/code-notes/gbParams.c.md - "// notes §k" refers there.
 
 #include <stdio.h>
 #include <string.h>
@@ -83,12 +84,7 @@ bool gb_param_info(int32_t index, bool instrument, tGbParamInfo * out) {
         return instrument ? controller_info(index, out) : false;
     }
 
-    // Every entry is automatable and every list is a list; what varies is the scale and the names.
-    // A STEPPED LIST PARAMETER IS THE DEVICE CHOOSER, and a host renders one as a drop-down in its
-    // generic panel - which makes the plug-in usable with no editor at all, and keeps working
-    // afterwards because it is automatable and the host saves it. The step count is fixed at
-    // registration and cached by the host, so it cannot track how many devices the machine happens
-    // to have; unused slots simply read "-".
+    // notes §1
     out->automatable = true;
 
     switch (index) {

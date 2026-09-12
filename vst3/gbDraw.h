@@ -16,6 +16,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
+// Notes: Docs/code-notes/gbDraw.h.md - "// notes §k" refers there.
 
 #ifndef GB_DRAW_H
 #define GB_DRAW_H
@@ -33,10 +34,7 @@ extern "C" {
 // render_text() and draw_button() the sibling applications use, so this cannot drift away from
 // their look without the change being visible in all of them.
 
-// The logical canvas. Every coordinate below is in these units and is scaled to whatever surface
-// the host gives us, so the panel is the same shape at any window size.
-// TALL ENOUGH FOR THE INSTRUMENT, which is the variant with the most rows - the effect simply ends
-// higher. It grew by one ROW_STEP on 2026-09-09 when the Capture Source row was added.
+// notes §1
 #define GB_CANVAS_W    (520.0)
 #define GB_CANVAS_H    (592.0)
 
@@ -63,18 +61,7 @@ typedef struct {
     double  normalized;    // the new value, already normalised for the parameter
 } tGbEditRequest;
 
-// HOW A NORMALISED DEVICE PARAMETER BECOMES A DEVICE, in one place.
-//
-// This existed three times - in the editor, in the controller's value-to-string, and in the
-// processor - and two of them used a different scale. A VST3 stepped parameter has a FIXED step
-// count, decided at registration and cached by the host, so it cannot follow how many devices the
-// machine happens to have; the editor scaled across the real device count instead, which meant the
-// same normalised value named one device in the panel and opened another. The symptom was hearing
-// a Kronos while the panel said Analog Keys.
-//
-// So: the slot count is fixed, every caller uses these two functions, and the only thing that
-// varies is how many of the slots currently point at a real device. GB_DEVICE_SLOTS is in
-// gbParams.h, with every other scale the panel and the wrapper have to agree about.
+// notes §2
 int    gb_device_slot(double normalized);           // normalised -> slot index
 double gb_device_normalized(int slot);              // slot index -> normalised
 int    gb_input_device_count(void);                 // how many slots point at something real

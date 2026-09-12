@@ -16,6 +16,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
+// Notes: Docs/code-notes/gbStatus.h.md - "// notes §k" refers there.
 
 #ifndef GB_STATUS_H
 #define GB_STATUS_H
@@ -28,35 +29,12 @@ extern "C" {
 #include <stdbool.h>
 #include <stdint.h>
 
-// Live figures the processor publishes and the editor reads.
-//
-// ONE OF THESE PER PLUG-IN INSTANCE, not one per process. It used to be a single global, and with
-// two instances in a set the editors read whichever processor wrote last - so a panel showing the
-// microphone reported that it was capturing a Kronos. Two answers, one of them a lie.
-//
-// The processor claims a slot on construction and tells its controller which one through
-// IConnectionPoint, the channel VST3 provides for exactly this - the two are separate registered
-// classes precisely so a host MAY keep them apart, and nothing else bridges them.
-//
-// Messages carry the slot number ONCE. The meters and drift figures are then read straight out of
-// this shared structure, because a message per frame per instance would be a great deal of
-// allocation on a UI timer for numbers that are only ever advisory.
-//
-// Everything here is written by the audio or worker thread and read by the UI thread, so it is all
-// atomic and none of it is a pointer. The device name is the exception - a fixed buffer copied
-// under no lock at all, on the grounds that the worst case is a torn string in a readout that
-// refreshes thirty times a second.
+// notes §1
 typedef struct {
     atomic_bool     active;
     char            deviceName[128];
 
-    // The saved device is named in the project but is not plugged in. Distinct from "nothing
-    // selected": one is a plug-in waiting for hardware it has been told to use, the other is one
-    // that has never been told anything, and answering the first with the second is what let a
-    // missing USB interface fall through to whatever sat at slot 0 - a microphone.
-    //
-    // waitingName is written once, before the flag is raised, and read only while it is up, so it
-    // needs no more protection than deviceName above.
+    // notes §2
     atomic_int      waitingForDevice;
     char            waitingName[128];
     atomic_int      deviceRate;
@@ -81,17 +59,10 @@ typedef struct {
     atomic_int      eventsIn;
     atomic_int      eventsOut;
 
-    // WHAT THE PIPELINE'S DELAY ACTUALLY IS at this instant, against latencySamples which is what
-    // the host was TOLD. The reported figure is built from the ring's setpoint because a latency
-    // that moved every block would have the host redo delay compensation continuously; this is
-    // built from the occupancy the audio really came through. If the two disagree on average, every
-    // recording is displaced by the difference - see findings 2026-09-08 (5).
+    // notes §3
     atomic_int      actualSamples;
 
-    // The device was already running for another client when it was opened, so its rate and buffer
-    // size were LEFT ALONE deliberately - see the note in reconfigure(). Published because from the
-    // panel that is indistinguishable from a device refusing the setting, and the two want quite
-    // different responses from whoever is reading it.
+    // notes §4
     atomic_int      deviceShared;
 
     // The reported total, broken into what it is made of. All in HOST frames, so they add up.
@@ -117,11 +88,7 @@ typedef struct {
     _Atomic float   peakLeft;
     _Atomic float   peakRight;
 
-    // IS THE HOST ACTUALLY SENDING ANYTHING? Only meaningful in the host-input mode, where the
-    // difference between "routed and quiet" and "not routed at all" is invisible from the panel and
-    // is exactly what a user hits first: a side-chain pointed at the plug-in's OWN track is a
-    // feedback loop, so Live mutes it and the result is silence with nothing on screen to explain it.
-    // 1 while audio has arrived recently, 0 after about two seconds of nothing.
+    // notes §5
     atomic_int      hostInputPresent;
 } tGbStatus;
 

@@ -16,18 +16,9 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
+// Notes: Docs/code-notes/genbridge.c.md - "// notes §k" refers there.
 
-// Proof of concept for the whole idea: run two independent CoreAudio devices against each other
-// and hold the buffer between them at a fixed depth indefinitely, with no xruns.
-//
-// This is deliberately NOT a plug-in. The hard part of GenBridge is the drift loop, and a loop
-// that has to be reloaded into a DAW to be observed is a loop that will not get tuned. Here the
-// output device stands in for the DAW's clock - the substitution is honest, because from the
-// bridge's point of view a DAW is exactly that: something that consumes blocks on a clock which is
-// not the capture device's.
-//
-// The telemetry is the deliverable. If 'fill' holds its setpoint and 'int' settles on the same
-// number as 'raw', the loop is tracking the real crystal offset and the design works.
+// notes §1
 
 #include <math.h>
 #include <signal.h>
@@ -176,10 +167,7 @@ static void output_callback(void * user, const float * input, float * output, ui
 
     atomic_store(&bridge->framesOut, producedTotal);
 
-    // The raw cross-check, computed HERE rather than on the reporting thread. Both quantities are
-    // owned by this callback - readPos is moved by ring_read above, framesOut a line ago - so they
-    // are mutually consistent. Reading them from another thread instead lets one advance between
-    // the two loads, and a single block of skew looks exactly like tens of ppm of drift.
+    // notes §2
     uint64_t consumed = atomic_load(&bridge->ring.readPos) - bridge->syncReadPos;
     uint64_t produced = producedTotal - atomic_load(&bridge->syncFramesOut);
 
@@ -356,20 +344,12 @@ int main(int argc, char ** argv) {
     bridge->nominalRatio = inRate / outRate;
     bridge->channels     = channels;
 
-    // Synthetic drift. Real hardware may or may not have any - a USB device running synchronous
-    // to the host has none at all - so a loop that only ever sees well behaved devices has not
-    // been tested. Deliberately mis-stating the ratio gives a drift whose exact size is known in
-    // advance, which turns "it held steady" into a check with a right answer.
+    // notes §3
     bridge->workingRatio = bridge->nominalRatio * (1.0 + (injectPpm * 1.0e-6));
 
     double setpoint = (targetMs / 1000.0) * inRate;
 
-    // The setpoint has to clear one output block's worth of input plus the filter's reach, or the
-    // very first read underruns and the loop spends its life recovering from a hole of its own
-    // making.
-    // Must clear one output block's worth of input, the filter's reach, AND a whole input block -
-    // the fill sawtooths by that much from block granularity alone, so a setpoint below it dips
-    // into underrun on the troughs even with the clocks in perfect agreement.
+    // notes §4
     double minimumSetpoint = ((double)outFrames * bridge->workingRatio)
                              + (double)inFrames + (2.0 * RESAMPLER_TAPS);
 

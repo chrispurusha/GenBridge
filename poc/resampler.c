@@ -16,6 +16,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
+// Notes: Docs/code-notes/resampler.c.md - "// notes §k" refers there.
 
 #include <math.h>
 #include <stdlib.h>
@@ -212,10 +213,7 @@ void resampler_process(tResampler * rs, float * out, uint32_t outFrames, double 
 
     rs->pos += (double)outFrames * ratio;
 
-    // Compact: discard input the filter can no longer reach, keeping HALF_TAPS - 1 frames of
-    // history behind the read point. The memmove is a few hundred frames per callback, which is
-    // nothing beside the filter itself, and it keeps the buffer a plain linear array - the taps
-    // can then be indexed directly with no wrap test in the innermost loop.
+    // notes §1
     int32_t drop = (int32_t)floor(rs->pos) - (HALF_TAPS - 1);
 
     if (drop > 0) {

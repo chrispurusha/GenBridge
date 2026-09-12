@@ -16,18 +16,9 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
+// Notes: Docs/code-notes/selftest.c.md - "// notes §k" refers there.
 
-// Offline measurement of the resampler, with no hardware and no listening involved.
-//
-// The bridge's telemetry proves the buffer arithmetic and the control loop; it says nothing at all
-// about what happens to a signal. A run with zero xruns and a rock-steady fill can still be
-// destroying the audio. This puts a number on that, deterministically, so a change to the filter
-// can be shown to be an improvement rather than assumed to be one.
-//
-// Method: a pure sine through the resampler at a given ratio, then a windowed FFT of the output.
-// Everything that is not the fundamental is, by definition, something the resampler invented -
-// imaging, aliasing, interpolation error or quantisation - so the ratio of that to the fundamental
-// is the figure of merit. Reported as THD+N in dB; more negative is better.
+// notes §1
 
 #include <math.h>
 #include <stdio.h>
@@ -216,10 +207,7 @@ int self_test(void) {
         printf("  %-28s", cases[c].name);
 
         for (size_t f = 0; f < (sizeof(freqs) / sizeof(freqs[0])); f++) {
-            // Above the OUTPUT Nyquist the signal is meant to be removed entirely, so "distortion
-            // relative to the fundamental" is not a meaningful quantity - there should be no
-            // fundamental. Reporting a number there measures alias rejection while looking like
-            // THD, which is worse than reporting nothing.
+            // notes §2
             if (freqs[f] >= (0.5 / cases[c].ratio)) {
                 printf(" %11s", "-");
             } else {

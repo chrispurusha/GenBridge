@@ -16,18 +16,10 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
+// Notes: Docs/code-notes/gbState.c.md - "// notes §k" refers there.
 
 
-// THE SAVED STATE, AND THE TABLES IT CARRIES.
-//
-// THE FORMAT IS VERSIONED AND LINE BASED, and it is that way now rather than later because a state
-// format becomes expensive to change the moment anyone saves a session against it. Text costs
-// nothing at this size, survives being looked at in a hex editor, and lets an older build skip keys
-// it does not recognise instead of rejecting the whole blob.
-//
-// The UID is written LAST on each line and read as "everything after the last comma of the numeric
-// part", because real UIDs contain commas - "AppleUSBAudioEngine:CalDigit, Inc.:..." - and splitting
-// on them would truncate it.
+// notes §1
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -83,12 +75,7 @@ tDeviceSettings * gb_ensure_settings(tGbBridge * self, const char * uid) {
 
     memset(entry, 0, sizeof(*entry));
     strncpy(entry->uid, uid, DEVICE_UID_LEN - 1);
-    // ZERO MEANS "LEAVE THE DEVICE ALONE", and that is the default for both.
-    //
-    // Setting a device's nominal rate or buffer size is a GLOBAL operation affecting every
-    // client of that device - including the host itself, if it happens to be the same
-    // interface. Doing it uninvited during load is how a plug-in wedges a DAW. The device's own
-    // settings are now simply adopted, and these are written only when the user changes them.
+    // notes §2
     entry->frames       = 0;
     entry->rate         = 0.0;
     entry->targetMs     = GB_TARGET_AUTO;
@@ -99,13 +86,7 @@ tDeviceSettings * gb_ensure_settings(tGbBridge * self, const char * uid) {
     return entry;
 }
 
-// Fold whatever the user has changed live back into the active device's entry, so that saving
-// the project records what is actually on screen rather than what was last loaded.
-//
-// ONLY WHEN A DEVICE IS ACTUALLY RUNNING. If nothing is open, the live values are construction
-// defaults rather than anything the user chose, and writing them back destroys the settings
-// that were just loaded - a project saved without ever starting playback came back with every
-// trim reset to 1.0.
+// notes §3
 static void gb_capture_live_settings(tGbBridge * self) {
     if ((self->deviceSelector[0] == '\0') || !self->running) {
         return;
@@ -115,22 +96,13 @@ static void gb_capture_live_settings(tGbBridge * self) {
 
     entry->trim = atomic_load(&self->trimGain);
 
-    // DELIBERATELY NOT WRITING BACK targetMs WHEN IT IS AUTO. It used to record the computed
-    // setpoint, which turned "work it out" into a fixed number the moment a project was saved -
-    // so a session saved at one buffer size reopened with that size's setpoint baked in, and the
-    // floor calculation was quietly bypassed for ever after. Only an explicit choice is stored.
+    // notes §4
     if (self->running && (entry->targetMs > 0.0)) {
         entry->targetMs = (self->setpointFrames / (self->nominalRatio * self->hostRate)) * 1000.0;
     }
 }
 
-// ── Reading a blob, without a string class ──────────────────────────────────
-//
-// The parsing below walks the bytes in place. It was written against std::string, whose substr()
-// and find() made each step read nicely and allocated a copy for every line, every field and every
-// tail; what is here does the same work with a pointer and a length. The one thing worth saying is
-// that NOTHING IS ASSUMED TO BE NUL-TERMINATED - a host hands over a byte count, and a blob that
-// has been truncated in a project file is exactly the case that must not run off the end.
+// notes §5
 
 typedef struct {
     const char * text;
@@ -195,10 +167,7 @@ static bool next_number(const char ** at, const char * end, double * out) {
 }
 
 bool gb_parse_state(tGbBridge * self, const char * blob, size_t length) {
-    // Version 2 added the per-device sample rate as a numeric field, which changes how a dev=
-    // line is split - so it needed a version bump rather than a new key. Reading version 1 is
-    // still supported: this is exactly the situation the format was versioned for, and refusing
-    // to open a session saved yesterday would be a poor advertisement for it.
+    // notes §6
     int version = 0;
 
     if (length < 10) {
@@ -222,17 +191,11 @@ bool gb_parse_state(tGbBridge * self, const char * blob, size_t length) {
     self->deviceSelector[0]  = '\0';
     self->savedDeviceName[0] = '\0';
 
-    // A RESTORE IS NOT A CHOICE. Everything after this point until the user actually picks
-    // something is the project being reopened, and the saved UID - not the saved slot index -
-    // is what says which device that was. See the device parameter in gb_bridge_parameter() and
-    // gb_reconfigure().
+    // notes §7
     atomic_store(&self->savedDevicePending, false);
     atomic_store(&self->deviceParamSeen, false);
 
-    // Defaults for a blob that predates these keys, so loading an older session zeroes the
-    // correction rather than leaving whatever the previous project in this instance had. The
-    // pair record is cleared with it, so the device open that follows treats this as a new pair
-    // and seeds the offset from whatever the restored table holds for it.
+    // notes §8
     atomic_store(&self->offsetMs, 0.0);
     atomic_store(&self->captureSource, GB_SOURCE_DEVICE);
     self->offsetUid[0]  = '\0';
@@ -290,13 +253,7 @@ bool gb_parse_state(tGbBridge * self, const char * blob, size_t length) {
         } else if (line_key(&line, "hw=", &value, &valueLen)) {
             gb_parse_measured_line(self, value, valueLen);
         }
-        // Anything else is from a newer build; skipping it is the point of the format. That is
-        // also why hw= arrives without a version bump: it is a new KEY, and only a change to how
-        // a dev= line splits has ever needed the version.
-        //
-        // It also means the short-lived offset=/meas= pair from earlier is simply ignored
-        // rather than misread. meas= carried SAMPLES where hw= carries milliseconds, so reusing
-        // the name would have loaded a 221-sample reading as 221 ms.
+        // notes §9
     }
 
     // A device was named in the project, so it - and not a slot index recorded when the device
@@ -304,12 +261,7 @@ bool gb_parse_state(tGbBridge * self, const char * blob, size_t length) {
     // user chooses something else.
     atomic_store(&self->savedDevicePending, self->deviceSelector[0] != '\0');
 
-    // AND THE CONTROLLER HAS TO BE TOLD IF THIS CHANGED THE MODE, for the same reason gbDeviceSlot
-    // exists: the parameter is the host's copy, and a state restore reaches this side only. Live
-    // calls setState repeatedly, so a blob that disagreed with the panel used to leave the two
-    // permanently out of step - the panel saying Host input while the processor had gone back to
-    // opening a device, and no further parameter change coming because nothing the HOST knew about
-    // had changed.
+    // notes §10
     if (atomic_load(&self->captureSource) != wasSource) {
         gb_send_message(self, "gbSource",
                         (atomic_load(&self->captureSource) == GB_SOURCE_HOST) ? 1 : 0);
@@ -318,13 +270,7 @@ bool gb_parse_state(tGbBridge * self, const char * blob, size_t length) {
     return true;
 }
 
-// hw=<samples>,<offset ms>,<destination name length>,<destination name><audio uid>
-//
-// THE LENGTH IS THERE BECAUSE BOTH TAILS ARE FREE TEXT. A dev= line gets away with putting its
-// uid last and taking the rest of the line, but this one carries two names, and a MIDI
-// destination is quite entitled to contain a comma - "Scarlett 2i2, Port 1" is an ordinary
-// thing for a driver to call itself. Counting the first name off by length leaves nothing to
-// guess at, where a third comma would have been a guess that fails on somebody's interface.
+// notes §11
 static void gb_parse_measured_line(tGbBridge * self, const char * body, size_t length) {
     const char * at  = body;
     const char * end = body + length;
@@ -419,11 +365,7 @@ static void gb_parse_device_line(tGbBridge * self, const char * body, size_t len
 }
 
 
-// ── Writing a blob ──────────────────────────────────────────────────────────
-//
-// A growable buffer, because the length depends on how many devices have been remembered and how
-// many pairs measured - up to 32 of each. std::string did this by itself; three fields and one
-// append do the same job with the allocation visible.
+// notes §12
 static void text_add(tGbBridge * self, const char * format, ...) {
     va_list args;
     char    piece[512 + DEVICE_UID_LEN + GB_MIDI_NAME_LEN];
@@ -457,12 +399,7 @@ static void text_add(tGbBridge * self, const char * format, ...) {
 }
 
 const char * gb_bridge_state(tGbBridge * self, size_t * length) {
-    // UNDER THE LOCK, and this is the one that could actually crash rather than merely report a
-    // wrong number. deviceSelector is rewritten by gb_reconfigure() under configLock, and
-    // gb_capture_live_settings() walks the remembered[] table the same worker appends to.
-    //
-    // Blocking is fine here in a way it never is in the render path: a host calls this on its own
-    // thread when it saves, and the worst wait is one device swap.
+    // notes §13
     gb_lock_config_from_host(self, "getState");
 
     gb_capture_live_settings(self);
@@ -472,18 +409,7 @@ const char * gb_bridge_state(tGbBridge * self, size_t * length) {
     text_add(self, "GENBRIDGE3\n");
     text_add(self, "active=%s\n", self->deviceSelector);
 
-    // HOW MUCH THE HOST TAKES PER CALLBACK, which is a property of the HOST and its buffer setting
-    // rather than of any device - so it is written once, outside the dev= lines.
-    //
-    // Saved because neither number available at the FIRST open is right: this host declares 256 and
-    // hands over 512, and the observation needs an undisturbed callback that a project load does not
-    // provide. Without it the ring comes up at 560, discovers the truth a second later and retunes
-    // to 880 - which costs a device reopen per instance, 1.4 seconds each on these interfaces. With
-    // it, the first open is already correct.
-    //
-    // A stale value is safe: the retune corrects in BOTH directions now, and
-    // gb_bridge_setup_processing() discards it outright if the host comes back declaring a
-    // different block size.
+    // notes §14
     if (self->observedMaxFrames > 0) {
         text_add(self, "callback=%u\n", self->observedMaxFrames);
     }
@@ -502,10 +428,7 @@ const char * gb_bridge_state(tGbBridge * self, size_t * length) {
         }
     }
 
-    // BY NAME, not by index. The MIDI list shifts whenever a device is powered on or off, so an
-    // index saved on Monday names something else on Tuesday - the same reasoning that keeps the
-    // audio device stored as a UID. Ableton was not forgetting the destination; nothing was ever
-    // writing it down.
+    // notes §15
     if (self->instrument) {
         char midiNameNow[GB_MIDI_NAME_LEN] = {0};
 
@@ -513,25 +436,12 @@ const char * gb_bridge_state(tGbBridge * self, size_t * length) {
         text_add(self, "midi=%s\n", midiNameNow);
         text_add(self, "midich=%d\n", atomic_load(&self->midiChannel));
 
-        // ALWAYS WRITTEN, both values. A key that only appears in one mode says nothing in the
-        // other, and a host that re-applies a state - Live does it repeatedly, for undo snapshots
-        // among other things - would then read "no key" as "device" and quietly switch the plug-in
-        // out of the mode the user chose. An older build ignores the key it does not know.
+        // notes §16
         text_add(self, "source=%s\n",
                  (atomic_load(&self->captureSource) == GB_SOURCE_HOST) ? "host" : "device");
         text_add(self, "testnote=%d\n", atomic_load(&self->testNote));
 
-        // THE MANUAL TRIM, AND THE MEASUREMENTS IT TRIMS. Neither belongs on a dev= line: the offset
-        // is one value for the whole plug-in, and a measurement is keyed by the audio device and the
-        // MIDI destination TOGETHER - a pair no single dev= line names.
-        //
-        // Without both of these the feature came apart on reload, and quietly. gb_report_latency()
-        // adds the measured hardware share and then the offset on top of it, so a session reopened
-        // with the pair missing reported a latency short by the entire round trip, with the trim
-        // someone had dialled in by ear silently back at zero. Restoring the offset alone would be
-        // worse than neither: it would trim a base that was not there. The live value belongs to a
-        // pair like every other, so fold it in before writing - otherwise a nudge made since the
-        // last device change would not be in the table yet.
+        // notes §17
         gb_sync_offset_to_pair(self);
 
         for (uint32_t i = 0; i < self->measuredCount; i++) {
@@ -548,16 +458,7 @@ const char * gb_bridge_state(tGbBridge * self, size_t * length) {
         text_add(self, "dev=%u,%.1f,%.3f,%u,%u,%.4f,%s\n", d->frames, d->rate, d->targetMs,
                  d->firstChannel, d->captureChannels, (double)d->trim, d->uid);
 
-        // NOT LOGGED FROM HERE, and that is not tidiness. This is called by a host far more often
-        // than a save: Ableton takes an undo snapshot on ordinary UI actions, and the loop runs once
-        // per REMEMBERED device - up to 32 of them. synthlib_log_line() opens and closes the file on every
-        // call, so a line here is dozens of file operations on the HOST'S MAIN THREAD every time
-        // someone moves a control. It was added to answer one question ("did the buffer size ever
-        // reach the project file?"), it answered it, and it would have been a fresh cause of the
-        // very beachball it was helping to chase.
-        //
-        // The "restoring:" line on the way back in survives, because a load runs once and is where
-        // a value that failed to persist actually shows up as missing.
+        // notes §18
     }
     // Released before the caller writes: the bytes belong to the bridge now, and the wrapper's
     // write() calls back into the host - which must never happen with this lock held.
@@ -571,13 +472,7 @@ const char * gb_bridge_state(tGbBridge * self, size_t * length) {
 }
 
 bool gb_bridge_set_state(tGbBridge * self, const char * blob, size_t length) {
-    // UNDER THE LOCK, the mirror of gb_bridge_state(). gb_parse_state() clears and rewrites almost
-    // every piece of configuration the worker reads - the device selector and the saved name, the
-    // remembered[] and measured[] tables, and the offset pair. A host may call this while the
-    // plug-in is loaded and the worker is mid-reconfigure.
-    //
-    // The wrapper's read loop is deliberately OUTSIDE this: reading the stream calls back into the
-    // host, which must never happen with this held.
+    // notes §19
     gb_lock_config_from_host(self, "setState");
 
     bool ok      = gb_parse_state(self, blob, length);
@@ -585,18 +480,7 @@ bool gb_bridge_set_state(tGbBridge * self, const char * blob, size_t length) {
 
     pthread_mutex_unlock(&self->configLock);
 
-    // ASK FOR THE DEVICE AGAIN, because the settings may have arrived AFTER it was opened.
-    //
-    // Nothing here controls when a host calls this relative to everything else. If the device
-    // parameter reaches the plug-in first - through the controller, or as a parameter change in the
-    // first process() calls - the device is opened before this blob has been read, so it comes up
-    // with no remembered entry and "leave the device alone" is the honest default. The saved buffer
-    // size then lands in remembered[] with nothing to apply it.
-    //
-    // That is CT's "I still had to set 64 manually": the settings were restored correctly and simply
-    // never reached the device. Rather than guess at a host's ordering, react to the late arrival -
-    // gb_request_device() is debounced, so a host that DID call in the tidy order coalesces this
-    // into the open it was going to do anyway.
+    // notes §20
     if (ok && wasOpen) {
         gb_request_device(self);
     }
@@ -605,16 +489,7 @@ bool gb_bridge_set_state(tGbBridge * self, const char * blob, size_t length) {
 }
 
 
-// ── What the CONTROLLER needs from the same bytes ───────────────────────────
-//
-// A VST3 host saves the component's state and hands the same bytes to the controller through
-// setComponentState, precisely so the two can agree on what was loaded - and a controller that
-// ignores it comes up showing defaults. That is what made two tracks, saved with a Kronos and a
-// Helix, both reopen as Analog Keys: the UID was in the file, but nothing told the panel about it.
-//
-// A SECOND READER OF ONE FORMAT, deliberately not a second parser of it: this reads far enough to
-// recover what a panel has to show and nothing else, and it shares next_line(), line_key() and
-// copy_field() with the parser above so the two cannot disagree about where a line ends.
+// notes §21
 void gb_state_parse_active(const char * blob, size_t length, tGbActive * out) {
     if (out == NULL) {
         return;
