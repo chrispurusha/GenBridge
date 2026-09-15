@@ -261,6 +261,13 @@ sign_bundle() {
 # REPLACED, not copied over: cp -R onto an existing bundle MERGES, so a file dropped from the build
 # would survive in the installed copy and go on being loaded long after it left the source tree. A
 # failure here is a warning - the bundle in build/ is complete either way.
+# THE ONE-OFF FIX for a plug-in folder we cannot write: root:admin 775, as VST3 already is. A macOS
+# upgrade resets Components to root:wheel 755.
+print_permission_fix() {
+    print -u2 "         to fix, run once:  sudo chgrp admin '$1' && sudo chmod g+w '$1'"
+    print -u2 "         then run ./do-plugin again"
+}
+
 install_bundle() {
     local bundle=$1
     local dest=$2
@@ -276,6 +283,15 @@ install_bundle() {
         return
     fi
 
+    # CHECKED BEFORE THE rm: the bundle inside is ours, so rm empties it and only then fails on the
+    # folder itself, leaving a hollow bundle a host still lists. A macOS upgrade resets Components to
+    # root:wheel 755 (macOS 27 did, 2026-09-15).
+    if [[ ! -w $dest ]]; then
+        print -u2 "warning: $dest is not writable - not installing $name (left in $OUT_DIR)"
+        print_permission_fix "$dest"
+        return
+    fi
+
     # A COPY IN THE OTHER FOLDER OUTRANKS NOTHING - hosts scan both and may load whichever they reach
     # first. That is a very convincing way to spend an afternoon fixing a bug that was fixed already.
     if [[ -d "$other/$name" ]]; then
@@ -284,6 +300,7 @@ install_bundle() {
 
     if ! rm -rf "$dest/$name" 2>/dev/null || ! cp -R "$bundle" "$dest/" 2>/dev/null; then
         print -u2 "warning: could not install into $dest (permission?) - $name left in $OUT_DIR"
+        print_permission_fix "$dest"
         return
     fi
     xattr -dr com.apple.quarantine "$dest/$name" 2>/dev/null || true
