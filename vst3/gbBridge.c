@@ -688,7 +688,16 @@ static void gb_worker_loop(tGbBridge * self) {
     }
 }
 
+static void gb_reconfigure_serialised(tGbBridge * self);
+
+// notes §73 - one at a time: the worker's, and the host's at activation (gb_bridge_set_active())
 void gb_reconfigure(tGbBridge * self) {
+    pthread_mutex_lock(&self->reconfigLock);
+    gb_reconfigure_serialised(self);
+    pthread_mutex_unlock(&self->reconfigLock);
+}
+
+static void gb_reconfigure_serialised(tGbBridge * self) {
     tDeviceInfo list[DEVICE_MAX];
     uint32_t    count = device_enumerate(list, DEVICE_MAX);
     tDeviceInfo chosen;
@@ -780,6 +789,8 @@ void gb_reconfigure(tGbBridge * self) {
     self->keepSettingsFor = found ? chosen.id : 0;
 
     double heldFrom = gb_now_ms();
+
+    self->openUnlockedMs = 0.0;
     pthread_mutex_lock(&self->configLock);
     gb_close_capture_locked(self);
     self->keepSettingsFor = 0;
@@ -797,7 +808,7 @@ void gb_reconfigure(tGbBridge * self) {
     }
 
     uint32_t nowLatency = self->running ? gb_report_latency(self) : 0;
-    double held       = gb_now_ms() - heldFrom;
+    double held       = gb_now_ms() - heldFrom - self->openUnlockedMs;   // notes §73 - the time the host could wait
 
     pthread_mutex_unlock(&self->configLock);
 
@@ -808,11 +819,11 @@ void gb_reconfigure(tGbBridge * self) {
         // BROKEN DOWN, because "it held the lock for 1441 ms" says a refactor is needed and not
         // WHICH of the three things inside it to move first.
         synthlib_log_line("reconfigure held configLock for %.0f ms (close+probe %.0f, rate+buffer %.0f, "
-                 "open %.0f) - anything the host asked of this plug-in on its own thread waited "
-                 "behind it", held,
+                 "open %.0f, of which %.0f with it released) - anything the host asked of this plug-in on its "
+                 "own thread waited behind it", held,
                  (self->gPhaseIdle > heldFrom) ? (self->gPhaseIdle - heldFrom) : 0.0,
                  (self->gPhaseOpen > self->gPhaseProps) ? (self->gPhaseOpen - self->gPhaseProps) : 0.0,
-                 (self->gPhaseOpen > 0.0) ? (gb_now_ms() - self->gPhaseOpen) : 0.0);
+                 (self->gPhaseOpen > 0.0) ? (gb_now_ms() - self->gPhaseOpen) : 0.0, self->openUnlockedMs);
     }
 
     // Told OUTSIDE the lock: restartComponent re-enters the plug-in, and a host is entitled to
@@ -1139,6 +1150,17 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
     }
     self->captureChannels = wantCount;
 
+    // notes §73 - THE SLOW HALF WITHOUT THE LOCK. Everything from here to the device running reads only
+    // this copy of the settings and the bridge's own capture fields, which process() does not touch while
+    // running is false (it was closed under the lock just before) - so the host's thread, which takes this
+    // lock for getState() and the rest, no longer waits the second and a half Overbridge takes to start.
+    tDeviceSettings chosenSettings = *settings;
+
+    settings = &chosenSettings;
+    double unlockedAt = gb_now_ms();
+
+    pthread_mutex_unlock(&self->configLock);
+
     // notes §34
     device_wait_until_idle(info->id, 120);
 
@@ -1209,7 +1231,7 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
     double deviceRate = device_sample_rate(info->id);
 
     if ((deviceRate <= 0.0) || (self->hostRate <= 0.0)) {
-        return false;
+        goto failed_unlocked;
     }
 
     uint32_t deviceFrames = device_buffer_frames(info->id);
@@ -1312,11 +1334,11 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
                           + (4 * (deviceFrames + self->hostMaxFrames));
 
     if (!ring_init(&self->ring, ringFrames, GB_CHANNELS)) {
-        return false;
+        goto failed_unlocked;
     }
 
     if (!resampler_init(&self->resampler, GB_CHANNELS, self->nominalRatio, self->hostMaxFrames)) {
-        return false;
+        goto failed_unlocked;
     }
 
     self->pullCapacity = (uint32_t)((double)self->hostMaxFrames * self->nominalRatio * 1.5) + (4 * RESAMPLER_TAPS);
@@ -1325,7 +1347,7 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
     self->widen        = (float *)calloc((size_t)deviceFrames * 4 * GB_CHANNELS, sizeof(float));
 
     if ((self->pullBuffer == NULL) || (self->interleaved == NULL) || (self->widen == NULL)) {
-        return false;
+        goto failed_unlocked;
     }
 
     tDriftConfig config = drift_default_config();
@@ -1338,12 +1360,15 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
                      deviceFrames * 4, gb_capture_callback, self)) {
         synthlib_log_line("device_open failed for '%s' (%u ch from %u)", info->name, atomic_load(&self->captureChannels),
                  first + 1);
-        return false;
+        goto failed_unlocked;
     }
 
     if (!device_start(&self->capture)) {
-        return false;
+        goto failed_unlocked;
     }
+
+    pthread_mutex_lock(&self->configLock);   // notes §73 - the rest is quick, and is what the host reads
+    self->openUnlockedMs = gb_now_ms() - unlockedAt;
 
     // notes §41
     atomic_store(&self->ring.underflows, 0);
@@ -1410,6 +1435,11 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
     gb_publish_latency_breakdown(self);
 
     return true;
+
+failed_unlocked:
+    pthread_mutex_lock(&self->configLock);   // the caller unlocks it
+    self->openUnlockedMs = gb_now_ms() - unlockedAt;
+    return false;
 }
 
 static void gb_close_capture_locked(tGbBridge * self) {
@@ -1487,9 +1517,11 @@ static double gb_minimum_setpoint_for(tGbBridge * self, uint32_t hostFrames, uin
 }
 
 static void gb_close_capture(tGbBridge * self) {
+    pthread_mutex_lock(&self->reconfigLock);   // notes §73 - not in the middle of an open's slow half
     pthread_mutex_lock(&self->configLock);
     gb_close_capture_locked(self);
     pthread_mutex_unlock(&self->configLock);
+    pthread_mutex_unlock(&self->reconfigLock);
 }
 // notes §49
 
@@ -1524,6 +1556,7 @@ tGbBridge * gb_bridge_create(bool instrument) {
     }
 
     pthread_mutex_init(&self->configLock, NULL);
+    pthread_mutex_init(&self->reconfigLock, NULL);
     pthread_mutex_init(&self->wakeMutex, NULL);
     pthread_cond_init(&self->wakeCond, NULL);
 
@@ -1542,6 +1575,7 @@ void gb_bridge_destroy(tGbBridge * self) {
     pthread_cond_destroy(&self->wakeCond);
     pthread_mutex_destroy(&self->wakeMutex);
     pthread_mutex_destroy(&self->configLock);
+    pthread_mutex_destroy(&self->reconfigLock);
 
     free(self);
 }

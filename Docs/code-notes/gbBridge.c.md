@@ -920,3 +920,28 @@ a device running for anything else is left alone whatever is asked (§34). The r
 "By hand" is every device parameter except the host's first re-send of a restored project's device (§57):
 a fresh instance's FIRST pick is the user's - there is no saved device pending - and that is the case CT
 reported, which "any delivery after the first" would have missed.
+
+## 73. the open's slow half runs without configLock (`gb_open_capture_locked()`, `reconfigLock`)
+
+THE SPINNING CURSOR (todo since 2026-09; CT again 2026-10-04: "a spinner with the Analog Keys but not the
+Kronos"). The log said why: every reconfigure held configLock for the whole open, and starting the Analog
+Keys takes Overbridge ~1.43 s (4-4.8 s with a buffer change) where the Kronos's class driver takes ~70 ms -
+and the host's own thread takes that lock for getState(), which Live calls for undo snapshots on ordinary
+actions. So Live waited on Overbridge.
+
+Now the open is three parts. UNDER THE LOCK: the device's settings are chosen and recorded (the table
+getState() reads), and copied. WITHOUT IT: waiting for idle, rate and buffer, the ring, resampler and drift
+loop, starting the device - all from the copy and the bridge's own capture fields, which process() does not
+touch while `running` is false (the close just before, under the lock, made it so; process() trylocks and
+plays silence either way). UNDER THE LOCK AGAIN, briefly: what is now in force, the measurement for this
+pair, the status - and `running`.
+
+Released, configLock no longer stops a second reconfigure starting - the worker's and the host's own at
+activation (gb_bridge_set_active()) - or a close landing in the middle of an open, so `reconfigLock`
+serialises those: always taken BEFORE configLock, never while holding it. The host waits on reconfigLock
+only where it waited before, at activation and teardown; getState(), setState() and the parameter calls
+take configLock alone.
+
+The log's "held configLock" figure now subtracts the released span (`openUnlockedMs`), so it is the time the
+host could actually have waited. MEASURED: vst3check's Analog Keys reconfigures went from ~1,430 ms held to
+under the 20 ms the log reports from; vst3check passes.

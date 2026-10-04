@@ -1,3 +1,7 @@
+- ***NO SPINNER ON A SLOW DEVICE (2026-10-04)*** - gbBridge notes §73. Analog Keys in Live: pick it, change its
+  Buffer, switch to the Kronos and back - no spinning cursor, and audio comes back each time. While a
+  switch is in flight, save the project or press undo: no hang (a save mid-switch records the previous
+  device, which is honest). Two instances on different devices switched in quick succession: both settle.
 - ***MEASURE: NINE TRIPS, OUTLIERS SET ASIDE (2026-10-04)*** - gbMeasure notes §19. Measure takes about 4.5 s now;
   the log's "measured: N of 9 trips used" shows how many counted. The figure is the FASTEST trip that
   counts: takes through the Analog Keys should land on the beat or a fraction late, never early.

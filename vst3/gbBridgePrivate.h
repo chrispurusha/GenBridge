@@ -348,6 +348,8 @@ struct tGbBridge {
     AudioObjectID          keepSettingsFor;
 
     pthread_mutex_t        configLock; // held by the worker while swapping devices; trylocked in process()
+    pthread_mutex_t        reconfigLock; // notes §73 - one reconfigure or close at a time; always taken BEFORE configLock
+    double                 openUnlockedMs; // notes §73 - how long the last open ran with configLock released
     pthread_mutex_t        wakeMutex;
     pthread_cond_t         wakeCond;
     pthread_t              worker;
