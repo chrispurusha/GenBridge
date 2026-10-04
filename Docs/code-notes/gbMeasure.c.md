@@ -240,7 +240,11 @@ one, and took an honest trip out every time. CT asked for anomalies ignored and 
 (GB_MEASURE_TRIPS, about 4.5 s), and a trip counts only if it lies within GB_MEASURE_OUTLIER_MADS (3) median
 absolute deviations of the median - the MAD scaled by 1.4826 to read as a standard deviation, so the line
 follows each synth's own jitter - but never inside GB_MEASURE_OUTLIER_FLOOR_MS (0.5 ms) of it, or a synth whose
-trips agree to the frame would lose honest ones to its own steadiness. The result is the mean of the trips
-that count. Worked on runs from the rig (48 kHz): [28.0/12.6/12.6/12.6/12.6] keeps the four 12.6s - 12.6 ms, where the old
-rule kept three; [22.5/21.8/21.8/22.4/21.9] sets the 22.5 aside (0.6 ms from the median) - 21.97 ms against the
-old 22.03; [13.1/12.9/12.9/12.9/12.8] keeps all five - 12.92 against 12.90.
+trips agree to the frame would lose honest ones to its own steadiness.
+
+The result is the FASTEST trip that counts (CT, the same day: "never early would be good"). With the mean, the
+notes that came back faster than average recorded early by their share of the jitter; with the fastest, every
+take lands on time or late by up to the synth's jitter, never early. An abnormally fast trip is still an
+outlier and set aside, so one glitch cannot pull the correction under the real shortest delay. Worked on runs from the rig (48 kHz): [28.0/12.6/12.6/12.6/12.6] keeps the four 12.6s - 12.6 ms;
+[22.5/21.8/21.8/22.4/21.9] sets the 22.5 aside - 21.8 ms (the old trimmed mean said 22.03, so the fast
+notes recorded up to 0.2 ms early); [13.1/12.9/12.9/12.9/12.8] keeps all five - 12.8 ms.

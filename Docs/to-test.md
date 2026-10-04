@@ -1,6 +1,6 @@
 - ***MEASURE: NINE TRIPS, OUTLIERS SET ASIDE (2026-10-04)*** - gbMeasure notes §19. Measure takes about 4.5 s now;
-  the log's "measured: N of 9 trips used" shows how many counted. Takes through the Analog Keys should
-  straddle the beat no worse than before, and a stray slow trip no longer moves the figure.
+  the log's "measured: N of 9 trips used" shows how many counted. The figure is the FASTEST trip that
+  counts: takes through the Analog Keys should land on the beat or a fraction late, never early.
 - ***PICKED DEVICE TAKES THE SHOWN BUFFER (2026-10-04)*** - gbBridge notes §72. New GenBridge Instrument, pick the
   Kronos (Buffer showing 32): the log says "device picked by hand: asking it for the panel's 32 frames" and
   the device opens at 32 - no re-selecting. Reopen a saved project: its saved Buffer, nothing asked otherwise.

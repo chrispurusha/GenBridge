@@ -257,7 +257,7 @@ void gb_run_measurement(tGbBridge * self, float ** out, int32_t frames, uint64_t
     }
 }
 
-// notes §19 - the mean of the trips that voted, outliers set aside. Sorted in place - nine elements,
+// notes §19 - the fastest of the trips that voted, outliers set aside. Sorted in place - nine elements,
 // on the audio thread, and an insertion sort of nine is nothing beside the block it sits in.
 static int gb_trip_result(tGbBridge * self) {
     int valid[GB_MEASURE_TRIPS];
@@ -305,12 +305,14 @@ static int gb_trip_result(tGbBridge * self) {
     double perMs     = (self->hostRate > 0.0) ? (self->hostRate / 1000.0) : 48.0;
     double limit     = fmax(GB_MEASURE_OUTLIER_MADS * 1.4826 * (double)deviation[count / 2],
                             GB_MEASURE_OUTLIER_FLOOR_MS * perMs);
-    int    total     = 0;
+    int    fastest   = 0;
     int    used      = 0;
 
+    // notes §19 - the FASTEST trip that counts, not their mean: the correction must not exceed the shortest
+    // real delay, or the notes that come back fastest record early (CT: "never early would be good")
     for (int i = 0; i < count; i++) {
         if (fabs((double)(valid[i] - median)) <= limit) {
-            total += valid[i];
+            fastest = (used == 0) ? valid[i] : ((valid[i] < fastest) ? valid[i] : fastest);
             used++;
         }
     }
@@ -320,7 +322,7 @@ static int gb_trip_result(tGbBridge * self) {
     atomic_store(&self->measureTripHigh, valid[count - 1]);
     atomic_store(&self->measureTripSpread, (count > 1) ? (valid[count - 1] - valid[0]) : 0);
 
-    return (used > 0) ? (total / used) : GB_MEASURE_TOO_EARLY;
+    return (used > 0) ? fastest : GB_MEASURE_TOO_EARLY;
 }
 
 void gb_store_measurement(tGbBridge * self) {
