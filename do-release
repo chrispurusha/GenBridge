@@ -457,6 +457,12 @@ where the audio comes from with the "Source" row at the top:
     the rate, buffer size and which input pair to take. Use this when the synth
     has its own USB audio output, or is on an interface your DAW is not using.
 
+    The Buffer shown is applied when you pick the device. Some drivers are slow
+    to change size - an Elektron instrument through Overbridge can take ten
+    seconds - and GenBridge waits for it rather than asking again. The "device"
+    figure at the bottom of the panel is the total delay with its two parts,
+    e.g. "180 (32+148)": the buffer, plus what the driver adds on top.
+
   Source = Host input
 
     GenBridge takes the audio your DAW hands it, and opens nothing. The Device,
@@ -480,10 +486,19 @@ where the audio comes from with the "Source" row at the top:
 
 MEASURING THE LATENCY
 
-Press Measure. GenBridge plays a note, listens for it coming back, does it five
-times and reports how long the synth and the wiring take. The figure lands in
-"In use", which is what gets reported to your DAW - so recordings line up on the
-beat without you working anything out. You can nudge it by hand afterwards.
+Press Measure. GenBridge plays a note, listens for it coming back, does it nine
+times and reports how long the synth and the wiring take. Attempts that are out
+of line with the rest are ignored, and it keeps the FASTEST of those that remain,
+so a recording lands on the beat or a fraction late - never early. The figure
+lands in "In use", which is what gets reported to your DAW - so recordings line
+up without you working anything out. You can nudge it by hand afterwards.
+
+EACH BUFFER SIZE KEEPS ITS OWN MEASUREMENT. Change the device's Buffer and
+GenBridge carries over the nearest measurement, marked in amber beside "In use"
+("est. from 256 - re-measure"). Measure again at the new size: some drivers -
+Elektron's Overbridge among them - add delay of their own at larger buffers that
+nothing can predict. A device that reports no delay of its own at all (Overbridge
+again) needs Measure for its recordings to line up at all.
 
 WHAT IT MEASURES WITH MATTERS. It listens for the sound crossing a level, so:
 
