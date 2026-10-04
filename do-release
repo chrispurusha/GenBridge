@@ -257,13 +257,13 @@ echo "==> bundle version $PLIST_VERSION, in both plists and both binaries"
 for want in "0:aufx:GBfx" "1:aumu:GBin"; do
     index=${want%%:*}
     rest=${want#*:}
-    type=$(/usr/libexec/PlistBuddy -c "Print :AudioComponents:$index:type" \
+    type=$(/usr/libexec/PlistBuddy -c "Print :AudioComponents:${index}:type" \
                "$AU_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "")
-    subtype=$(/usr/libexec/PlistBuddy -c "Print :AudioComponents:$index:subtype" \
+    subtype=$(/usr/libexec/PlistBuddy -c "Print :AudioComponents:${index}:subtype" \
                   "$AU_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "")
 
-    if [[ "$type:$subtype" != "$rest" ]]; then
-        echo "error: the Audio Unit's component $index is '$type:$subtype', expected '$rest'" >&2
+    if [[ "${type}:${subtype}" != "$rest" ]]; then
+        echo "error: the Audio Unit's component ${index} is '${type}:${subtype}', expected '$rest'" >&2
         exit 1
     fi
 done
