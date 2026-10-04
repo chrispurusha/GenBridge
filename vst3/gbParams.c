@@ -113,7 +113,7 @@ bool gb_param_info(int32_t index, bool instrument, tGbParamInfo * out) {
             out->id = kParamFrames;
             name_it(out, "Device Buffer", "Buffer", NULL);
             out->stepCount         = gGbFrameCount - 1;
-            out->defaultNormalized = 1.0 / (double)(gGbFrameCount - 1); // 128
+            out->defaultNormalized = 1.0 / (double)(gGbFrameCount - 1); // 32, gGbFrames[1] - GB_FRAMES_SHOWN_DEFAULT
             out->list              = true;
             return true;
 

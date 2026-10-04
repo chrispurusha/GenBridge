@@ -315,3 +315,10 @@ of it at a tenth a click is two hundred clicks - hence the coarse pair beside it
 
 The range stays +/-100 ms deliberately: it is a normalised VST3 parameter, so narrowing
 it would silently re-scale the offset saved in every existing host project.
+
+## 30. the telemetry row's "device" (2026-10-04)
+
+Shown as total (buffer + driver) - "180 (32+148)" for a Kronos at 32 frames - because "device 180" beside a
+Buffer of 32 read as the buffer being wrong (CT). The driver part is the device's latency and safety offset
+(and any stream latency), which do not move with the buffer; Overbridge reports none, so the Analog Keys shows
+the buffer alone. "filter" moved to the fourth column to give it room.

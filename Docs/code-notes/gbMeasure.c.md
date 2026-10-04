@@ -232,3 +232,15 @@ EVERY TRIP, NOT JUST THE SUMMARY. An average and a range still hide the shape: f
 readings clustered with one wild outlier, and five spread evenly, produce the same two
 numbers and mean quite different things. Safe to read here - the run is idle by the time
 the worker gets to this, so the array is not being written.
+
+## 19. `gb_trip_result()` - nine trips, outliers set aside (2026-10-04)
+
+Five trips with the fastest and slowest dropped kept one outlier out only when it happened to be the extreme
+one, and took an honest trip out every time. CT asked for anomalies ignored and more trips. Now nine
+(GB_MEASURE_TRIPS, about 4.5 s), and a trip counts only if it lies within GB_MEASURE_OUTLIER_MADS (3) median
+absolute deviations of the median - the MAD scaled by 1.4826 to read as a standard deviation, so the line
+follows each synth's own jitter - but never inside GB_MEASURE_OUTLIER_FLOOR_MS (0.5 ms) of it, or a synth whose
+trips agree to the frame would lose honest ones to its own steadiness. The result is the mean of the trips
+that count. Worked on runs from the rig (48 kHz): [28.0/12.6/12.6/12.6/12.6] keeps the four 12.6s - 12.6 ms, where the old
+rule kept three; [22.5/21.8/21.8/22.4/21.9] sets the 22.5 aside (0.6 ms from the median) - 21.97 ms against the
+old 22.03; [13.1/12.9/12.9/12.9/12.8] keeps all five - 12.92 against 12.90.

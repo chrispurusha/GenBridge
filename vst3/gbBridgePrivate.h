@@ -90,12 +90,13 @@
 #define GB_MEASURE_CONFIRM    (2)        // consecutive blocks required, so one glitch is not an onset
 
 // notes §9
-#define GB_MEASURE_TRIPS      (5)
+#define GB_MEASURE_TRIPS      (9)        // gbMeasure notes §19 - nine, about 4.5 s; five gave too few to judge an outlier
 
-// TRIMMED, NOT AVERAGED FLAT. One trip landing on a resync, or on a note the synth happened to
-// voice-steal, would drag a plain mean by its whole error; dropping the highest and lowest first
-// costs nothing when they are honest and removes the outlier when they are not.
-#define GB_MEASURE_DROP       (1)
+// gbMeasure notes §19 - an outlier is a trip further from the median than OUTLIER_MADS deviations
+// (the median absolute deviation, scaled to a standard deviation), but never closer than the floor:
+// a synth whose trips agree to the frame would otherwise lose honest ones to its own steadiness
+#define GB_MEASURE_OUTLIER_MADS     (3.0)
+#define GB_MEASURE_OUTLIER_FLOOR_MS (0.5)
 
 // Remembered per audio device AND per MIDI destination. The same synth answers differently over USB
 // than over DIN, and two different synths on one interface are not comparable at all - so the pair
@@ -114,6 +115,9 @@
 #define GB_DEFAULT_FRAMES     (128)
 #define GB_DEFAULT_RATE       (48000.0)
 #define GB_MAX_REMEMBERED     (32)
+#define GB_FRAMES_SHOWN_DEFAULT (32)     // notes §72 - the Buffer parameter's default, gGbFrames[1]
+#define GB_FRAMES_POLL_MS     (1000.0)   // how often the device's size is looked at while waiting
+#define GB_FRAMES_WAIT_MS     (15000.0)  // how long a device is given: the Analog Keys takes almost 10 s
 
 // ── The tables the state blob carries ───────────────────────────────────────
 
@@ -123,6 +127,7 @@ typedef struct {
     char     midiDest[GB_MIDI_NAME_LEN];
     uint32_t hardwareSamples;    // the round trip MINUS whatever the plug-in was contributing
     double   offsetMs;           // seeded from the measurement, then adjusted by hand
+    uint32_t frames;             // notes §70 - the device buffer it was taken at; 0, an older project's, fits any
 } tMeasured;
 
 // notes §12
@@ -287,6 +292,9 @@ struct tGbBridge {
     uint32_t               observedMaxFrames;
     uint64_t               observedFrames;
     uint32_t               openDeviceFrames;
+    uint32_t               offsetFrames;      // notes §70 - the device buffer the correction in force belongs to
+    uint32_t               measuredAtFrames;  // the buffer the measurement in use was taken at
+    bool                   measureEstimated;  // carried over from another buffer size - re-measure
 
     // The host-clock instant of the most recent capture callback. Written by the device thread,
     // read by the audio thread; see latency_frames_measured() for why occupancy alone is not enough.
@@ -294,6 +302,10 @@ struct tGbBridge {
     _Atomic bool           needResync;
     _Atomic float          trimGain;
     _Atomic bool           deviceDirty;
+    _Atomic double         framesRetryAtMs;   // notes §71 - next look at a buffer the device has not yet taken; 0 = none
+    double                 framesWaitSinceMs; // when the current wait began
+    uint32_t               framesWaitFor;     // the size being waited for
+    AudioObjectID          framesWaitDevice;  // on this device
 
     // When the last device/rate/frames request arrived, so a burst of them can settle into one
     // device change - see GB_DEVICE_SETTLE_MS.
@@ -313,6 +325,8 @@ struct tGbBridge {
     char                   savedDeviceName[DEVICE_NAME_LEN];  // for the panel: an absent device has no name
     _Atomic double         wantedRate;
     _Atomic int            wantedFrames;
+    _Atomic int            shownFrames;       // notes §72 - the Buffer the panel shows; 0 until the host sends one
+    _Atomic bool           deviceChosenByHand; // the next open follows a device picked in the panel
     _Atomic int            wantedChannels;
     _Atomic int            wantedFirstChannel;
     // Written by the worker under configLock, read by the CoreAudio IO thread (capture_callback,
@@ -409,7 +423,8 @@ void gb_send_message(tGbBridge * self, const char * id, int value);
 void gb_wake_worker(tGbBridge * self);
 void gb_request_device(tGbBridge * self);
 void gb_reconfigure(tGbBridge * self);
-tMeasured * gb_measured_for(tGbBridge * self, const char * audioUid, const char * midiDest, bool create);
+tMeasured * gb_measured_for(tGbBridge * self, const char * audioUid, const char * midiDest, uint32_t frames, bool create);
+const tMeasured * gb_measured_nearest(tGbBridge * self, const char * audioUid, const char * midiDest, uint32_t frames);
 void gb_current_midi_name(tGbBridge * self, char * out, unsigned long len);
 void gb_remember_offset_pair(tGbBridge * self, const char * destination);
 void gb_sync_offset_to_pair(tGbBridge * self);

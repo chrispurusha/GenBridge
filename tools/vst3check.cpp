@@ -1930,6 +1930,46 @@ int main(int argc, char ** argv) {
             }
         }
 
+        // gbBridge notes §70 - measurements keyed by the device buffer: an older project's hw= line loads
+        // as fitting any buffer and is written back as hwf= with buffer 0; a hwf= line keeps its buffer
+        {
+            TUID instCid;
+            bool haveInst = false;
+
+            for (int32 i = 0; (factory2 != nullptr) && (i < factory->countClasses()); i++) {
+                PClassInfo2 info;
+
+                if ((factory2->getClassInfo2(i, &info) == kResultOk) && (strstr(info.subCategories, "Instrument") != nullptr)) {
+                    memcpy(instCid, info.cid, sizeof(TUID));
+                    haveInst = true;
+                    break;
+                }
+            }
+            IComponent * measured = nullptr;
+
+            if (haveInst) {
+                factory->createInstance(instCid, IComponent::iid, (void **)&measured);
+            }
+
+            if (measured != nullptr) {
+                MemStream in;
+                MemStream out;
+
+                measured->initialize(&hostApp);
+                in.buf = "GENBRIDGE3\n"
+                         "hw=617,12.900,4,SynthUIDA\n"
+                         "hwf=512,1058,22.000,4,SynthUIDB\n";
+                check("instrument accepts measurements old and new", measured->setState(&in) == kResultOk);
+                measured->getState(&out);
+                check("an older hw= measurement comes back as hwf= at buffer 0 (any buffer)",
+                      out.buf.find("hwf=0,617,12.900,4,SynthUIDA") != std::string::npos);
+                check("a hwf= measurement keeps its buffer",
+                      out.buf.find("hwf=512,1058,22.000,4,SynthUIDB") != std::string::npos);
+                measured->terminate();
+                measured->release();
+            }
+        }
+
         String128 modeText;
         fresh->getParamStringByValue(4, fresh->getParamNormalized(4), modeText);
         check("mono/stereo restored (Mono)", to_ascii(modeText) == "Mono");
@@ -2286,7 +2326,7 @@ int main(int argc, char ** argv) {
                 check("host told that latency changed",
                       (handler.restarts > 0) && ((handler.restartFlags & kLatencyChanged) != 0));
 
-                // notes §45
+                // notes §70
                 printf("\n  block-size retune (declaring %d, calling with 128)\n", maxBlock);
 
                 uint32 latencyBefore = processor->getLatencySamples();
@@ -2317,7 +2357,7 @@ int main(int argc, char ** argv) {
 
                     processor->process(run);
 
-                    // notes §46
+                    // notes §71
                     pace_to_deadline(AudioConvertNanosToHostTime(
                                          (uint64_t)((128.0 / 48000.0) * 1.0e9)));
                 }

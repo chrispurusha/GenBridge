@@ -26,6 +26,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
+#include <sys/time.h>
 
 #include <CoreAudio/HostTime.h>
 
@@ -555,7 +557,30 @@ static void gb_worker_loop(tGbBridge * self) {
         pthread_mutex_lock(&self->wakeMutex);
 
         while (!self->wakeFlag && !atomic_load(&self->workerQuit)) {
-            pthread_cond_wait(&self->wakeCond, &self->wakeMutex);
+            // notes §71 - asleep until woken, or until a pending buffer retry falls due
+            double retryAt = atomic_load(&self->framesRetryAtMs);
+
+            if (retryAt <= 0.0) {
+                pthread_cond_wait(&self->wakeCond, &self->wakeMutex);
+                continue;
+            }
+            double wait = retryAt - gb_now_ms();
+
+            if (wait <= 0.0) {
+                break;
+            }
+            struct timeval  now;
+            struct timespec until;
+
+            gettimeofday(&now, NULL);
+            double          whole = (double)now.tv_sec + ((double)now.tv_usec / 1.0e6) + (wait / 1000.0);
+
+            until.tv_sec  = (time_t)whole;
+            until.tv_nsec = (long)((whole - (double)until.tv_sec) * 1.0e9);
+
+            if (pthread_cond_timedwait(&self->wakeCond, &self->wakeMutex, &until) == ETIMEDOUT) {
+                break;
+            }
         }
 
         self->wakeFlag = false;
@@ -577,6 +602,28 @@ static void gb_worker_loop(tGbBridge * self) {
 
         if (!atomic_load(&self->workerQuit) && atomic_exchange(&self->deviceDirty, false)) {
             gb_reconfigure(self);
+        }
+
+        // notes §71 - the device's size, looked at without disturbing it: reconfigured once it has
+        // taken the size, left alone if a whole wait passes
+        {
+            double retryAt = atomic_load(&self->framesRetryAtMs);
+
+            if (!atomic_load(&self->workerQuit) && (retryAt > 0.0) && (gb_now_ms() >= retryAt)) {
+                uint32_t now = device_buffer_frames(self->framesWaitDevice);
+
+                if (now == self->framesWaitFor) {
+                    atomic_store(&self->framesRetryAtMs, 0.0);
+                    synthlib_log_line("device took %u frames after %.1f s - reconfiguring for it", now,
+                                      (gb_now_ms() - self->framesWaitSinceMs) / 1000.0);
+                    gb_reconfigure(self);
+                } else if ((gb_now_ms() - self->framesWaitSinceMs) < GB_FRAMES_WAIT_MS) {
+                    atomic_store(&self->framesRetryAtMs, gb_now_ms() + GB_FRAMES_POLL_MS);
+                } else {
+                    atomic_store(&self->framesRetryAtMs, 0.0);
+                    synthlib_log_line("device stayed at %u frames - leaving it", now);
+                }
+            }
         }
 
         if (atomic_load(&self->retuneState) == eRetuneRequested) {
@@ -857,10 +904,14 @@ static void gb_retune(tGbBridge * self) {
 
 // The pair a measurement belongs to. Both halves matter: the same synth reached over USB and
 // over DIN answers at different speeds, and two synths on one interface are not comparable.
-tMeasured * gb_measured_for(tGbBridge * self, const char * audioUid, const char * midiDest, bool create) {
+// notes §70 - and the device buffer: Overbridge adds latency of its own that grows faster than the buffer,
+// so a measurement holds for the buffer it was taken at. An entry with frames 0 is from before that and
+// fits any buffer, as it always did.
+tMeasured * gb_measured_for(tGbBridge * self, const char * audioUid, const char * midiDest, uint32_t frames, bool create) {
     for (uint32_t i = 0; i < self->measuredCount; i++) {
         if ((strncmp(self->measured[i].audioUid, audioUid, DEVICE_UID_LEN) == 0)
-            && (strncmp(self->measured[i].midiDest, midiDest, GB_MIDI_NAME_LEN) == 0)) {
+            && (strncmp(self->measured[i].midiDest, midiDest, GB_MIDI_NAME_LEN) == 0)
+            && ((self->measured[i].frames == frames) || (self->measured[i].frames == 0u))) {
             return &self->measured[i];
         }
     }
@@ -881,8 +932,29 @@ tMeasured * gb_measured_for(tGbBridge * self, const char * audioUid, const char 
     memset(&self->measured[slot], 0, sizeof(self->measured[slot]));
     strncpy(self->measured[slot].audioUid, audioUid, DEVICE_UID_LEN - 1);
     strncpy(self->measured[slot].midiDest, midiDest, GB_MIDI_NAME_LEN - 1);
+    self->measured[slot].frames = frames;
 
     return &self->measured[slot];
+}
+
+// notes §70 - the pair's measurement at the buffer nearest this one, to carry over as an estimate
+const tMeasured * gb_measured_nearest(tGbBridge * self, const char * audioUid, const char * midiDest, uint32_t frames) {
+    const tMeasured * best = NULL;
+
+    for (uint32_t i = 0; i < self->measuredCount; i++) {
+        const tMeasured * m = &self->measured[i];
+
+        if ((strncmp(m->audioUid, audioUid, DEVICE_UID_LEN) != 0) || (strncmp(m->midiDest, midiDest, GB_MIDI_NAME_LEN) != 0)) {
+            continue;
+        }
+
+        if (  (best == NULL)
+           || (labs((long)m->frames - (long)frames) < labs((long)best->frames - (long)frames))) {
+            best = m;
+        }
+    }
+
+    return best;
 }
 
 void gb_current_midi_name(tGbBridge * self, char * out, unsigned long len) {
@@ -909,9 +981,13 @@ void gb_sync_offset_to_pair(tGbBridge * self) {
 
     gb_current_midi_name(self, destination, sizeof(destination));
 
-    tMeasured * entry = gb_measured_for(self, gb_audio_key(self), destination, true);
+    tMeasured * entry = gb_measured_for(self, gb_audio_key(self), destination, self->openDeviceFrames, true);
 
     if (entry != NULL) {
+        // notes §70 - a correction set by hand at a buffer never measured keeps the estimate's share
+        if ((entry->hardwareSamples == 0u) && (self->hardwareSamples > 0u)) {
+            entry->hardwareSamples = self->hardwareSamples;
+        }
         entry->offsetMs = atomic_load(&self->offsetMs);
     }
 
@@ -944,8 +1020,11 @@ static void gb_publish_latency_breakdown(tGbBridge * self) {
 
     atomic_store(&status->ringSamples, (int)(setpoint / ratio));
     atomic_store(&status->deviceSamples, (int)((double)atomic_load(&self->snapDeviceLatency) / ratio));
+    atomic_store(&status->deviceBufferSamples, (int)((double)self->openDeviceFrames / ratio));
     atomic_store(&status->filterSamples, (int)(resampler_latency_frames() / ratio));
     atomic_store(&status->measuredSamples, (int)self->hardwareSamples);
+    atomic_store(&status->measuredAtFrames, (int)self->measuredAtFrames);
+    atomic_store(&status->measureEstimated, self->measureEstimated ? 1 : 0);
     atomic_store(&status->measuredLow, atomic_load(&self->measureTripLow));
     atomic_store(&status->measuredHigh, atomic_load(&self->measureTripHigh));
     atomic_store(&status->measuredTrips, atomic_load(&self->measureTripsUsed));
@@ -1006,6 +1085,14 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
 
     if (atomic_load(&self->wantedFrames) > 0) {
         settings->frames = (uint32_t)atomic_exchange(&self->wantedFrames, 0);
+    }
+
+    // notes §72 - a device picked by hand that has no size of its own yet takes the Buffer the panel shows
+    if (atomic_exchange(&self->deviceChosenByHand, false) && (settings->frames == 0)) {
+        int shown = atomic_load(&self->shownFrames);
+
+        settings->frames = (uint32_t)((shown > 0) ? shown : GB_FRAMES_SHOWN_DEFAULT);
+        synthlib_log_line("device picked by hand: asking it for the panel's %u frames", settings->frames);
     }
 
     if (atomic_load(&self->wantedChannels) > 0) {
@@ -1167,6 +1254,24 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
                     "it first"
                     : "outside what its driver will do"),
                  ranged ? canDo : 0, ranged ? canDoTo : 0, deviceFrames);
+
+        // notes §71 - a size the device supports, and not held by one of us: it may simply be slow to
+        // change (the Analog Keys takes almost 10 s). Watch for it rather than ask again.
+        if (inRange && (culprit == NULL)) {
+            if ((self->framesWaitDevice != info->id) || (self->framesWaitFor != settings->frames)
+                || (atomic_load(&self->framesRetryAtMs) <= 0.0)) {
+                self->framesWaitDevice  = info->id;
+                self->framesWaitFor     = settings->frames;
+                self->framesWaitSinceMs = gb_now_ms();
+            }
+            atomic_store(&self->framesRetryAtMs, gb_now_ms() + GB_FRAMES_POLL_MS);
+            synthlib_log_line("watching %s for up to %.0f s to take %u frames", info->name,
+                              GB_FRAMES_WAIT_MS / 1000.0, settings->frames);
+        } else {
+            atomic_store(&self->framesRetryAtMs, 0.0);
+        }
+    } else {
+        atomic_store(&self->framesRetryAtMs, 0.0);
     }
 
     self->nominalRatio   = deviceRate / self->hostRate;
@@ -1263,15 +1368,25 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
 
         gb_current_midi_name(self, destination, sizeof(destination));
 
-        const tMeasured * previous = gb_measured_for(self, info->uid, destination, false);
+        // notes §70 - this buffer's own measurement, or the nearest one's carried over and said so
+        const tMeasured * previous = gb_measured_for(self, info->uid, destination, deviceFrames, false);
+        bool              estimate = false;
 
-        self->hardwareSamples = (previous != NULL) ? previous->hardwareSamples : 0;
+        if (previous == NULL) {
+            previous = gb_measured_nearest(self, info->uid, destination, deviceFrames);
+            estimate = (previous != NULL);
+        }
+        self->hardwareSamples  = (previous != NULL) ? previous->hardwareSamples : 0;
+        self->measuredAtFrames = (previous != NULL) ? previous->frames : 0;
+        self->measureEstimated = estimate;
 
         // notes §42
         if ((strncmp(self->offsetUid, info->uid, DEVICE_UID_LEN) != 0)
-            || (strncmp(self->offsetDest, destination, GB_MIDI_NAME_LEN) != 0)) {
+            || (strncmp(self->offsetDest, destination, GB_MIDI_NAME_LEN) != 0)
+            || (self->offsetFrames != deviceFrames)) {
             atomic_store(&self->offsetMs, (previous != NULL) ? previous->offsetMs : 0.0);
             gb_remember_offset_pair(self, destination);
+            self->offsetFrames = deviceFrames;
             gb_send_message(self, "gbOffset", (int)lround(atomic_load(&self->offsetMs) * 1000.0));
         }
     }
@@ -1548,8 +1663,12 @@ void gb_bridge_parameter(tGbBridge * self, uint32_t id, double value, int32_t sa
 
         if (wanted != atomic_load(&self->wantedDevice)) {
             // notes §57
-            if (atomic_exchange(&self->deviceParamSeen, true) == true) {
+            bool restoring = (atomic_exchange(&self->deviceParamSeen, true) == false)
+                             && atomic_load(&self->savedDevicePending);
+
+            if (!restoring) {
                 atomic_store(&self->savedDevicePending, false);
+                atomic_store(&self->deviceChosenByHand, true);   // notes §72 - a fresh instance's first pick too
             }
             atomic_store(&self->wantedDevice, wanted);
             gb_request_device(self);       // signals the worker; opens nothing on this thread
@@ -1603,6 +1722,8 @@ void gb_bridge_parameter(tGbBridge * self, uint32_t id, double value, int32_t sa
         gb_request_device(self);
     } else if (id == kParamFrames) {
         int index = (int)(value * (double)(gGbFrameCount - 1) + 0.5);
+
+        atomic_store(&self->shownFrames, gGbFrames[index]);   // notes §72
 
         if (gGbFrames[index] != atomic_load(&self->wantedFrames)) {
             atomic_store(&self->wantedFrames, gGbFrames[index]);

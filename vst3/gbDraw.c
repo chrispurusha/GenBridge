@@ -807,7 +807,18 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
         // removing it.
         set_rgb_colour((tRgb)GB_CAPTION_GREY);
 
-        if (offsetMs > 0.05) {
+        // gbBridge notes §70 - a correction carried over from another buffer size is an estimate
+        int estimatedFrom = ((status != NULL) && (atomic_load(&status->measureEstimated) != 0))
+                            ? atomic_load(&status->measuredAtFrames) : -1;
+
+        if (estimatedFrom >= 0) {
+            if (estimatedFrom > 0) {
+                snprintf(buffer, sizeof(buffer), "est. from %d - re-measure", estimatedFrom);
+            } else {
+                snprintf(buffer, sizeof(buffer), "%s", "estimate - re-measure");
+            }
+            set_rgb_colour((tRgb){ 0.95, 0.70, 0.25 });
+        } else if (offsetMs > 0.05) {
             snprintf(buffer, sizeof(buffer), "%s", "recording pulled earlier");
         } else if (offsetMs < -0.05) {
             snprintf(buffer, sizeof(buffer), "%s", "recording pushed later");
@@ -866,11 +877,18 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
     snprintf(buffer, sizeof(buffer), "%d", ring);
     stat(kCol[0], y, "ring", buffer);
 
-    snprintf(buffer, sizeof(buffer), "%d", device);
+    // notes §30 - the buffer and what the driver adds on top, which does not move with it
+    int deviceBuffer = (status != NULL) ? atomic_load(&status->deviceBufferSamples) : 0;
+
+    if ((deviceBuffer > 0) && (deviceBuffer < device)) {
+        snprintf(buffer, sizeof(buffer), "%d (%d+%d)", device, deviceBuffer, device - deviceBuffer);
+    } else {
+        snprintf(buffer, sizeof(buffer), "%d", device);
+    }
     stat(kCol[1], y, "device", buffer);
 
     snprintf(buffer, sizeof(buffer), "%d", filter);
-    stat(kCol[2], y, "filter", buffer);
+    stat(kCol[3], y, "filter", buffer);   // the fourth column, so device's two parts have room
 
     if (gInstrument) {
         y += 16.0;

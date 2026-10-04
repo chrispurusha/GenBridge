@@ -41,6 +41,8 @@ typedef struct {
     atomic_int      deviceFrames;
     atomic_int      latencySamples;
     atomic_int      measuredSamples;    // the hardware round trip, 0 until measured
+    atomic_int      measuredAtFrames;   // gbBridge notes §70 - the device buffer that measurement was taken at
+    atomic_int      measureEstimated;   // 1 when carried over from another buffer size
 
     // The spread behind that average: the fastest and slowest round trip of the run, and how many
     // of them counted. An average with no range beside it cannot be told from a lucky single shot.
@@ -68,6 +70,7 @@ typedef struct {
     // The reported total, broken into what it is made of. All in HOST frames, so they add up.
     atomic_int      ringSamples;
     atomic_int      deviceSamples;
+    atomic_int      deviceBufferSamples;   // the buffer's share of deviceSamples; the rest is the driver's
     atomic_int      filterSamples;
     atomic_int      offsetSamples;
     atomic_int      measureFailed;

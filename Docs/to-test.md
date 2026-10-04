@@ -1,3 +1,17 @@
+- ***MEASURE: NINE TRIPS, OUTLIERS SET ASIDE (2026-10-04)*** - gbMeasure notes §19. Measure takes about 4.5 s now;
+  the log's "measured: N of 9 trips used" shows how many counted. Takes through the Analog Keys should
+  straddle the beat no worse than before, and a stray slow trip no longer moves the figure.
+- ***PICKED DEVICE TAKES THE SHOWN BUFFER (2026-10-04)*** - gbBridge notes §72. New GenBridge Instrument, pick the
+  Kronos (Buffer showing 32): the log says "device picked by hand: asking it for the panel's 32 frames" and
+  the device opens at 32 - no re-selecting. Reopen a saved project: its saved Buffer, nothing asked otherwise.
+- ***BUFFER RETRY (2026-10-04)*** - gbBridge notes §71. Add a new GenBridge Instrument, pick the Analog Keys
+  at 32: within ~10 s the device should show 32 without re-selecting (/tmp/genbridge.log: "watching",
+  then "device took 32 frames after N s"). Held at another size by another application: it waits 15 s,
+  then leaves it.
+- ***MEASUREMENTS PER DEVICE BUFFER (2026-10-04)*** - gbBridge notes §70. Instrument with the Analog Keys:
+  Measure at 128, switch the Buffer to 512 - the offset row says "est. from 128 - re-measure" in amber;
+  Measure there and it clears; back to 128 and the 128 measurement returns as it was, no warning. Save and
+  reopen the project: each buffer keeps its own. An older project opens with no warning at any buffer.
 GenBridge TO TEST
 
 Finished code that is built but not yet checked against a real host or real hardware.

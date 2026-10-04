@@ -872,3 +872,51 @@ reconfigure loop above: a latency change is an instruction to the host to
 reactivate us. The measurement is for the panel and the log now, and the figure
 the host is given changes only when something structural does - a device, a rate,
 a buffer, a retune, the trim.
+
+## 70. measurements by device buffer (`gb_measured_for()`, `gb_measured_nearest()`)
+
+MEASURED 2026-10-04 (CT, Analog Keys through Overbridge, Live at 256 throughout): with GenBridge's own device
+buffer at 128, 256 and 512 frames, Measure found a hardware share of 617, 606 and 1058 frames. The model -
+the hardware share is constant, the pipeline is ours and already netted off - holds from 128 to 256 and
+fails at 512: Overbridge adds about 450 frames of its own there, which nothing it reports predicts.
+
+So a measurement is keyed by the device buffer too (`tMeasured.frames`, saved as `hwf=frames,hw,offset,...`;
+an older project's `hw=` line loads as frames 0, which fits any buffer exactly as before). Opening a device:
+that buffer's own measurement is used as it stands; failing that the pair's measurement at the nearest buffer
+is carried over - the model's estimate, the hardware share unchanged and the pipeline recomputed - and the
+panel says so in amber beside the offset ("est. from 256 - re-measure"). Measuring at the new buffer, or
+nudging the offset there, makes it that buffer's own entry.
+
+## 71. a buffer the device is slow to take (`framesRetryAtMs`, `framesWaitFor`)
+
+REPORTED 2026-10-04 (CT): a new instrument on the Analog Keys at 32 frames showed the device at 512 until the
+Buffer was re-selected (64, then 32) by hand. The Analog Keys takes ALMOST TEN SECONDS to report a new
+buffer size (CT), and device_set_buffer_frames() waits 120 ms - so the open gave up, built its ring for 512,
+and the device changed under it some seconds later.
+
+So the worker WAITS - asking again would only restart a ten-second change. When the size is one the device
+supports (§37) and no other GenBridge here holds the device (§38), it looks at the device's buffer every
+GB_FRAMES_POLL_MS (1 s) for up to GB_FRAMES_WAIT_MS (15 s) without touching it, and the moment the device
+reports the size asked for it reconfigures once - the same device, so the close leaves the buffer alone (§46)
+and the ring and reported latency are rebuilt for the real size. If the wait runs out it leaves the device
+as it is (CT: "we might just need to wait"). Logged: "watching ...", "device took N frames after T s",
+"device stayed at N frames - leaving it".
+
+## 72. a device picked by hand takes the Buffer the panel shows (`deviceChosenByHand`, `shownFrames`)
+
+REPORTED 2026-10-04 (CT): a new instrument on the Kronos showed Buffer 32 but opened the device at 512, until 256
+and then 32 were picked by hand. Nothing failed - the log shows no size asked for at all. A new device's
+settings start at frames 0, "leave it alone" (gbState notes §2), and the Buffer parameter's default (32) never
+reached the bridge because a host does not send a parameter still at its default; so the panel promised a size
+nothing applied.
+
+Now the bridge keeps the Buffer the panel shows (`shownFrames`, GB_FRAMES_SHOWN_DEFAULT until the host sends
+one), and when a device is picked BY HAND and has no size of its own
+yet, the open asks it for that. gbState notes §2's reason - changing a device during LOAD wedged a DAW - is
+untouched: a project load restores what was saved and a first, host-sent device parameter changes nothing; and
+a device running for anything else is left alone whatever is asked (§34). The rate is not done the same way
+(its default is 48 kHz and a rate change is the more intrusive): open question for the owner.
+
+"By hand" is every device parameter except the host's first re-send of a restored project's device (§57):
+a fresh instance's FIRST pick is the user's - there is no saved device pending - and that is the case CT
+reported, which "any delivery after the first" would have missed.

@@ -257,10 +257,11 @@ void gb_run_measurement(tGbBridge * self, float ** out, int32_t frames, uint64_t
     }
 }
 
-// The trimmed mean of the trips that voted. Sorted in place - five elements, on the audio
-// thread, and an insertion sort of five is nothing beside the block it sits in.
+// notes §19 - the mean of the trips that voted, outliers set aside. Sorted in place - nine elements,
+// on the audio thread, and an insertion sort of nine is nothing beside the block it sits in.
 static int gb_trip_result(tGbBridge * self) {
     int valid[GB_MEASURE_TRIPS];
+    int deviation[GB_MEASURE_TRIPS];
     int count = 0;
 
     for (int i = 0; i < self->measureTrip; i++) {
@@ -284,15 +285,34 @@ static int gb_trip_result(tGbBridge * self) {
         valid[j + 1] = key;
     }
 
-    // Trim only when there is enough left to be worth averaging. Three votes still give a
-    // middle one; two would leave nothing after dropping both ends.
-    int drop  = (count >= (2 * GB_MEASURE_DROP) + 1) ? GB_MEASURE_DROP : 0;
-    int total = 0;
-    int used  = 0;
+    int median = valid[count / 2];
 
-    for (int i = drop; i < (count - drop); i++) {
-        total += valid[i];
-        used++;
+    for (int i = 0; i < count; i++) {
+        deviation[i] = abs(valid[i] - median);
+    }
+
+    for (int i = 1; i < count; i++) {
+        int key = deviation[i];
+        int j   = i - 1;
+
+        while ((j >= 0) && (deviation[j] > key)) {
+            deviation[j + 1] = deviation[j];
+            j--;
+        }
+        deviation[j + 1] = key;
+    }
+
+    double perMs     = (self->hostRate > 0.0) ? (self->hostRate / 1000.0) : 48.0;
+    double limit     = fmax(GB_MEASURE_OUTLIER_MADS * 1.4826 * (double)deviation[count / 2],
+                            GB_MEASURE_OUTLIER_FLOOR_MS * perMs);
+    int    total     = 0;
+    int    used      = 0;
+
+    for (int i = 0; i < count; i++) {
+        if (fabs((double)(valid[i] - median)) <= limit) {
+            total += valid[i];
+            used++;
+        }
     }
 
     atomic_store(&self->measureTripsUsed, used);
@@ -370,12 +390,16 @@ void gb_store_measurement(tGbBridge * self) {
                  measuredMs, GB_OFFSET_MIN_MS, GB_OFFSET_MAX_MS, seeded);
     }
 
-    tMeasured * entry = gb_measured_for(self, gb_audio_key(self), destination, true);
+    tMeasured * entry = gb_measured_for(self, gb_audio_key(self), destination, self->openDeviceFrames, true);
 
     if (entry != NULL) {
         entry->hardwareSamples = (uint32_t)result;
         entry->offsetMs        = seeded;
+        entry->frames          = self->openDeviceFrames;   // gbBridge notes §70 - a legacy entry becomes this buffer's
     }
+    self->measuredAtFrames = self->openDeviceFrames;
+    self->measureEstimated = false;
+    self->offsetFrames     = self->openDeviceFrames;
 
     atomic_store(&self->offsetMs, seeded);
     gb_remember_offset_pair(self, destination);

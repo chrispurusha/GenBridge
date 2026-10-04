@@ -37,7 +37,7 @@
 static void gb_capture_live_settings(tGbBridge * self);
 static tDeviceSettings * gb_find_settings(tGbBridge * self, const char * uid);
 static void gb_parse_device_line(tGbBridge * self, const char * body, size_t length, int version);
-static void gb_parse_measured_line(tGbBridge * self, const char * body, size_t length);
+static void gb_parse_measured_line(tGbBridge * self, const char * body, size_t length, bool withFrames);
 
 // ---- per device settings -------------------------------------------------------------------
 
@@ -250,8 +250,10 @@ bool gb_parse_state(tGbBridge * self, const char * blob, size_t length) {
             copy_field(self->deviceSelector, sizeof(self->deviceSelector), value, valueLen);
         } else if (line_key(&line, "dev=", &value, &valueLen)) {
             gb_parse_device_line(self, value, valueLen, version);
+        } else if (line_key(&line, "hwf=", &value, &valueLen)) {
+            gb_parse_measured_line(self, value, valueLen, true);
         } else if (line_key(&line, "hw=", &value, &valueLen)) {
-            gb_parse_measured_line(self, value, valueLen);
+            gb_parse_measured_line(self, value, valueLen, false);
         }
         // notes §9
     }
@@ -271,10 +273,15 @@ bool gb_parse_state(tGbBridge * self, const char * blob, size_t length) {
 }
 
 // notes §11
-static void gb_parse_measured_line(tGbBridge * self, const char * body, size_t length) {
-    const char * at  = body;
-    const char * end = body + length;
+static void gb_parse_measured_line(tGbBridge * self, const char * body, size_t length, bool withFrames) {
+    const char * at     = body;
+    const char * end    = body + length;
     double       fields[3];
+    double       frames = 0.0;
+
+    if (withFrames && !next_number(&at, end, &frames)) {
+        return;
+    }
 
     for (int i = 0; i < 3; i++) {
         if (!next_number(&at, end, &fields[i])) {
@@ -298,9 +305,10 @@ static void gb_parse_measured_line(tGbBridge * self, const char * body, size_t l
         return;
     }
 
-    tMeasured * entry = gb_measured_for(self, uid, dest, true);
+    tMeasured * entry = gb_measured_for(self, uid, dest, (uint32_t)frames, true);
 
     if (entry != NULL) {
+        entry->frames          = (uint32_t)frames;
         entry->hardwareSamples = (uint32_t)fields[0];
         entry->offsetMs        = (fields[1] < GB_OFFSET_MIN_MS) ? GB_OFFSET_MIN_MS
                                  : ((fields[1] > GB_OFFSET_MAX_MS) ? GB_OFFSET_MAX_MS : fields[1]);
@@ -447,7 +455,8 @@ const char * gb_bridge_state(tGbBridge * self, size_t * length) {
         for (uint32_t i = 0; i < self->measuredCount; i++) {
             const tMeasured * m = &self->measured[i];
 
-            text_add(self, "hw=%u,%.3f,%u,%s%s\n", m->hardwareSamples, m->offsetMs,
+            // gbBridge notes §70 - hwf= carries the device buffer first; hw= is still read, as any buffer
+            text_add(self, "hwf=%u,%u,%.3f,%u,%s%s\n", m->frames, m->hardwareSamples, m->offsetMs,
                      (unsigned)strlen(m->midiDest), m->midiDest, m->audioUid);
         }
     }
@@ -592,16 +601,25 @@ void gb_state_parse_active(const char * blob, size_t length, tGbActive * out) {
         const char * value    = NULL;
         size_t       valueLen = 0;
 
-        if (!line_key(&line, "hw=", &value, &valueLen)) {
+        bool withFrames = line_key(&line, "hwf=", &value, &valueLen);
+
+        if (!withFrames && !line_key(&line, "hw=", &value, &valueLen)) {
             continue;
         }
         const char * field   = value;
         const char * lineEnd = value + valueLen;
         double       fields[3];
-        bool         ok = true;
+        double       frames  = 0.0;
+        bool         ok      = !withFrames || next_number(&field, lineEnd, &frames);
 
         for (int i = 0; (i < 3) && ok; i++) {
             ok = next_number(&field, lineEnd, &fields[i]);
+        }
+
+        // gbBridge notes §70 - the entry for the buffer in use; one taken at another size or before
+        // sizes were recorded is a fallback only
+        if (ok && (frames != 0.0) && ((unsigned)frames != out->frames)) {
+            continue;
         }
 
         if (!ok) {
