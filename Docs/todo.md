@@ -6,6 +6,8 @@ Built-but-unchecked work goes in to-test.md.
 
 Shared with the sibling projects
 
+- Need to be able to host multiple instances of this plugin on a DAW. Currently, there seems to be an issue with that.
+- Roland TB03 doesn't seem to allow round-trip measurement, but latency seems to be compensated for quite well via the Roland driver. If the measurement not possible scenario is correct, maybe we need to either warn or grey-out the measurement?
 - DONE 2026-09-09 for the three identical files (device, ring, stubs -> SynthLib/audio and SynthLib/plugin), and 2026-09-11 for the editor window: gbEditor.mm is gone, replaced by SynthLib's shared IPlugView and AU view; and the same day the panel view: gbView.m/msView.m (91% alike) became SynthLib/plugin/synthlibPanelView.m, driven by a per-project tSynthLibPanel in gbPlugin.c
 - gbStatus and msStatus share the slot mechanism and differ only in the payload struct: worth one SynthLib slot allocator with a project-supplied payload rather than two
 - vst3/ holds the plug-in layer for BOTH formats since 2026-09-11 and is misnamed - G2-Edit renamed its own to plugin/; move it with do-plugin's list, do-vst3host's -I and vst3check's includes in one change
