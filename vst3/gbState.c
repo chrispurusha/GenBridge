@@ -38,6 +38,7 @@ static void gb_capture_live_settings(tGbBridge * self);
 static tDeviceSettings * gb_find_settings(tGbBridge * self, const char * uid);
 static void gb_parse_device_line(tGbBridge * self, const char * body, size_t length, int version);
 static void gb_parse_measured_line(tGbBridge * self, const char * body, size_t length, bool withFrames);
+static void gb_parse_compensated_line(tGbBridge * self, const char * body, size_t length);
 
 // ---- per device settings -------------------------------------------------------------------
 
@@ -254,6 +255,8 @@ bool gb_parse_state(tGbBridge * self, const char * blob, size_t length) {
             gb_parse_measured_line(self, value, valueLen, true);
         } else if (line_key(&line, "hw=", &value, &valueLen)) {
             gb_parse_measured_line(self, value, valueLen, false);
+        } else if (line_key(&line, "hwc=", &value, &valueLen)) {
+            gb_parse_compensated_line(self, value, valueLen);
         }
         // notes §9
     }
@@ -270,6 +273,34 @@ bool gb_parse_state(tGbBridge * self, const char * blob, size_t length) {
     }
 
     return true;
+}
+
+// gbMeasure notes §21 - "hwc=frames,destLen,dest uid": marks the entry its hwf= line already made
+static void gb_parse_compensated_line(tGbBridge * self, const char * body, size_t length) {
+    const char * at     = body;
+    const char * end    = body + length;
+    double       frames = 0.0;
+    double       destLen = 0.0;
+
+    if (!next_number(&at, end, &frames) || !next_number(&at, end, &destLen)) {
+        return;
+    }
+    size_t tailLen = (size_t)(end - at);
+
+    if ((size_t)destLen > tailLen) {
+        return;
+    }
+    char dest[GB_MIDI_NAME_LEN];
+    char uid[DEVICE_UID_LEN];
+
+    copy_field(dest, sizeof(dest), at, (size_t)destLen);
+    copy_field(uid, sizeof(uid), at + (size_t)destLen, tailLen - (size_t)destLen);
+
+    tMeasured * entry = gb_measured_for(self, uid, dest, (uint32_t)frames, false);
+
+    if (entry != NULL) {
+        entry->compensated = true;
+    }
 }
 
 // notes §11
@@ -458,6 +489,11 @@ const char * gb_bridge_state(tGbBridge * self, size_t * length) {
             // gbBridge notes §70 - hwf= carries the device buffer first; hw= is still read, as any buffer
             text_add(self, "hwf=%u,%u,%.3f,%u,%s%s\n", m->frames, m->hardwareSamples, m->offsetMs,
                      (unsigned)strlen(m->midiDest), m->midiDest, m->audioUid);
+
+            // gbMeasure notes §21 - its own line, which an older build skips as an unknown key
+            if (m->compensated) {
+                text_add(self, "hwc=%u,%u,%s%s\n", m->frames, (unsigned)strlen(m->midiDest), m->midiDest, m->audioUid);
+            }
         }
     }
 

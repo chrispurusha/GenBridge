@@ -32,7 +32,8 @@
 #endif
 
 static tGmConfig gConfig;
-static bool      gRunning = false;
+static bool      gRunning       = false;
+static bool      gDisplayPaused = false;
 
 static void apply_running(void) {
     if (gRunning) {
@@ -43,9 +44,14 @@ static void apply_running(void) {
     gm_settings_save(&gConfig, gRunning);
 }
 
+static bool panel_paused(void * user) {
+    (void)user;
+    return gDisplayPaused;
+}
+
 static void panel_frame(void * user, int pixelWidth, int pixelHeight) {
     (void)user;
-    gm_draw_frame(&gConfig, gRunning, pixelWidth, pixelHeight);
+    gm_draw_frame(&gConfig, gRunning, gDisplayPaused, pixelWidth, pixelHeight);
 }
 
 static bool panel_click(void * user, double x, double y) {
@@ -66,6 +72,11 @@ static bool panel_click(void * user, double x, double y) {
             apply_running();
             return true;
 
+        case eGmEditDisplay:
+            gDisplayPaused = !gDisplayPaused;    // the view stops or restarts its timer after this click
+            gm_settings_save_display(gDisplayPaused);
+            return true;
+
         default:
             return false;
     }
@@ -79,6 +90,7 @@ static const tSynthLibPanel gPanel = {
     .click       = panel_click,
     .pointer     = gm_draw_set_mouse,
     .menuActive  = gm_draw_menu_active,
+    .paused      = panel_paused,
 };
 
 @interface GmAppDelegate : NSObject <NSApplicationDelegate>
@@ -91,6 +103,7 @@ static const tSynthLibPanel gPanel = {
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
     gm_settings_load(&gConfig, &gRunning);
+    gDisplayPaused = gm_settings_load_display();
 
     NSRect rect = NSMakeRect(0, 0, GM_CANVAS_W, GM_CANVAS_H);
 
@@ -111,10 +124,14 @@ static const tSynthLibPanel gPanel = {
         gm_engine_poll();
     }];
 
-    if (gRunning) {
-        gm_engine_start(&gConfig);
-    }
     [NSApp activateIgnoringOtherApps:YES];
+
+    // notes §4 - after the window is up, never before: opening a device waits on coreaudiod
+    if (gRunning) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            gm_engine_start(&gConfig);
+        });
+    }
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {

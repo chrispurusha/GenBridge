@@ -28,6 +28,19 @@
 #define GM_SETTINGS_DIR     "Library/Application Support/GenBridge Monitor"
 #define GM_SETTINGS_FILE    "settings.txt"
 
+static bool gDisplayPaused = false;    // carried through every save, so a config save never drops it
+
+// The last configuration loaded or saved, so the display toggle can rewrite the whole file on its own.
+static tGmConfig gLastConfig;
+static bool      gLastRunning = false;
+
+static void remember(const tGmConfig * config, bool running) {
+    if (config != &gLastConfig) {
+        gLastConfig = *config;
+    }
+    gLastRunning = running;
+}
+
 static void settings_path(char * out, size_t len, bool makeDir) {
     const char * home = getenv("HOME");
     char         dir[1024];
@@ -57,6 +70,7 @@ void gm_settings_load(tGmConfig * config, bool * running) {
     FILE * f;
 
     gm_settings_defaults(config, running);
+    remember(config, *running);
     settings_path(path, sizeof(path), false);
     f = fopen(path, "r");
 
@@ -95,6 +109,8 @@ void gm_settings_load(tGmConfig * config, bool * running) {
             config->trim = atof(value);
         } else if (strcmp(line, "running") == 0) {
             *running = (atoi(value) != 0);
+        } else if (strcmp(line, "displaypaused") == 0) {
+            gDisplayPaused = (atoi(value) != 0);
         }
     }
     fclose(f);
@@ -102,11 +118,14 @@ void gm_settings_load(tGmConfig * config, bool * running) {
     if ((config->trim < 0.0) || (config->trim > 2.0)) {
         config->trim = 1.0;
     }
+    remember(config, *running);
 }
 
 void gm_settings_save(const tGmConfig * config, bool running) {
     char   path[1200];
     FILE * f;
+
+    remember(config, running);
 
     settings_path(path, sizeof(path), true);
     f = fopen(path, "w");
@@ -114,8 +133,19 @@ void gm_settings_save(const tGmConfig * config, bool running) {
     if (f == NULL) {
         return;
     }
-    fprintf(f, "in=%s\nout=%s\ninfirst=%u\ninch=%u\noutfirst=%u\noutch=%u\nframes=%u\nsafetyms=%.1f\ntrim=%.3f\nrunning=%d\n",
+    fprintf(f, "in=%s\nout=%s\ninfirst=%u\ninch=%u\noutfirst=%u\noutch=%u\nframes=%u\nsafetyms=%.1f\ntrim=%.3f\nrunning=%d\n"
+            "displaypaused=%d\n",
             config->inUid, config->outUid, config->inFirst, config->inChannels, config->outFirst,
-            config->outChannels, config->frames, config->safetyMs, config->trim, running ? 1 : 0);
+            config->outChannels, config->frames, config->safetyMs, config->trim, running ? 1 : 0,
+            gDisplayPaused ? 1 : 0);
     fclose(f);
+}
+
+bool gm_settings_load_display(void) {
+    return gDisplayPaused;    // read by gm_settings_load(), which runs first
+}
+
+void gm_settings_save_display(bool paused) {
+    gDisplayPaused = paused;
+    gm_settings_save(&gLastConfig, gLastRunning);
 }

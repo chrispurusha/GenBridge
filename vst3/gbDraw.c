@@ -743,9 +743,15 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
         int failed   = (status != NULL) ? atomic_load(&status->measureFailed) : 0;
         int ranEmpty = (status != NULL) ? atomic_load(&status->measureRanEmpty) : 0;
 
+        int compensated = (status != NULL) ? atomic_load(&status->measureCompensated) : 0;
+
         if (failed) {
             snprintf(buffer, sizeof(buffer), "%s", "measurement failed - try again");
             set_rgb_colour((tRgb){ 0.85, 0.60, 0.25 });
+        } else if (compensated) {
+            // gbMeasure notes §21 - a result, not a failure: the device lines its own audio up
+            snprintf(buffer, sizeof(buffer), "%s", "0 ms - the device compensates its own latency");
+            set_rgb_colour((tRgb){ 0.45, 0.75, 0.50 });
         } else if (measured > 0) {
             // notes §20
             int low   = (status != NULL) ? atomic_load(&status->measuredLow) : 0;
@@ -822,6 +828,8 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
             snprintf(buffer, sizeof(buffer), "%s", "recording pulled earlier");
         } else if (offsetMs < -0.05) {
             snprintf(buffer, sizeof(buffer), "%s", "recording pushed later");
+        } else if ((status != NULL) && atomic_load(&status->measureCompensated)) {
+            snprintf(buffer, sizeof(buffer), "%s", "none needed - the device compensates");
         } else {
             // Zero here now means NOTHING is being corrected, which after a measurement would be a
             // fault rather than a default - so it points at the measurement instead of offering

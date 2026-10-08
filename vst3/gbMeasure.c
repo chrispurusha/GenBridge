@@ -64,8 +64,10 @@ void gb_start_measurement(tGbBridge * self) {
     self->measureTrip        = 0;
 
     for (int i = 0; i < GB_MEASURE_TRIPS; i++) {
-        self->measureTrips[i] = 0;
+        self->measureTrips[i]  = 0;
+        self->measureSigned[i] = GB_MEASURE_NO_TRIP;
     }
+    atomic_store(&self->measureCompensatedRun, false);
     atomic_store(&self->measureLatency, 0);
 }
 
@@ -215,7 +217,8 @@ void gb_run_measurement(tGbBridge * self, float ** out, int32_t frames, uint64_t
         bool clean = (atomic_load(&self->ring.underflows) == self->measureTripUnderruns)
                      && (atomic_load(&self->resyncs) == self->measureTripResyncs);
 
-        self->measureTrips[self->measureTrip] = (clean && (theirs > 0)) ? theirs : GB_MEASURE_TOO_EARLY;
+        self->measureTrips[self->measureTrip]  = (clean && (theirs > 0)) ? theirs : GB_MEASURE_TOO_EARLY;
+        self->measureSigned[self->measureTrip] = clean ? ((int)total - (int)ours) : GB_MEASURE_NO_TRIP;   // notes §21
         self->measureTrip++;
 
         atomic_store(&self->measureOnset, (int)total);
@@ -259,10 +262,56 @@ void gb_run_measurement(tGbBridge * self, float ** out, int32_t frames, uint64_t
 
 // notes §19 - the fastest of the trips that voted, outliers set aside. Sorted in place - nine elements,
 // on the audio thread, and an insertion sort of nine is nothing beside the block it sits in.
+// notes §21 - most trips came back cleanly, their median at zero or early (up to GB_MEASURE_EARLY_MS): the device
+// or its driver already lines its audio up, so the hardware share is 0 rather than "too early"
+static bool gb_trips_compensated(tGbBridge * self) {
+    int    signedTrips[GB_MEASURE_TRIPS];
+    int    count = 0;
+    double perMs = (self->hostRate > 0.0) ? (self->hostRate / 1000.0) : 48.0;
+
+    for (int i = 0; i < self->measureTrip; i++) {
+        if (self->measureSigned[i] != GB_MEASURE_NO_TRIP) {
+            signedTrips[count++] = self->measureSigned[i];
+        }
+    }
+
+    if (count < ((GB_MEASURE_TRIPS + 1) / 2)) {
+        return false;
+    }
+
+    for (int i = 1; i < count; i++) {
+        int key = signedTrips[i];
+        int j   = i - 1;
+
+        while ((j >= 0) && (signedTrips[j] > key)) {
+            signedTrips[j + 1] = signedTrips[j];
+            j--;
+        }
+        signedTrips[j + 1] = key;
+    }
+
+    double median = (double)signedTrips[count / 2];
+
+    if ((median > (GB_MEASURE_ZERO_MS * perMs)) || (median < -(GB_MEASURE_EARLY_MS * perMs))) {
+        return false;
+    }
+    atomic_store(&self->measureTripsUsed, count);
+    atomic_store(&self->measureTripLow, signedTrips[0]);
+    atomic_store(&self->measureTripHigh, signedTrips[count - 1]);
+    atomic_store(&self->measureTripSpread, signedTrips[count - 1] - signedTrips[0]);
+    atomic_store(&self->measureCompensatedRun, true);
+
+    return true;
+}
+
 static int gb_trip_result(tGbBridge * self) {
     int valid[GB_MEASURE_TRIPS];
     int deviation[GB_MEASURE_TRIPS];
     int count = 0;
+
+    if (gb_trips_compensated(self)) {
+        return 0;
+    }
 
     for (int i = 0; i < self->measureTrip; i++) {
         if (self->measureTrips[i] > 0) {
@@ -333,6 +382,8 @@ void gb_store_measurement(tGbBridge * self) {
     int      resynced  = atomic_load(&self->resyncs) - self->measureResyncsAtStart;
 
     // notes §16
+    bool compensated = atomic_load(&self->measureCompensatedRun);
+
     if ((result >= 0) && (atomic_load(&self->measureTripsUsed) <= 0)) {
         synthlib_log_line("measurement discarded: no trip completed over a clean capture "
                  "(%u underruns, %d resyncs during the run) - try again", underruns, resynced);
@@ -379,6 +430,7 @@ void gb_store_measurement(tGbBridge * self) {
         if (status != NULL) {
             atomic_store(&status->measureRanEmpty, 0);
             atomic_store(&status->measureFailed, 0);
+            atomic_store(&status->measureCompensated, compensated ? 1 : 0);
         }
     }
 
@@ -397,6 +449,7 @@ void gb_store_measurement(tGbBridge * self) {
     if (entry != NULL) {
         entry->hardwareSamples = (uint32_t)result;
         entry->offsetMs        = seeded;
+        entry->compensated     = compensated;   // notes §21
         entry->frames          = self->openDeviceFrames;   // gbBridge notes §70 - a legacy entry becomes this buffer's
     }
     self->measuredAtFrames = self->openDeviceFrames;
@@ -412,7 +465,16 @@ void gb_store_measurement(tGbBridge * self) {
     gb_send_message(self, "gbOffset", (int)lround(seeded * 1000.0));
 
     pthread_mutex_lock(&self->configLock);
-    self->hardwareSamples = (uint32_t)result;
+    self->hardwareSamples    = (uint32_t)result;
+    self->measureCompensated = compensated;
+
+    if (compensated) {
+        synthlib_log_line("measured: the device compensates its own latency - %d trips around zero, %.1f..%.1f ms. "
+                          "Storing 0 ms: the host is told only GenBridge's own share",
+                          atomic_load(&self->measureTripsUsed),
+                          (double)atomic_load(&self->measureTripLow) / (self->hostRate / 1000.0),
+                          (double)atomic_load(&self->measureTripHigh) / (self->hostRate / 1000.0));
+    }
 
     uint32_t nowLatency = gb_capturing(self) ? gb_report_latency(self) : 0;
 

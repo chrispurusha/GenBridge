@@ -27,5 +27,8 @@
 void gm_settings_defaults(tGmConfig * config, bool * running);
 void gm_settings_load(tGmConfig * config, bool * running);
 void gm_settings_save(const tGmConfig * config, bool running);
+// The display toggle, kept in the same file.
+bool gm_settings_load_display(void);
+void gm_settings_save_display(bool paused);
 
 #endif // GM_SETTINGS_H

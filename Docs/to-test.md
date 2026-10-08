@@ -1,3 +1,7 @@
+- ***MEASURE: TB-03 ON ITS CHANNEL, AND "THE DEVICE COMPENSATES" (2026-10-08)*** - gbMeasure notes §20, §21. In Live:
+  GenBridge Instrument on the TB-03 with MIDI Channel 13, press Measure - the panel should read "0 ms - the device
+  compensates its own latency" and the correction line "none needed"; record a part and it should land on the beat.
+  Save, reopen: still says it. A synth that genuinely lags (Analog Keys, Kronos) should measure exactly as before.
 - ***GENBRIDGE MONITOR (2026-10-08)*** - Docs/code-notes/gmEngine.c.md. Helix 1-2 -> QU-24 29-30 at 32 samples ran
   2.5 min with no dropout, 9.5 ms by the reported figures (devices 3.8, bridge 5.7). CHECK by playing: no clicks
   over a long session; unplug and replug the Helix - it should say "waiting" and come back by itself; quit and

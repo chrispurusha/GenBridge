@@ -32,12 +32,13 @@ typedef enum {
     eGmEditConfig,       // a setting changed - save and restart
     eGmEditTrim,         // trim only - applied live
     eGmEditRun,          // Start/Stop pressed
+    eGmEditDisplay,      // the display toggle - pause or resume all drawing
 } tGmEdit;
 
 void    gm_draw_init(void);
 void    gm_draw_set_mouse(double x, double y);
 bool    gm_draw_menu_active(void);
-void    gm_draw_frame(const tGmConfig * config, bool running, int pixelWidth, int pixelHeight);
+void    gm_draw_frame(const tGmConfig * config, bool running, bool displayPaused, int pixelWidth, int pixelHeight);
 // Edits config in place and says what kind of change it was.
 tGmEdit gm_draw_click(tGmConfig * config, bool running, double x, double y);
 

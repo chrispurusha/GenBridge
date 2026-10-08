@@ -1821,3 +1821,14 @@ caller's channels into the device's channels 1-2 whatever was asked, so the moni
 returns 1/2. GenBridge itself only ever captures, so it had never mattered. Fixed in SynthLib (scatter()
 takes firstChannel, as gather() does); MidiSyncTool's tools/mstDriver.cpp opens an output at an offset too
 and had the same silent fault (its todo).
+
+## 2026-10-08 - Measure: a device that compensates its own latency now measures 0 (CT)
+
+CT: "if it's coming back 0, we should indicate that it appears to be compensating for latency and take
+appropriate measures." With the channel fixed, the TB-03's trips come back 0.7-2.3 ms EARLY of GenBridge's own
+share, all nine in a run within about 1 ms of each other - the Roland driver lines its audio up. Such a run
+now stores a hardware share of 0, flagged as compensated, and an offset of 0 ms (gbMeasure notes §21): the
+host is told GenBridge's own share and nothing on top. The panel says so instead of "measurement failed".
+vst3check against the TB-03, five Measure presses at a 256-frame buffer: all five "the device compensates",
+9 of 9 trips each. A first window of +-1.5 ms around zero failed one run in three; consistently early counts
+too, up to 10 ms.

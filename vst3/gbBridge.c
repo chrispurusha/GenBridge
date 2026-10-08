@@ -1039,6 +1039,7 @@ static void gb_publish_latency_breakdown(tGbBridge * self) {
     atomic_store(&status->deviceBufferSamples, (int)((double)self->openDeviceFrames / ratio));
     atomic_store(&status->filterSamples, (int)(resampler_latency_frames() / ratio));
     atomic_store(&status->measuredSamples, (int)self->hardwareSamples);
+    atomic_store(&status->measureCompensated, self->measureCompensated ? 1 : 0);
     atomic_store(&status->measuredAtFrames, (int)self->measuredAtFrames);
     atomic_store(&status->measureEstimated, self->measureEstimated ? 1 : 0);
     atomic_store(&status->measuredLow, atomic_load(&self->measureTripLow));
@@ -1406,7 +1407,8 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
             previous = gb_measured_nearest(self, info->uid, destination, deviceFrames);
             estimate = (previous != NULL);
         }
-        self->hardwareSamples  = (previous != NULL) ? previous->hardwareSamples : 0;
+        self->hardwareSamples    = (previous != NULL) ? previous->hardwareSamples : 0;
+        self->measureCompensated = (previous != NULL) && previous->compensated;
         self->measuredAtFrames = (previous != NULL) ? previous->frames : 0;
         self->measureEstimated = estimate;
 

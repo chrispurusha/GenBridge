@@ -189,6 +189,11 @@ static tRectangle run_button(void) {
     return (tRectangle){ { GM_CANVAS_W - 96.0, 16.0 }, { 64.0, 18.0 } };
 }
 
+// notes §7
+static tRectangle display_button(void) {
+    return (tRectangle){ { GM_CANVAS_W - 200.0, 16.0 }, { 86.0, 18.0 } };
+}
+
 static bool hit(tRectangle r, double x, double y) {
     return (x >= r.coord.x) && (x <= (r.coord.x + r.size.w)) && (y >= r.coord.y) && (y <= (r.coord.y + r.size.h));
 }
@@ -245,7 +250,7 @@ static void stat(double x, double y, const char * name, const char * value) {
     text(x + 62.0, y, 11.0, (tRgb){ 0.78, 0.78, 0.80 }, value);
 }
 
-void gm_draw_frame(const tGmConfig * config, bool running, int pixelWidth, int pixelHeight) {
+void gm_draw_frame(const tGmConfig * config, bool running, bool displayPaused, int pixelWidth, int pixelHeight) {
     tGmStatus status;
     char      buffer[192];
 
@@ -264,10 +269,18 @@ void gm_draw_frame(const tGmConfig * config, bool running, int pixelWidth, int p
     }
     gm_engine_status(&status);
 
+    // notes §7 - a paused panel draws its last frame without figures: stale numbers would read as live
+    if (displayPaused) {
+        memset(status.inPeak, 0, sizeof(status.inPeak));
+        memset(status.outPeak, 0, sizeof(status.outPeak));
+    }
+
     // ---- header ----
     text(LABEL_X, 16.0, 20.0, (tRgb){ 0.95, 0.95, 0.97 }, "GenBridge Monitor");
     draw_button(mainArea, run_button(), running ? "Stop" : "Start",
                 running ? (tRgb){ 0.55, 0.30, 0.28 } : (tRgb){ 0.30, 0.50, 0.36 });
+    draw_button(mainArea, display_button(), displayPaused ? "Display" : "Display",
+                displayPaused ? (tRgb){ 0.26, 0.26, 0.29 } : (tRgb){ 0.30, 0.42, 0.55 });
 
     tRgb statusColour = (status.state == eGmRunning) ? GREEN
                         : (((status.state == eGmWaiting) || (status.state == eGmFailed)) ? AMBER
@@ -330,7 +343,9 @@ void gm_draw_frame(const tGmConfig * config, bool running, int pixelWidth, int p
     // ---- figures ----
     double y = stats_y();
 
-    if (status.state == eGmRunning) {
+    if (displayPaused) {
+        text(LABEL_X, y, 11.0, AMBER, "display paused - routing carries on; click Display to resume");
+    } else if (status.state == eGmRunning) {
         snprintf(buffer, sizeof(buffer), "%.1f ms (devices %.1f, bridge %.1f)", status.latencyMs,
                  status.latencyMs - status.bridgeMs, status.bridgeMs);
         stat(LABEL_X, y, "latency", buffer);
@@ -447,6 +462,10 @@ tGmEdit gm_draw_click(tGmConfig * config, bool running, double x, double y) {
 
     if (hit(draw_button_bounds(run_button()), x, y)) {
         return eGmEditRun;
+    }
+
+    if (hit(draw_button_bounds(display_button()), x, y)) {
+        return eGmEditDisplay;
     }
 
     tRectangle track = trim_track();

@@ -31,3 +31,12 @@ See gmEngine notes §4. Shown so a Buffer setting that did not take effect expla
 
 A click within 2% of the middle of the bar sets exactly 0 dB, so unity is easy to get back to by eye. The bar
 spans silence to +6 dB.
+
+## 7. the Display toggle (`display_button()`)
+
+Pauses all drawing to save the CPU it costs (2026-10-08, CT: "minimising CPU impact is a goal"). The panel
+view stops its 30 Hz timer while the panel says it is paused (SynthLib tSynthLibPanel.paused), exactly as it
+does for a hidden or covered window, and draws only after a click - so the toggle itself is how it comes
+back. The last frame blanks the meters and figures and says the display is paused, because frozen numbers
+would read as live. The routing is untouched either way. The button is blue while the display runs and grey
+while it is paused.

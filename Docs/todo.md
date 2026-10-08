@@ -7,7 +7,7 @@ Built-but-unchecked work goes in to-test.md.
 Shared with the sibling projects
 
 - Need to be able to host multiple instances of this plugin on a DAW. Can we make sure we're OK on that? I've had the Kronos stop sending audio 'til I rebooted it, which happened after I added a track for TB03.
-- Roland TB-03 Measure: the channel fault is FIXED (findings 2026-10-08); what is left is that its hardware share is about zero with ~9 ms of scatter (the device or driver already compensates), so most trips land "too early" and are discarded - decide whether a run whose trips all come back and cluster around zero should store 0 ms and say "the device compensates its own latency" instead of failing. Its 96 kHz break-up is a separate item
+- Roland TB-03 at 96 kHz breaks up in GenBridge (it runs at 44.1 kHz otherwise) - the original report's other half
 - I'm not sure we're defaulting to stereo audio connection? We should be, if not.
 - Being able to select Host input for the instrument plugin, possibly makes no sense in hindsight? Can we see a use for that? Might make more sense for the effects plugin, even there, there might be no point.
 - DONE 2026-09-09 for the three identical files (device, ring, stubs -> SynthLib/audio and SynthLib/plugin), and 2026-09-11 for the editor window: gbEditor.mm is gone, replaced by SynthLib's shared IPlugView and AU view; and the same day the panel view: gbView.m/msView.m (91% alike) became SynthLib/plugin/synthlibPanelView.m, driven by a per-project tSynthLibPanel in gbPlugin.c

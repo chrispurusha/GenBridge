@@ -75,6 +75,7 @@ typedef struct {
     atomic_int      offsetSamples;
     atomic_int      measureFailed;
     atomic_int      measureRanEmpty;   // ran, but the onset beat our own latency - see GB_MEASURE_TOO_EARLY
+    atomic_int      measureCompensated; // gbMeasure notes §21 - measured, and the device lines its own audio up
     atomic_int      offlineRender;     // host asked for faster-than-realtime processing - see setupProcessing      // last attempt could not produce a trustworthy figure
     atomic_int      underruns;
     atomic_int      resyncs;

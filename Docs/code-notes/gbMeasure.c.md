@@ -256,3 +256,25 @@ otherwise the channel the host's last note arrived on (channel 1 until one has).
 so a synth listening anywhere else never sounded it and every run ended "nothing came back" - the Roland
 TB-03 receives on channel 13 only, which is why it alone could not be measured. Checked with g2_note and
 tools/capture against the TB-03: notes on channels 1-12 and 14-16 come back as exact digital silence.
+
+## 21. a device that compensates its own latency (`gb_trips_compensated()`, 2026-10-08)
+
+The Roland TB-03 (on channel 13, §20) answers every trip, but its onsets land AROUND GenBridge's own share
+rather than after it - a hardware latency of about zero with a few milliseconds of scatter either way. The
+device or its driver already lines its audio up (CT: "the Roland driver does some latency compensation").
+The "never early" rule of §19 then threw most trips away as too early and the run failed.
+
+Now every clean trip also keeps its SIGNED figure, onset minus our share. If at least half the trips came
+back cleanly and their median is at most GB_MEASURE_ZERO_MS (1.5 ms) late and at most GB_MEASURE_EARLY_MS
+(10 ms) early, the run's answer is 0: the
+hardware share is stored as 0 with `compensated` set, the offset as 0 ms, so the host is told GenBridge's own
+share and no correction on top. The panel says "0 ms - the device compensates its own latency" and the
+correction line "none needed". The flag is saved per device and destination as its own `hwc=` line, which an
+older build skips as an unknown key - a hardware share of 0 alone still means "never measured" everywhere.
+A median clearly above zero takes the §19 path exactly as before.
+
+Measured on the TB-03 at a 256-frame device buffer: 9 of 9 trips clean in every run, grouped within about
+1 ms of each other, all EARLY by 0.7-2.3 ms. A first version took only +-1.5 ms around zero and failed one
+run in three. Sound cannot really arrive before it is played, so consistently early means the driver
+compensates (and slightly over-compensates, or under-reports a little). Earlier than 10 ms is left to the
+old "onset beat our own latency" message: that is more likely a false trigger than a device.

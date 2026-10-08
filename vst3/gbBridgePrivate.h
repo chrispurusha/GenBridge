@@ -25,6 +25,7 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -108,6 +109,10 @@
 // the wrong channel" and "the onset arrived before our own buffering could have delivered it".
 #define GB_MEASURE_TIMED_OUT  (-1)
 #define GB_MEASURE_TOO_EARLY  (-2)
+// gbMeasure notes §21 - trips whose median lands within this of zero mean the device lines its own audio up
+#define GB_MEASURE_ZERO_MS    (1.5)
+#define GB_MEASURE_EARLY_MS   (10.0)     // ...and no further early than this: beyond it, something else crossed the threshold
+#define GB_MEASURE_NO_TRIP    (INT_MIN)  // measureSigned[] for a trip that did not complete over a clean capture
 
 // notes §10
 #define GB_HOST_INPUT_KEY     "(host input)"
@@ -128,6 +133,7 @@ typedef struct {
     uint32_t hardwareSamples;    // the round trip MINUS whatever the plug-in was contributing
     double   offsetMs;           // seeded from the measurement, then adjusted by hand
     uint32_t frames;             // notes §70 - the device buffer it was taken at; 0, an older project's, fits any
+    bool     compensated;        // gbMeasure notes §21 - measured, and the device compensates: 0 is the answer
 } tMeasured;
 
 // notes §12
@@ -227,12 +233,15 @@ struct tGbBridge {
 
     // The round trips of one Measure press, and where the current one is up to. AUDIO THREAD ONLY.
     int                    measureTrips[GB_MEASURE_TRIPS];
+    int                    measureSigned[GB_MEASURE_TRIPS];   // gbMeasure notes §21 - onset minus our share, early ones too
     int                    measureTrip;
     uint32_t               measureTripUnderruns;
     int                    measureTripResyncs;
 
     // notes §17
     _Atomic int            measureTripsUsed;
+    _Atomic bool           measureCompensatedRun;   // gbMeasure notes §21 - set with the result, by the audio thread
+    bool                   measureCompensated;      // the measurement in force says the device compensates
     _Atomic int            measureTripLow;
     _Atomic int            measureTripHigh;
     _Atomic int            measureTripSpread;

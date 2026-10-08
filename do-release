@@ -574,6 +574,17 @@ as the device appears - unplugging and replugging needs no click.
 
 Only one copy runs at a time; opening it again brings the running one forward.
 
+SAVING CPU
+
+Drawing the window costs more than moving the audio. Display (next to Start)
+pauses all drawing: the panel stops updating, its meters and figures go blank,
+and it says "display paused" - the routing carries on exactly as before. Click
+Display again to bring it back. This is remembered too. Minimising the window,
+or covering it completely, stops the drawing the same way without the click.
+
+The GenBridge plug-in works the same way: with its editor closed it draws
+nothing at all.
+
 LATENCY, AND WHY IT CAN CHANGE
 
 The panel shows the delay from input to output, split into "devices" (what
