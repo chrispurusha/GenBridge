@@ -20,6 +20,7 @@ Features
 - Monitor: tighten the setpoint floor - its 2 x RESAMPLER_TAPS term (128 frames, 2.7 ms) is likely needed only after a resync, when the resampler has no history; prime it instead and test the shorter floor for dropouts (gmEngine notes §3)
 - Monitor: one device in both roles still goes through the ring and resampler; a direct copy inside one callback would remove the bridge's ~5 ms for that case
 - Monitor: the latency figure is from reported device latencies, not measured - a loopback measure (play a click out, find it back in) would show what a driver under-reports
+- Option to filter out MIDI messages coming FROM the device, in case it is not purely in local-off mode - a synth whose own keyboard or sequencer still sends MIDI can echo notes back into the DAW (doubled notes, or a loop through GenBridge's MIDI out); filter by message type (notes, CCs, clock, transport) per device
 
 Bugs
 
