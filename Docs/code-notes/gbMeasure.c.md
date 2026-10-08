@@ -248,3 +248,11 @@ take lands on time or late by up to the synth's jitter, never early. An abnormal
 outlier and set aside, so one glitch cannot pull the correction under the real shortest delay. Worked on runs from the rig (48 kHz): [28.0/12.6/12.6/12.6/12.6] keeps the four 12.6s - 12.6 ms;
 [22.5/21.8/21.8/22.4/21.9] sets the 22.5 aside - 21.8 ms (the old trimmed mean said 22.03, so the fast
 notes recorded up to 0.2 ms early); [13.1/12.9/12.9/12.9/12.8] keeps all five - 12.8 ms.
+
+## 20. the test note's channel (`gb_measure_channel()`, 2026-10-08)
+
+The test note goes out on the channel a played note would: the MIDI Channel parameter when one is set,
+otherwise the channel the host's last note arrived on (channel 1 until one has). It was always channel 1,
+so a synth listening anywhere else never sounded it and every run ended "nothing came back" - the Roland
+TB-03 receives on channel 13 only, which is why it alone could not be measured. Checked with g2_note and
+tools/capture against the TB-03: notes on channels 1-12 and 14-16 come back as exact digital silence.

@@ -7,7 +7,7 @@ Built-but-unchecked work goes in to-test.md.
 Shared with the sibling projects
 
 - Need to be able to host multiple instances of this plugin on a DAW. Can we make sure we're OK on that? I've had the Kronos stop sending audio 'til I rebooted it, which happened after I added a track for TB03.
-- Roland TB03 doesn't seem to allow round-trip latency measurement, but latency seems to be compensated for quite well via the Roland driver. If the measurement not possible scenario is correct, maybe we need to either warn or grey-out the measurement? TB03 does seem to be limited to 44.1kHz and doesn't seem to support 48kHz. Might be related to that? It supports 96kHz, but GenBridge breaks up when trying to deal with that rate.
+- Roland TB-03 Measure: the channel fault is FIXED (findings 2026-10-08); what is left is that its hardware share is about zero with ~9 ms of scatter (the device or driver already compensates), so most trips land "too early" and are discarded - decide whether a run whose trips all come back and cluster around zero should store 0 ms and say "the device compensates its own latency" instead of failing. Its 96 kHz break-up is a separate item
 - I'm not sure we're defaulting to stereo audio connection? We should be, if not.
 - Being able to select Host input for the instrument plugin, possibly makes no sense in hindsight? Can we see a use for that? Might make more sense for the effects plugin, even there, there might be no point.
 - DONE 2026-09-09 for the three identical files (device, ring, stubs -> SynthLib/audio and SynthLib/plugin), and 2026-09-11 for the editor window: gbEditor.mm is gone, replaced by SynthLib's shared IPlugView and AU view; and the same day the panel view: gbView.m/msView.m (91% alike) became SynthLib/plugin/synthlibPanelView.m, driven by a per-project tSynthLibPanel in gbPlugin.c
@@ -17,6 +17,10 @@ Shared with the sibling projects
 Features
 
 - BUILT 2026-09-09, not yet played through a synth - see to-test.md. Live routes into the instrument's aux bus (logged from Live itself), the passthrough and the parameter are in, vst3check covers the audio path, and the open question is whether the measured figure should be reported in full or with the host's own input path taken off it. The shape, for reference: a new "Capture source: Device | Host input" PARAMETER at the end of the id list - NOT a "Host" entry in the device slots, because those are positions in the device list and renumbering them silently repoints saved automation; reconfigure() opens nothing in that mode; gb_bridge_render() branches to a passthrough with the trim applied; reported latency becomes the measured offset with no pipeline term; and the panel greys device, rate, buffer, first channel and mono/stereo, along with the ring, drift and underrun figures, which would be meaningless rather than zero
+- GenBridge Monitor: BUILT 2026-10-08 (monitor/, ./do-monitor, in the release) - see to-test.md. Still open:
+- Monitor: tighten the setpoint floor - its 2 x RESAMPLER_TAPS term (128 frames, 2.7 ms) is likely needed only after a resync, when the resampler has no history; prime it instead and test the shorter floor for dropouts (gmEngine notes §3)
+- Monitor: one device in both roles still goes through the ring and resampler; a direct copy inside one callback would remove the bridge's ~5 ms for that case
+- Monitor: the latency figure is from reported device latencies, not measured - a loopback measure (play a click out, find it back in) would show what a driver under-reports
 
 Bugs
 

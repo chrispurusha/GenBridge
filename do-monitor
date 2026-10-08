@@ -1,0 +1,150 @@
+#!/bin/zsh
+#
+# Builds "GenBridge Monitor.app" - route an input pair to an output pair with as little delay as two
+# clocks allow (monitor/, Docs/code-notes/gmEngine.c.md). Universal (arm64 + x86_64), ad-hoc signed.
+#
+#   ./do-monitor                 build into build/ and replace /Applications/GenBridge Monitor.app
+#   ./do-monitor --no-install    build only (what do-release uses)
+#
+# A script rather than an Xcode project, for the same reason do-plugin is one. The engine is the proof of
+# concept's (poc/drift.c, poc/resampler.c) over SynthLib's ring and device layer; the window is SynthLib's
+# panel view, the one GenBridge's plug-in editor uses.
+
+set -e
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SL="${SYNTHLIB_DIR:-$HERE/SynthLib}"
+
+INSTALL=1
+
+for arg in "$@"; do
+    case "$arg" in
+        --no-install) INSTALL=0 ;;
+        *)
+            print -u2 "usage: ${0:t} [--no-install]"
+            exit 2
+            ;;
+    esac
+done
+
+APP_NAME="GenBridge Monitor"
+EXE_NAME="GenBridgeMonitor"
+BUNDLE_ID="com.chrispurusha.genbridge.monitor"
+GENBRIDGE_VERSION="${GENBRIDGE_VERSION:-0.1.0}"
+OUT_DIR="${GENBRIDGE_PLUGIN_OUT_DIR:-$HERE/build}"
+INSTALL_DIR="${GENBRIDGE_MONITOR_INSTALL:-/Applications}"
+
+FREETYPE_LIB="$SL/ThirdParty/freetype/build/libfreetype.a"
+
+if [[ ! -f "$FREETYPE_LIB" ]]; then
+    print -u2 "error: freetype not built at $FREETYPE_LIB"
+    print -u2 "       see the build notes in G2-Edit/Docs/Third Party build notes.md"
+    exit 1
+fi
+
+SOURCES=(
+    "$HERE/monitor/gmEngine.c"
+    "$HERE/monitor/gmDraw.c"
+    "$HERE/monitor/gmSettings.c"
+    "$HERE/poc/resampler.c"
+    "$HERE/poc/drift.c"
+    "$SL/audio/device.c"
+    "$SL/audio/ring.c"
+    # The entry points an application provides and a panel needs - this app has no render loop of its own,
+    # the panel view repaints itself, so the plug-in's stubs are exactly right.
+    "$SL/plugin/pluginStubs.c"
+    # SynthLib, the parts a panel needs - the same list as do-plugin's.
+    "$SL/src/utilsGraphics.c"
+    "$SL/src/renderBackend.c"
+    "$SL/src/renderBackendGL.c"
+    "$SL/src/geometry.c"
+    "$SL/src/utils.c"
+    "$SL/src/synthlibHost.c"
+    "$SL/src/synthlibMidi.c"
+    "$SL/src/contextMenu.c"
+    "$SL/src/clickRegion.c"
+    "$SL/src/inputState.c"
+    "$SL/src/synthlibVersion.c"
+)
+
+OBJC_SOURCES=(
+    "$HERE/monitor/gmApp.m"
+    "$SL/plugin/synthlibPanelView.m"
+    "$SL/src/renderBackendMetal.m"
+)
+
+WARNFLAGS=(-Wall -Wextra)
+# SYNTHLIB_PLUGIN_BUILD: no GLFW window - the panel view owns the drawing surface. The view's class name is
+# this app's own, as each plug-in names its own.
+DEFS=(-DSYNTHLIB_PLUGIN_BUILD=1 -DGM_VERSION_STRING="\"$GENBRIDGE_VERSION\"" -DSYNTHLIB_PANEL_VIEW_CLASS=GenBridgeMonitorPanelView)
+INCLUDES=(-I"$HERE/monitor" -I"$HERE/poc" -I"$SL/src" -I"$SL/audio" -I"$SL/plugin"
+          -I"$SL/ThirdParty/glfw/include" -I"$SL/ThirdParty/freetype/include")
+ARCHS=(-arch arm64 -arch x86_64)
+MIN=-mmacosx-version-min=11.5
+LIBS=(-framework CoreAudio -framework CoreMIDI -framework CoreFoundation -framework Cocoa
+      -framework Metal -framework QuartzCore)
+
+OBJDIR="$(mktemp -d)"
+trap 'rm -rf "$OBJDIR"' EXIT
+
+print "GenBridge Monitor $GENBRIDGE_VERSION (arm64 + x86_64)"
+
+objects=()
+
+for src in "${SOURCES[@]}"; do
+    obj="$OBJDIR/$(basename "${src%.*}").o"
+    clang $ARCHS $MIN -O2 -std=gnu11 "${WARNFLAGS[@]}" "${DEFS[@]}" "${INCLUDES[@]}" -c "$src" -o "$obj"
+    objects+=("$obj")
+done
+
+for src in "${OBJC_SOURCES[@]}"; do
+    obj="$OBJDIR/$(basename "${src%.*}").om"
+    clang $ARCHS $MIN -O2 -std=gnu11 -fobjc-arc "${WARNFLAGS[@]}" "${DEFS[@]}" "${INCLUDES[@]}" \
+          -x objective-c -c "$src" -o "$obj"
+    objects+=("$obj")
+done
+
+app="$OUT_DIR/$APP_NAME.app"
+rm -rf "$app"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+
+clang $ARCHS $MIN "${objects[@]}" "$FREETYPE_LIB" "${LIBS[@]}" -o "$app/Contents/MacOS/$EXE_NAME"
+
+# NSMicrophoneUsageDescription: macOS asks before any app may read an audio INPUT, and without the string
+# the request is refused silently - the input then delivers zeros, which looks exactly like a dead cable.
+cat > "$app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>               <string>$APP_NAME</string>
+    <key>CFBundleDisplayName</key>        <string>$APP_NAME</string>
+    <key>CFBundleExecutable</key>         <string>$EXE_NAME</string>
+    <key>CFBundleIdentifier</key>         <string>$BUNDLE_ID</string>
+    <key>CFBundlePackageType</key>        <string>APPL</string>
+    <key>CFBundleShortVersionString</key> <string>$GENBRIDGE_VERSION</string>
+    <key>CFBundleVersion</key>            <string>$GENBRIDGE_VERSION</string>
+    <key>LSMinimumSystemVersion</key>     <string>11.5</string>
+    <key>NSHighResolutionCapable</key>    <true/>
+    <key>NSPrincipalClass</key>           <string>NSApplication</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>GenBridge Monitor passes the input you choose straight to the output you choose.</string>
+</dict>
+</plist>
+PLIST
+print -n "APPL????" > "$app/Contents/PkgInfo"
+
+codesign --force --sign - "$app" 2>/dev/null || print -u2 "warning: ad-hoc signing failed for $app"
+
+print "Built: $app  ($(lipo -archs "$app/Contents/MacOS/$EXE_NAME"))"
+
+if [[ $INSTALL -eq 1 ]]; then
+    if pgrep -xq "$EXE_NAME"; then
+        print "Not installing: $APP_NAME is running - quit it and run ${0:t} again."
+    else
+        rm -rf "$INSTALL_DIR/$APP_NAME.app"
+        cp -R "$app" "$INSTALL_DIR/"
+        xattr -dr com.apple.quarantine "$INSTALL_DIR/$APP_NAME.app" 2>/dev/null || true
+        print "Installed: $INSTALL_DIR/$APP_NAME.app"
+    fi
+fi

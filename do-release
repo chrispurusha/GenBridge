@@ -57,6 +57,7 @@ cd ${0:a:h}
 
 VST3_NAME="GenBridge.vst3"
 AU_NAME="GenBridge.component"
+MONITOR_NAME="GenBridge Monitor.app"
 VOL_NAME="GenBridge"
 
 # OUTSIDE THE PROJECT, AND REMOVED ON THE WAY OUT. Both halves matter, and the
@@ -199,10 +200,20 @@ if ! GENBRIDGE_VERSION="$VERSION_CLEAN" \
     exit 1
 fi
 
+# The monitor app, the same way: its own build, never installed by a release.
+if ! GENBRIDGE_VERSION="$VERSION_CLEAN" \
+     GENBRIDGE_PLUGIN_OUT_DIR="$DERIVED" \
+     ./do-monitor --no-install >/dev/null; then
+    echo "error: the monitor app build failed - run ./do-monitor on its own for the reason" >&2
+    exit 1
+fi
+
 VST3_BUNDLE="$DERIVED/$VST3_NAME"
 AU_BUNDLE="$DERIVED/$AU_NAME"
+MONITOR_BUNDLE="$DERIVED/$MONITOR_NAME"
+MONITOR_BINARY="$MONITOR_BUNDLE/Contents/MacOS/GenBridgeMonitor"
 
-for bundle in "$VST3_BUNDLE" "$AU_BUNDLE"; do
+for bundle in "$VST3_BUNDLE" "$AU_BUNDLE" "$MONITOR_BUNDLE"; do
     if [[ ! -d $bundle ]]; then
         echo "error: do-plugin reported success but $bundle is not there" >&2
         exit 1
@@ -219,7 +230,7 @@ echo "==> built $ARCHS"
 
 # A single-architecture plug-in would load for half the users and be invisible to
 # the other half - checked for both formats, which are two separate binaries.
-for binary in "$VST3_BINARY" "$AU_BINARY"; do
+for binary in "$VST3_BINARY" "$AU_BINARY" "$MONITOR_BINARY"; do
     archs=$(lipo -archs "$binary" 2>/dev/null || echo "")
 
     if [[ $archs != *arm64* || $archs != *x86_64* ]]; then
@@ -294,7 +305,7 @@ echo "==> registers both variants: GenBridge (effect) and GenBridge Instrument"
 # means the thing that ships is the thing that was verified.
 echo "==> ad-hoc signing"
 
-for bundle in "$VST3_BUNDLE" "$AU_BUNDLE"; do
+for bundle in "$VST3_BUNDLE" "$AU_BUNDLE" "$MONITOR_BUNDLE"; do
     xattr -cr "$bundle"
     codesign --force --sign - "$bundle"
     codesign --verify --strict "$bundle"
@@ -311,6 +322,7 @@ STAGE=$(mktemp -d)
 
 cp -R "$VST3_BUNDLE" "$STAGE/"
 cp -R "$AU_BUNDLE" "$STAGE/"
+cp -R "$MONITOR_BUNDLE" "$STAGE/"
 
 # --- licences ------------------------------------------------------------
 #
@@ -361,6 +373,8 @@ WHAT IS IN HERE
 
   $VST3_NAME       the VST3 plug-in    - Ableton Live, Bitwig, Cubase, Reaper...
   $AU_NAME  the Audio Unit       - Logic, GarageBand, MainStage...
+
+  $MONITOR_NAME    a small app - see GENBRIDGE MONITOR near the end
 
   The same plug-in in two formats; install whichever your host uses, or both.
   Each appears in your host as TWO devices:
@@ -527,10 +541,29 @@ offline bounce of a GenBridge track comes out silent.
 The panel says "host is rendering offline" when this happens, so it is not a
 mystery. Record the track onto an audio track in real time and export that.
 
+GENBRIDGE MONITOR
+
+A small app, separate from the plug-in: it routes one input pair (or a single
+channel) of one audio device straight to an output pair of another, with as
+little delay as the two devices allow - for example a guitar processor's USB
+output to a mixer's USB return, so you can play and hear it while your DAW
+records something else from the same device. Choose the input, the channels,
+the output and its channels; the Buffer row asks the devices for that size
+(a device another app is using is left alone, and the panel says so). Raise
+Safety if you hear dropouts. Settings are remembered, and it starts again by
+itself next time if you left it running.
+
+Drag "$MONITOR_NAME" to Applications, then unlock it once in Terminal:
+
+    xattr -dr com.apple.quarantine "/Applications/$MONITOR_NAME"
+
+The first time it runs, macOS asks whether it may use audio input. Say yes, or
+the input stays silent.
+
 REQUIREMENTS
 
 macOS 11.5 or later, Apple Silicon or Intel.
-A VST3 or Audio Unit host. The plug-in does not work on its own.
+A VST3 or Audio Unit host for the plug-in, which does not work on its own.
 
 LICENCES
 
@@ -583,7 +616,7 @@ fi
 echo
 echo "done: $DMG ($(du -h "$DMG" | cut -f1))"
 echo "architectures: $ARCHS"
-echo "contents: $VST3_NAME + $AU_NAME - each registers GenBridge (effect) + GenBridge Instrument"
+echo "contents: $VST3_NAME + $AU_NAME - each registers GenBridge (effect) + GenBridge Instrument - and $MONITOR_NAME"
 echo "licences: GPLv3 + FreeType FTL + Steinberg MIT, in Licences/"
 echo "signature: ad-hoc, NOT notarized - users must clear quarantine"
 echo "your installed copies in /Library/Audio/Plug-Ins were NOT touched"

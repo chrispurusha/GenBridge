@@ -439,6 +439,8 @@ static ParamValue   gBufferValue          = 0.0;
 static bool         gHaveBuffer           = false;
 static ParamValue   gNoteValue            = 60.0 / 127.0;
 static bool         gHaveNote             = false;
+static ParamValue   gChannelValue         = 0.0;     // --channel: the plug-in's MIDI Channel, 0 = Source
+static bool         gHaveChannel          = false;
 
 // One line per ~170 ms of driving. Everything here is written by the plug-in's own threads, so it
 // is what the panel would be showing at that instant.
@@ -523,6 +525,7 @@ static float run_blocks(IAudioProcessor * processor, float ** ch, float * l, flo
         OneChange midiChange(6, midiValue);
         OneChange bufferChange(3, gBufferValue);
         OneChange noteChange(10, gNoteValue);
+        OneChange channelChange(7, gChannelValue);
 
         // notes §10
         if (gHaveBuffer) {
@@ -537,6 +540,11 @@ static float run_blocks(IAudioProcessor * processor, float ** ch, float * l, flo
         // The test note rides on block 2, once, since the plug-in acts on the change.
         if (gHaveNote && (block == 2)) {
             data.inputParameterChanges = (IParameterChanges *)&noteChange;
+        }
+
+        // The MIDI Channel likewise, on block 3 - a synth that listens on one channel only needs it.
+        if (gHaveChannel && (block == 3)) {
+            data.inputParameterChanges = (IParameterChanges *)&channelChange;
         }
 
         if ((block == 0) && (events != nullptr)) {
@@ -945,6 +953,7 @@ int main(int argc, char ** argv) {
         printf("  --burst K         compute K blocks back to back per callback, as Ableton does\n");
         printf("  --watch           trace the plug-in's ring fill, drift and resyncs while it runs\n");
         printf("  --buffer N        device buffer to impose, by the label's leading text (e.g. 64)\n");
+        printf("  --channel N       the plug-in's MIDI Channel, 1-16 (default Source)\n");
         return 2;
     }
 
@@ -967,6 +976,9 @@ int main(int argc, char ** argv) {
             // C: an Analog Rytm's kick is note 0.
             gNoteValue = (ParamValue)atoi(argv[i + 1]) / 127.0;
             gHaveNote  = true;
+        } else if ((strcmp(argv[i], "--channel") == 0) && ((i + 1) < argc)) {
+            gChannelValue = (ParamValue)atoi(argv[i + 1]) / 16.0;   // GB_CHANNEL_SLOTS - 1
+            gHaveChannel  = true;
         } else if ((strcmp(argv[i], "--buffer") == 0) && ((i + 1) < argc)) {
             playBuffer = argv[i + 1];
         } else if (strcmp(argv[i], "--watch") == 0) {

@@ -1775,3 +1775,49 @@ biases found on this synth came from the same place - a block of audio arriving 
 where the arithmetic assumed - and neither was visible in the result. One was the lead being counted
 (2.0 ms), the other was it not being counted at all (4 ms, 2026-09-08). The log line added today
 names the terms so the next one is read rather than deduced.
+
+## 2026-10-08 - Measure could not hear the TB-03: the test note was always on channel 1
+
+The Roland TB-03 receives on channel 13 only (checked note by note with G2-Edit's g2_note and tools/capture:
+channels 1-12 and 14-16 come back as exact digital silence). Measure sent its test note on channel 1 whatever
+the MIDI Channel parameter said, so the TB-03 never sounded it and every run ended "nothing came back within
+1.5 s". The test note now goes where a played note would - the MIDI Channel parameter if set, otherwise the
+channel the host's last note arrived on (code-notes/gbMeasure.c.md §20). vst3check gained `--channel N`; with
+`--play TB-03 TB-03 --note 48 --channel 13` the TB-03 answers every trip, and without it the old failure
+reproduces exactly.
+
+WHAT IS LEFT. With the note reaching it, the TB-03's onsets land around GenBridge's own share rather than after
+it: 532-937 frames against a share of 860 at a 32-frame device buffer, 1255-1678 against 1331-1409 at 256 - a
+hardware latency of about zero with ~9 ms of scatter. The TB-03 honours MIDI timestamps (notes stamped 200,
+400, 700, 1000 ms ahead sound within 2 ms of their stamps), and its driver reports an ordinary input latency
+(80 frames + 6 safety at 44.1 kHz), so the plausible reading is CT's: the device or driver compensates its own
+MIDI-to-audio delay. GenBridge's "never early" rule then discards most trips as too early (1 of 9 used, 4.3
+ms, at 256). Not decided yet - see todo.
+
+Also seen: at a 32-frame device buffer GenBridge retuned its ring up during the run ("host declares 128 and
+takes 384 per callback", setpoint 347 -> 641), which moves the share the trips are judged against mid-measurement.
+That was under vst3check's host, whose callback pattern may differ from Ableton's.
+
+## 2026-10-08 - GenBridge Monitor: the proof of concept made into an app (CT)
+
+CT: play guitar through the Line 6 Helix and monitor it, while GenBridge records the unprocessed channel.
+The usual routing is Helix USB 1/2 -> QU-24 USB returns 29/30. Built as monitor/ (gmEngine.c, gmDraw.c,
+gmApp.m, gmSettings.c), by ./do-monitor, into the release's .dmg beside the plug-ins.
+
+The engine is the proof of concept's bridge unchanged in principle - SynthLib's ring, the resampler, the
+drift loop - with channel pairs chosen on both ends, mono/stereo mapping, a setpoint taken down to the
+proof of concept's own floor x1.25 (it ran at 40 ms), the shared-device buffer rule from the plug-in, and
+devices that come and go followed without a click. The window is SynthLib's panel view, as the plug-in's
+editor is, in a twenty-line Cocoa shell.
+
+Measured on the rig: at 64 samples 13.8 ms by the reported figures (devices 6.5, bridge 7.3); at 32, 9.5 ms
+(3.8 + 5.7), 0 dropouts over 2.5 minutes, the ring at 238 of 240, drift +6.8 ppm. Into the MacBook speakers
+the same bridge reads 29.9 ms: they report 690 frames of stream latency on top of their buffer. The QU-24
+reports 28.
+
+The first evening's report (CT): "Ableton outputs to QU-24 29/30 OK, but the new app does not seem to be
+outputting audio." SynthLib's device.c honoured the first channel on INPUT only: scatter() wrote the
+caller's channels into the device's channels 1-2 whatever was asked, so the monitor played on QU-24 USB
+returns 1/2. GenBridge itself only ever captures, so it had never mattered. Fixed in SynthLib (scatter()
+takes firstChannel, as gather() does); MidiSyncTool's tools/mstDriver.cpp opens an output at an offset too
+and had the same silent fault (its todo).

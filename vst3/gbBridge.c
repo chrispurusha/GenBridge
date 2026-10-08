@@ -196,6 +196,11 @@ static uint8_t gb_channel_for(tGbBridge * self, int16_t incoming) {
     return (forced <= 0) ? (uint8_t)(incoming & 0x0F) : (uint8_t)((forced - 1) & 0x0F);
 }
 
+// gbMeasure notes §20 - the test note goes where a played note would
+uint8_t gb_measure_channel(tGbBridge * self) {
+    return gb_channel_for(self, (int16_t)atomic_load(&self->lastNoteChannel));
+}
+
 // notes §9
 static uint64_t gb_block_host_time(tGbBridge * self, int32_t frames) {
     uint64_t now   = AudioGetCurrentHostTime();
@@ -1782,6 +1787,8 @@ void gb_bridge_note(tGbBridge * self, tGbNoteKind kind, int16_t channel, int16_t
                     float value, int32_t sampleOffset, uint64_t blockHostTime) {
     int     destination = atomic_load(&self->midiDestination);
     uint8_t message[3];
+
+    atomic_store(&self->lastNoteChannel, (int)(channel & 0x0F));
 
     if (kind == eGbNoteOn) {
         int velocity = (int)((value * 127.0f) + 0.5f);

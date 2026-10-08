@@ -178,6 +178,15 @@ device's native rate and let GenBridge do the single conversion to whatever the 
 drift of known size, turning "it held steady" into a check with a right answer. The TD-50X is the
 one device here that drifts on its own.
 
+## GenBridge Monitor
+
+A small app beside the plug-in, built from the same bridge: it routes one input pair (or one channel) of one
+audio device to an output pair of another, as fast as two independent clocks allow - for example a guitar
+processor's USB output into a mixer's USB return, to play and hear it while a DAW records something else
+from the same device. `./do-monitor` builds `build/GenBridge Monitor.app` and installs it in /Applications
+(`--no-install` to skip); `./do-release` puts it in the .dmg. Its notes are in
+`Docs/code-notes/gmEngine.c.md`.
+
 ## The plug-in
 
 ```

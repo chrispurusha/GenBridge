@@ -130,7 +130,7 @@ void gb_run_measurement(tGbBridge * self, float ** out, int32_t frames, uint64_t
         }
 
         if ((double)self->measureFrames >= (GB_MEASURE_FLOOR_S * self->hostRate)) {
-            uint8_t note[3] = { 0x90, (uint8_t)atomic_load(&self->testNote), 100 };
+            uint8_t note[3] = { (uint8_t)(0x90 | gb_measure_channel(self)), (uint8_t)atomic_load(&self->testNote), 100 };   // notes §20
 
             // This trip's own clean-capture baseline. See where it is checked.
             self->measureTripUnderruns = atomic_load(&self->ring.underflows);
@@ -191,7 +191,7 @@ void gb_run_measurement(tGbBridge * self, float ** out, int32_t frames, uint64_t
     }
 
     if (self->measureConfirm >= GB_MEASURE_CONFIRM) {
-        uint8_t off[3] = { 0x80, (uint8_t)atomic_load(&self->testNote), 0 };
+        uint8_t off[3] = { (uint8_t)(0x80 | gb_measure_channel(self)), (uint8_t)atomic_load(&self->testNote), 0 };
 
         gb_midi_send_at(atomic_load(&self->midiDestination), off, 3, blockHostTime);
 
@@ -244,7 +244,7 @@ void gb_run_measurement(tGbBridge * self, float ** out, int32_t frames, uint64_t
     }
 
     if ((double)self->measureFrames >= (GB_MEASURE_TIMEOUT_S * self->hostRate)) {
-        uint8_t off[3] = { 0x80, (uint8_t)atomic_load(&self->testNote), 0 };
+        uint8_t off[3] = { (uint8_t)(0x80 | gb_measure_channel(self)), (uint8_t)atomic_load(&self->testNote), 0 };
 
         gb_midi_send_at(atomic_load(&self->midiDestination), off, 3, blockHostTime);
 

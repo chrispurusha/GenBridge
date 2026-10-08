@@ -1,3 +1,8 @@
+- ***GENBRIDGE MONITOR (2026-10-08)*** - Docs/code-notes/gmEngine.c.md. Helix 1-2 -> QU-24 29-30 at 32 samples ran
+  2.5 min with no dropout, 9.5 ms by the reported figures (devices 3.8, bridge 5.7). CHECK by playing: no clicks
+  over a long session; unplug and replug the Helix - it should say "waiting" and come back by itself; quit and
+  relaunch - it reopens on the same routing; with GenBridge recording the Helix in Live at the same time, the
+  monitor leaves the Helix's buffer alone and says so. Does the latency feel like ~10 ms?
 - ***NO SPINNER ON A SLOW DEVICE (2026-10-04)*** - gbBridge notes §73. Analog Keys in Live: pick it, change its
   Buffer, switch to the Kronos and back - no spinning cursor, and audio comes back each time. While a
   switch is in flight, save the project or press undo: no hang (a save mid-switch records the previous

@@ -205,6 +205,7 @@ struct tGbBridge {
     _Atomic bool           offlineRender;
     _Atomic double         offsetMs;
     _Atomic int            midiChannel; // 0 = whatever the note arrived on
+    _Atomic int            lastNoteChannel; // the channel the host's last note arrived on - gbMeasure notes §20
 
     tMeasureState          measureState;
     uint32_t               measureFrames;
@@ -419,6 +420,7 @@ double gb_latency_frames_measured(tGbBridge * self, double fillFrames, uint64_t 
 uint32_t gb_internal_latency(tGbBridge * self);
 uint32_t gb_report_latency(tGbBridge * self);
 double gb_mean_callback_lead(tGbBridge * self);
+uint8_t gb_measure_channel(tGbBridge * self);
 double gb_frames_between(tGbBridge * self, uint64_t from, uint64_t to);
 void gb_send_latency_changed(tGbBridge * self);
 void gb_send_message(tGbBridge * self, const char * id, int value);
