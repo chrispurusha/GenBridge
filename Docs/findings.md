@@ -1832,3 +1832,10 @@ host is told GenBridge's own share and nothing on top. The panel says so instead
 vst3check against the TB-03, five Measure presses at a 256-frame buffer: all five "the device compensates",
 9 of 9 trips each. A first window of +-1.5 ms around zero failed one run in three; consistently early counts
 too, up to 10 ms.
+
+TB-03 at 96 kHz (the original report's other half): could not be made to break up - the proof of concept
+bridged it clean for 15 s, vst3check (new --rate option) ran it clean at 16 and 32 samples with and without
+host bursts, and CT then found it working at 96 kHz in Live (2026-10-08). Removed from todo. One thing to keep
+in mind if it returns: at 96 kHz a host burst carries twice the input frames, so the ring's sawtooth is twice
+as deep against its setpoint; under vst3check's 4-block bursts the drift estimate wandered (-57 to -170 ppm),
+but that host paces itself with usleep, which has faked drift before.

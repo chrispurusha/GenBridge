@@ -750,7 +750,7 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
             set_rgb_colour((tRgb){ 0.85, 0.60, 0.25 });
         } else if (compensated) {
             // gbMeasure notes §21 - a result, not a failure: the device lines its own audio up
-            snprintf(buffer, sizeof(buffer), "%s", "0 ms - the device compensates its own latency");
+            snprintf(buffer, sizeof(buffer), "%s", "0 ms - device compensates");
             set_rgb_colour((tRgb){ 0.45, 0.75, 0.50 });
         } else if (measured > 0) {
             // notes §20
@@ -771,7 +771,7 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
             // RAN, AND CAME BACK WITH NOTHING. Indistinguishable from "never measured" until now,
             // which is exactly the wrong thing to show: one is a starting state and the other is a
             // result that needs acting on.
-            snprintf(buffer, sizeof(buffer), "%s", "onset beat our own latency - see log");
+            snprintf(buffer, sizeof(buffer), "%s", "onset too early - see log");
             set_rgb_colour((tRgb){ 0.85, 0.60, 0.25 });
         } else {
             snprintf(buffer, sizeof(buffer), "%s", "not measured");

@@ -441,6 +441,8 @@ static ParamValue   gNoteValue            = 60.0 / 127.0;
 static bool         gHaveNote             = false;
 static ParamValue   gChannelValue         = 0.0;     // --channel: the plug-in's MIDI Channel, 0 = Source
 static bool         gHaveChannel          = false;
+static ParamValue   gRateValue            = 0.0;     // --rate: the plug-in's Rate, as a slot of gGbRates
+static bool         gHaveRate             = false;
 
 // One line per ~170 ms of driving. Everything here is written by the plug-in's own threads, so it
 // is what the panel would be showing at that instant.
@@ -526,6 +528,7 @@ static float run_blocks(IAudioProcessor * processor, float ** ch, float * l, flo
         OneChange bufferChange(3, gBufferValue);
         OneChange noteChange(10, gNoteValue);
         OneChange channelChange(7, gChannelValue);
+        OneChange rateChange(2, gRateValue);
 
         // notes §10
         if (gHaveBuffer) {
@@ -545,6 +548,11 @@ static float run_blocks(IAudioProcessor * processor, float ** ch, float * l, flo
         // The MIDI Channel likewise, on block 3 - a synth that listens on one channel only needs it.
         if (gHaveChannel && (block == 3)) {
             data.inputParameterChanges = (IParameterChanges *)&channelChange;
+        }
+
+        // And the device rate on block 4 - a device that breaks up at one rate only needs it.
+        if (gHaveRate && (block == 4)) {
+            data.inputParameterChanges = (IParameterChanges *)&rateChange;
         }
 
         if ((block == 0) && (events != nullptr)) {
@@ -954,6 +962,7 @@ int main(int argc, char ** argv) {
         printf("  --watch           trace the plug-in's ring fill, drift and resyncs while it runs\n");
         printf("  --buffer N        device buffer to impose, by the label's leading text (e.g. 64)\n");
         printf("  --channel N       the plug-in's MIDI Channel, 1-16 (default Source)\n");
+        printf("  --rate HZ         the device rate the plug-in asks for: 44100, 48000, 88200 or 96000\n");
         return 2;
     }
 
@@ -976,6 +985,16 @@ int main(int argc, char ** argv) {
             // C: an Analog Rytm's kick is note 0.
             gNoteValue = (ParamValue)atoi(argv[i + 1]) / 127.0;
             gHaveNote  = true;
+        } else if ((strcmp(argv[i], "--rate") == 0) && ((i + 1) < argc)) {
+            static const int kRates[] = { 44100, 48000, 88200, 96000 };   // gGbRates
+            int              want     = atoi(argv[i + 1]);
+
+            for (int r = 0; r < 4; r++) {
+                if (kRates[r] == want) {
+                    gRateValue = (ParamValue)r / 3.0;
+                    gHaveRate  = true;
+                }
+            }
         } else if ((strcmp(argv[i], "--channel") == 0) && ((i + 1) < argc)) {
             gChannelValue = (ParamValue)atoi(argv[i + 1]) / 16.0;   // GB_CHANNEL_SLOTS - 1
             gHaveChannel  = true;
