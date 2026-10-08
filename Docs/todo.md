@@ -6,6 +6,7 @@ Built-but-unchecked work goes in to-test.md.
 
 Shared with the sibling projects
 
+- Using the app to monitor guitar on a Line6 USB audio channel is working well. However, then using the fx plugin in Ableton can suffer problems with latency when recording. I have a busy project, using plugins with lots of latency. I have to change the track delay to -300ms to re-align. Any way to deal with that via our plugin? WIld idea - maybe we could time-stamp samples on the app and some pick up a stream from the app and adjust automatically?
 - Need to be able to host multiple instances of this plugin on a DAW. Can we make sure we're OK on that? I've had the Kronos stop sending audio 'til I rebooted it, which happened after I added a track for TB03.
 - I'm not sure we're defaulting to stereo audio connection? We should be, if not.
 - Being able to select Host input for the instrument plugin, possibly makes no sense in hindsight? Can we see a use for that? Might make more sense for the effects plugin, even there, there might be no point.
