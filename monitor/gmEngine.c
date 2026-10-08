@@ -252,11 +252,13 @@ static void release(void) {
         device_close(&e->out);
     }
 
-    if (e->inRestoreFrames > 0) {
+    // notes §4 - put back only what nobody else is using now: a client that arrived after us is running at
+    // our size, and changing it under them is the very thing the claim refused to do
+    if ((e->inRestoreFrames > 0) && !device_is_running_somewhere(e->inId)) {
         device_set_buffer_frames(e->inId, e->inRestoreFrames);
     }
 
-    if ((e->outRestoreFrames > 0) && (e->outId != e->inId)) {
+    if ((e->outRestoreFrames > 0) && (e->outId != e->inId) && !device_is_running_somewhere(e->outId)) {
         device_set_buffer_frames(e->outId, e->outRestoreFrames);
     }
 

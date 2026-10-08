@@ -160,6 +160,17 @@ int main(int argc, const char * argv[]) {
     (void)argv;
 
     @autoreleasepool {
+        // notes §3 - one instance: a second would route the same signal again and fight over the settings file
+        NSString *  bundleId = [[NSBundle mainBundle] bundleIdentifier];
+        pid_t       me       = [[NSProcessInfo processInfo] processIdentifier];
+
+        for (NSRunningApplication * other in [NSRunningApplication runningApplicationsWithBundleIdentifier:bundleId]) {
+            if (other.processIdentifier != me) {
+                [other activateWithOptions:0];
+                return 0;
+            }
+        }
+
         NSApplication * app      = [NSApplication sharedApplication];
         GmAppDelegate * delegate = [[GmAppDelegate alloc] init];
 

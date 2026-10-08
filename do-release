@@ -543,22 +543,66 @@ mystery. Record the track onto an audio track in real time and export that.
 
 GENBRIDGE MONITOR
 
-A small app, separate from the plug-in: it routes one input pair (or a single
+A small app, separate from the plug-in. It routes one input pair (or a single
 channel) of one audio device straight to an output pair of another, with as
-little delay as the two devices allow - for example a guitar processor's USB
-output to a mixer's USB return, so you can play and hear it while your DAW
-records something else from the same device. Choose the input, the channels,
-the output and its channels; the Buffer row asks the devices for that size
-(a device another app is using is left alone, and the panel says so). Raise
-Safety if you hear dropouts. Settings are remembered, and it starts again by
-itself next time if you left it running.
+little delay as the two devices allow. For example: a guitar processor's USB
+output into a mixer's USB return, so you can play and hear it, while your DAW
+records something else from the same device - its dry channel, say - through
+the GenBridge plug-in.
+
+INSTALLING IT
 
 Drag "$MONITOR_NAME" to Applications, then unlock it once in Terminal:
 
     xattr -dr com.apple.quarantine "/Applications/$MONITOR_NAME"
 
 The first time it runs, macOS asks whether it may use audio input. Say yes, or
-the input stays silent.
+the input stays silent. (If you said no: System Settings > Privacy & Security >
+Microphone, and switch GenBridge Monitor on.)
+
+USING IT
+
+Pick the Input device, its Channels and Format (Mono or Stereo), then the
+Output device, its Channels and Format, and press Start. Mono into stereo plays
+on both sides; stereo into mono is mixed. Trim sets the level - click the
+middle of the bar for exactly 0 dB, further right for up to +6 dB.
+
+Everything is remembered: the routing, the trim, and whether it was running.
+Quit while it is running and it starts routing again by itself the next time
+you open it. If a device is not connected, it says "waiting" and starts as soon
+as the device appears - unplugging and replugging needs no click.
+
+Only one copy runs at a time; opening it again brings the running one forward.
+
+LATENCY, AND WHY IT CAN CHANGE
+
+The panel shows the delay from input to output, split into "devices" (what
+the two devices' drivers report, plus one buffer each) and "bridge" (the app's
+own buffering, which keeps the two devices' clocks in step). Under it, "buffers"
+shows the buffer size really in force at each end.
+
+A device's buffer size is ONE setting for the whole device, shared by every app
+using it, and the first app to open the device sets it:
+
+  - If nothing else is using a device, Buffer sets it (32 samples is a good
+    start; raise Safety if you ever hear clicks or dropouts).
+  - If another app already has it open, the monitor leaves it alone - changing
+    it would disturb that app - and the panel says "in use elsewhere". The
+    monitor then runs at that app's size, and its delay grows with it.
+  - Quitting the monitor puts a device's buffer back the way it found it, but
+    only if nothing else is using the device by then.
+
+So, for the lowest delay whichever app you start first:
+
+  - If the GenBridge plug-in records from the same input device, set ITS
+    Buffer to the same size for that device. It remembers per device.
+  - If the output is your DAW's own audio device, the DAW's buffer size
+    (in Live: Settings > Audio > Buffer Size) is the output's buffer. Keep it
+    small while you play through the monitor.
+
+The GenBridge plug-in follows the same rule from its side: if the monitor opened
+a device first, the plug-in shows "shared" and the monitor's size. That is
+expected, and its latency figures account for it.
 
 REQUIREMENTS
 

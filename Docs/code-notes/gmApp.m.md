@@ -16,3 +16,9 @@ again by itself at the next launch.
 
 Half a second: device changes are followed by gm_engine_poll() (gmEngine notes §1), and nothing else needs
 the main thread on a timer.
+
+## 3. one instance
+
+Finder and the Dock already bring a running app forward, but `open -n` or a second copy elsewhere would start
+another. Two would route the same input to the same output twice - 6 dB up and phasing where their timing
+differs - and each would overwrite the other's settings. A second launch brings the first forward and quits.

@@ -36,8 +36,10 @@ tighter floor is in todo.
 A device's buffer size is global to the device. If another client already has it running - the DAW with
 GenBridge on the same Helix - changing it would change it under them, so it is left alone and the panel says
 so (GenBridge findings 2026-09-08 (10), the same rule). Otherwise the requested size is clamped to the
-device's range and set, and the old size is put back when the monitor stops or quits. One device in both
-roles is claimed once.
+device's range and set, and the old size is put back when the monitor stops or quits - but only if nothing
+else is running the device by then (2026-10-08). A client that opened it after us, GenBridge recording the
+Helix in Live, is running at our size, and restoring would change it under them. One device in both roles is
+claimed once.
 
 ## 5. meters (`hold_peak()`, `gm_engine_status()`)
 

@@ -187,6 +187,12 @@ from the same device. `./do-monitor` builds `build/GenBridge Monitor.app` and in
 (`--no-install` to skip); `./do-release` puts it in the .dmg. Its notes are in
 `Docs/code-notes/gmEngine.c.md`.
 
+A device's buffer size is one setting for the whole device, and the first app to open it sets it. The
+monitor asks for its Buffer only when nothing else is using a device, otherwise it runs at the size in force
+and says so; it restores a size it changed only if nobody else is using the device when it stops. For the
+lowest delay in any start order, give the GenBridge plug-in the same Buffer for a device both use, and keep
+the DAW's own buffer small when the output is the DAW's device. One instance runs at a time.
+
 ## The plug-in
 
 ```
