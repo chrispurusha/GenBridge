@@ -1,3 +1,21 @@
+- ***TWO GENBRIDGES ON ONE DEVICE SHARE ITS BUFFER (2026-10-09)*** - gbBridge notes §75; vst3check --shared passes on the
+  CalDigit. In Live: two capture instances on the Helix, set one to 16 - both panels should read 16 with no "shared",
+  the log "shared device: told 1 other GenBridge(s) it is now 16 frames". Remove one: the other keeps 16. Remove
+  both: the Helix goes back to what it had. A device that is Live's own interface must still be left alone.
+- ***DEVICE LIST CHANGES NO LONGER SWAP THE DEVICE (2026-10-09)*** - gbBridge notes §74. With GenBridge capturing the
+  Helix in Live, make the input list change: connect or disconnect another audio device (AirPods, iPhone in
+  Continuity range, a USB interface). It should stay on the Helix; /tmp/genbridge.log says "device list changed:
+  ... moved from slot N to M - following it". Unplug the Helix itself: "is gone - waiting for it", panel waits,
+  plugging it back reopens it. Save and reopen: the Helix comes back.
+- ***ALIGN A RECORDING (2026-10-09)*** - gbAlign notes §1; step by step in Docs/live-recording-setup.md. Busy Live set:
+  GenBridge effect on the Helix track (Track Delay 0, Extra Latency 0); on the recording track (Audio From that track,
+  Post FX, Monitor IN, output Sends Only, armed) a second GenBridge effect with Role "Align a recording". Play: within a
+  few seconds it should read "N ms late - correcting", then "aligned", and the capture panel's Extra row should show N
+  "set by Align". Record against the click: on the beat, monitoring immediate. Then: with Monitor Off does it say
+  "nothing arriving" (does Live run a track's devices with monitoring off)? Remove a heavy plug-in, press Re-align: the
+  figure drops. Change latency while not playing, then play - "still late after the change" means Live needs a
+  transport restart to re-read latency. Save and reopen: both roles and the figure come back.
+- ***EXTRA LATENCY ON THE EFFECT PANEL (2026-10-09)*** - the "Extra" row: [<<] [<] [>] [>>] step 10 ms and 1 ms; the value is saved with the project and matches the host's generic parameter.
 - ***MEASURE: TB-03 ON ITS CHANNEL, AND "THE DEVICE COMPENSATES" (2026-10-08)*** - gbMeasure notes §20, §21. In Live:
   GenBridge Instrument on the TB-03 with MIDI Channel 13, press Measure - the panel should read "0 ms - the device
   compensates its own latency" and the correction line "none needed"; record a part and it should land on the beat.

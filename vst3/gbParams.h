@@ -47,11 +47,22 @@ enum {
     kParamOffsetMs,      // instrument only: manual correction to the measured figure
     kParamTestNote,      // instrument only: which note Measure plays
     kParamSource,        // instrument only: capture from a DEVICE, or from the host's own input
+    kParamExtraLatency,  // BOTH variants, registered at GB_EXTRA_LATENCY_INDEX - notes §5
+    kParamRole,          // capture a device, or align a recording - notes §6
     kParamCount
 };
 
 // notes §2
 #define GB_PARAMS_INSTRUMENT_ONLY    (6)
+
+// notes §5 - where the effect and the instrument both register kParamExtraLatency, and its range
+#define GB_EXTRA_LATENCY_INDEX       (6)
+#define GB_EXTRA_LATENCY_MAX_MS      (1000.0)
+
+// notes §6 - registered on both, shown on the effect only
+#define GB_ROLE_INDEX                (7)
+#define GB_ROLE_CAPTURE              (0)
+#define GB_ROLE_ALIGN                (1)
 
 #define GB_CHANNELS           (2)
 

@@ -63,3 +63,37 @@ THE THREE NUMBERS BELOW ARE THE SDK'S, WRITTEN OUT. They are Vst::kAfterTouch, V
 and Vst::kCountCtrlNumber from ivstmidicontrollers.h, which is a C++ header - so SynthLib's VST3
 wrapper asserts its own SYNTHLIB_MIDI_* numbers against the SDK, and gbPlugin.c asserts these
 against those. If the SDK ever renumbers them, the build stops rather than this file guessing.
+
+## 5. `kParamExtraLatency`
+
+LATENCY THE PLUG-IN DOES NOT HAVE, REPORTED ANYWAY (2026-10-09, CT). Recording GenBridge's effect into
+Live goes through a second track ("Audio From: track 1, Post FX"), and with heavy plug-ins elsewhere in
+the set the take lands about 300 ms late while GenBridge reports 14 ms: Live holds the GenBridge
+track's output back to line up with the slowest chain, and the recording track takes it delayed. The
+setting adds 0-1000 ms to what the host is told, on both variants, so the track holding GenBridge
+needs less of that padding. WHETHER IT MOVES THE TAKE IS NOT YET KNOWN - that is what it is for: set it
+to the Track Delay that fixes it by ear, put the Track Delay back to 0 and record against a click.
+It applies only while a device is open (an idle plug-in reports 0), and changes settle as the offset's
+do before the host is told once.
+
+ITS ID IS AFTER THE INSTRUMENT-ONLY ONES, ITS REGISTRATION INDEX BEFORE THEM. A parameter both variants
+have must be registered before kParamMidiDest (§2), but ids are what saved automation names, and
+putting it there in the enum would have renumbered the instrument's. So `gb_param_info()` maps the
+index: GB_EXTRA_LATENCY_INDEX is this one, and every index after it is one id lower. Anything that
+walks the table must take `info.id`, never the index (gb_create() did, and was changed with this).
+Saved as `extra=` in the state text, a new key that an older build skips.
+
+
+## 6. `kParamRole`
+
+THE EFFECT'S ROLE (2026-10-09): Capture (a device, as always) or Align a recording - the receiving end
+of gbAlign.c, put on the track a GenBridge track is recorded through. Registered at GB_ROLE_INDEX on
+both variants so the instrument's ids and indices keep §5's arrangement, but hidden there: the
+instrument always captures. Its id follows kParamExtraLatency, so no saved automation is renumbered.
+Saved as `role=align` in the state text, absent for Capture, so an older project opens capturing.
+
+AN ALIGNING INSTANCE HOLDS NO DEVICE (fixed the same day, from CT's first try): the Align role first
+only stopped rendering the bridge, so a listener given the Helix as its Device still opened it. Two
+GenBridges then shared the Helix, and the shared-device rule (neither may set a buffer another client
+is using) pinned both at a stale 512. gb_reconfigure() now closes and opens nothing in the Align role,
+like host input; the Device slot is kept for a return to Capture.

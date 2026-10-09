@@ -945,3 +945,40 @@ take configLock alone.
 The log's "held configLock" figure now subtracts the released span (`openUnlockedMs`), so it is the time the
 host could actually have waited. MEASURED: vst3check's Analog Keys reconfigures went from ~1,430 ms held to
 under the 20 ms the log reports from; vst3check passes.
+
+## 74. a changed device list follows the device, not its slot (`deviceListChanged`)
+
+CT, 2026-10-09: "sometimes GenBridge forgets the last audio device it was using." The log showed it
+mid-session: running on HELIX Audio as slot 4, a hot-plug reconfigure re-resolved slot 4 against the
+new list - where the MacBook Pro Microphone had moved into fourth place - opened the microphone, and
+saved it as the project's device; the next session faithfully reopened the microphone. A slot is a
+POSITION in the list of input devices, and the list reorders whenever macOS adds or drops one (an
+iPhone or AirPods microphone coming and going is enough).
+
+Now the hot-plug watcher marks the list as changed, and a reconfigure that was not a new choice
+(the wanted slot is still the one last opened) resolves the open device's UID instead: moved -> follow
+it and tell the host the new slot, so the parameter agrees; gone -> wait for it by UID, exactly as a
+reopened project waits for an absent device (savedDevicePending), instead of opening whatever now
+holds its number. A slot chosen by the user or by automation still means that slot.
+
+## 75. a device's rate and buffer are shared by every GenBridge in the host (`gShared`, `sharedDevice`)
+
+CT, 2026-10-09: two GenBridges on the Helix would not go to 16 ("shared - device at 512"). Two faults
+together. The shared-device guard asked CoreAudio whether the device was running for anyone else, and
+CoreAudio cannot tell a sibling GenBridge from Live, so whichever opened second never set the buffer.
+And each instance remembered what the device had before IT changed it and handed that back when it
+closed, while the other was still running on the device - "restored device settings: 1024 frames"
+mid-session, the next instance then pinned to it.
+
+Now one record per device, shared by every bridge in the process: who holds it, whether something
+OUTSIDE GenBridge was running it at the first open (`foreign` - only that stops us setting it, which keeps
+the QU-24-as-Live's-own-interface protection of 2026-09-02), and what it had before the first of us
+changed it. The last setting wins: an instance that changes the rate or buffer tells the others, which
+take it as their own (wantedFrames/wantedRate, so the panel's Buffer follows through gbFrames/gbRate)
+and reopen on it - one reopen each, since the device is already at the size by then. The original goes
+back only when the last holder closes, and not at all when that close is a reopen of the same device
+(§46). A failed open releases its hold at once.
+
+vst3check --shared NAME checks it on a real device (vst3check notes §49): on the CalDigit dock's input,
+512 before; A 64; B joins at 16; A follows and stays at 16; B closes and it stays 16; A closes and 512
+comes back.

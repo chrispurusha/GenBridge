@@ -1839,3 +1839,65 @@ host bursts, and CT then found it working at 96 kHz in Live (2026-10-08). Remove
 in mind if it returns: at 96 kHz a host burst carries twice the input frames, so the ring's sawtooth is twice
 as deep against its setpoint; under vst3check's 4-block bursts the drift estimate wandered (-57 to -170 ppm),
 but that host paces itself with usleep, which has faked drift before.
+
+
+2026-10-09  A TAKE 300 ms LATE IN A BUSY SET IS LIVE'S DELAY COMPENSATION, NOT OURS
+------------------------------------------------------------------------------------
+CT: guitar through the GenBridge effect records about 300 ms late in a set with heavy plug-ins on other
+tracks, fixed by -300 ms of Track Delay; GenBridge reports about 14 ms. The take goes through a second
+track ("Audio From" the GenBridge track, Post FX), because Live records a track's input (2026-09-02
+entry). Live delays every track's output to line up with its slowest chain, so the recording track
+receives the guitar already held back by roughly the set's largest plug-in latency. Even a total
+failure of GenBridge's own 14 ms could not account for 300.
+
+CHECK THAT SETTLES IT: Options > Delay Compensation off, Track Delay 0, record - on the beat means this.
+
+Built the same day: an Extra Latency parameter (0-1000 ms, both variants) added to what is reported -
+params notes §5, to-test. Not built, and why: Measure-style compensation on the effect would only chase
+the 14 ms; and the app comparing the Helix's monitor feed with its dry feed measures the Helix (both
+leave it together), not the delay, which happens inside Live between the two tracks. The measurement
+that can see it is a second instance on the recording track comparing what arrives against what the
+first one sent, by sample position - wall-clock stamps would see nothing, because the padding is a
+delay line run inside the same audio cycle.
+
+2026-10-09  EXTRA LATENCY WORKS IN LIVE - AND THE ALIGN ROLE SETS IT
+------------------------------------------------------------------------------------------------------
+CT, by ear in the busy set: with Extra Latency at ~300 ms on the GenBridge effect and Track Delay 0 on
+both tracks, "guitar notes are landing well now, both monitoring and recording". So Live does use a
+plug-in's reported latency to place a take recorded through a second track, and reporting the set's
+delay compensation also takes the hold-back off the GenBridge track, which is why monitoring became
+immediate. CT's earlier workaround - Track Delay -1000 ms on the GenBridge track - gave the monitoring
+(Live clamps a negative delay to the compensation available) but not the take, because Track Delay tells
+Live nothing about where the audio belongs. Too much Extra Latency is worse than too little: past the
+set's own maximum it becomes the maximum, and every track, the click included, gets later.
+
+Built the same day: Extra Latency on the effect's panel ("Extra" row), and a Role for the effect -
+Capture, or Align a recording. An aligning instance on the recording track matches what arrives against
+what every capturing GenBridge in the host just output, sample-exact (gbAlign notes §3), and raises the
+matching one's Extra Latency until the route's delay is zero. Pairing is by content, so it needs no
+setup and several pairs coexist. Offline harness: converges exactly in ~2 s for 37.5 and 300 ms, stops
+at the 1000 ms limit, refuses a host that does not re-read latency rather than doubling, Re-align finds a
+set that got lighter (gbAlign notes §9). Not yet run in Live - see to-test.
+
+Also from the same session's log (not fixed yet, todo): two GenBridges on the Helix fought over its
+buffer size - see todo, "TWO GENBRIDGES ON ONE DEVICE".
+
+2026-10-09  "FORGETS THE LAST AUDIO DEVICE": A HOT-PLUG RE-RESOLVED THE SLOT NUMBER
+------------------------------------------------------------------------------------------------------
+CT: sometimes GenBridge comes back on a different device. The log (session Live 43537): running on
+HELIX Audio as slot 4, a reconfigure with no new choice behind it resolved "slot 4" against a list in
+which the MacBook Pro Microphone now sat fourth, opened the microphone and saved it; the next session
+(46355) restored the microphone exactly as saved. Slots are positions, and the hot-plug watcher's
+reconfigure trusted the position over the device's UID. Fixed: a changed list follows the UID, and an
+open device that vanished is waited for by UID (gbBridge notes §74). Not yet confirmed in Live.
+
+2026-10-09  TWO GENBRIDGES ON ONE DEVICE NOW SHARE ITS BUFFER
+------------------------------------------------------------------------------------------------------
+"Shared - device at 512" on both instances, and 16 refused on each (CT). The guard against imposing a
+buffer on a device someone else runs could not tell a sibling GenBridge from Live, and every instance
+restored its own remembered size on close while the other still ran. In the first Align test the
+listener also held the Helix (the Align role did not yet close its device - fixed, params notes §6),
+which is what put two instances on it. Fixed with one record per device for the whole host (gbBridge
+notes §75): siblings may set it, the last setting wins and the others follow, the original returns when
+the last one closes. vst3check --shared CalDigit: 512 -> 64 -> 16, held at 16 through B's close, 512
+after A's. In Live the same evening: the listener "role: ALIGN - no device opened", the Helix at 16.

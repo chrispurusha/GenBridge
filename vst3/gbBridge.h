@@ -110,6 +110,8 @@ typedef struct {
     unsigned channels;
     float    trim;
     double   offsetMs;
+    double   extraLatencyMs; // params notes §5
+    int      role;           // GB_ROLE_* - params notes §6
     bool     hostInput;      // capture from the host's own input rather than from a device
     bool     valid;
 } tGbActive;

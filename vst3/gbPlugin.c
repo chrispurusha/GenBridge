@@ -30,6 +30,7 @@
 
 #include "synthlibPlugin.h"
 
+#include "gbAlign.h"
 #include "gbBridge.h"
 #include "gbDraw.h"
 #include "synthlibLog.h"
@@ -122,6 +123,11 @@ typedef struct {
     const char *   stateCache;
     size_t         stateLength;
 
+    // notes §9 - every instance sends what it outputs; an effect in the Align role receives
+    tGbAlignSender *   alignSender;
+    tGbAlignReceiver * alignReceiver;
+    _Atomic double     hostRate;
+
     // The side-chain probe's last report - see gb_probe_host_input(). Audio thread only.
     bool           probed;
     uint32_t       probeChannels;
@@ -134,6 +140,28 @@ static double clamp01(double v) {
 
 static bool is_pass_through(uint32_t id) {
     return (id >= (uint32_t)GB_CC_BASE) && (id < (uint32_t)(GB_CC_BASE + GB_CC_COUNT));
+}
+
+// params notes §6 - only the effect can be put in the Align role
+static bool aligning(tGbPlugin * g) {
+    return !g->instrument && (atomic_load(&g->values[kParamRole]) >= 0.5);
+}
+
+// An aligning instance setting this one's Extra Latency - from the align thread (gbAlign notes §1).
+static void gb_align_apply(void * owner, double extraMs) {
+    tGbPlugin * g = (tGbPlugin *)owner;
+    double      v = clamp01(extraMs / GB_EXTRA_LATENCY_MAX_MS);
+
+    atomic_store(&g->values[kParamExtraLatency], v);
+    gb_bridge_parameter(g->bridge, kParamExtraLatency, v, 0, mach_absolute_time());
+    synthlib_plugin_param_edited(g, kParamExtraLatency, v);
+}
+
+// The role decides what we report, so the host has to read it again when it changes.
+static void role_changed(tGbPlugin * g, bool before) {
+    if (aligning(g) != before) {
+        synthlib_plugin_latency_changed(g);
+    }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -174,6 +202,23 @@ static void gb_on_bridge_message(void * user, const char * id, int value) {
     } else if (strcmp(id, "gbFirstChannel") == 0) {
         param = kParamFirstChannel;
         v     = (double)value / (double)(GB_MAX_FIRST_CHANNEL - 1);
+    } else if ((strcmp(id, "gbFrames") == 0) || (strcmp(id, "gbRate") == 0)) {
+        // gbBridge notes §75 - another GenBridge changed the shared device; show what it is now
+        bool frames = (strcmp(id, "gbFrames") == 0);
+        int  count  = frames ? gGbFrameCount : gGbRateCount;
+        int  index  = -1;
+
+        for (int i = 0; i < count; i++) {
+            if (frames ? (gGbFrames[i] == value) : ((int)gGbRates[i] == value)) {
+                index = i;
+            }
+        }
+
+        if (index < 0) {
+            return;     // a size the list does not offer (a device that clamped): leave the panel's
+        }
+        param = frames ? kParamFrames : kParamRate;
+        v     = (double)index / (double)(count - 1);
     } else if (strcmp(id, "gbSource") == 0) {
         param = kParamSource;
         v     = (value > 0) ? 1.0 : 0.0;
@@ -226,6 +271,10 @@ static bool gb_param_info_cb(const tSynthLibPluginDesc * desc, void * inst, uint
         out->unit     = eSynthLibUnitMilliseconds;
         out->plainMin = GB_OFFSET_MIN_MS;
         out->plainMax = GB_OFFSET_MAX_MS;
+    } else if (info.id == (uint32_t)kParamExtraLatency) {
+        out->unit     = eSynthLibUnitMilliseconds;
+        out->plainMin = 0.0;
+        out->plainMax = GB_EXTRA_LATENCY_MAX_MS;
     } else if (info.id == (uint32_t)kParamTrim) {
         out->unit     = eSynthLibUnitGeneric;       // a gain multiplier, 0..2
         out->plainMin = 0.0;
@@ -276,11 +325,13 @@ static bool gb_midi_mapping_cb(const tSynthLibPluginDesc * desc, void * inst, ui
 // FROM ANY THREAD, with no block to place it in: an Audio Unit host moving a control, or our own
 // editor on that format. Stamped "now", which is what a change with no block behind it means.
 static void gb_set_param(void * inst, uint32_t id, double normalized) {
-    tGbPlugin * g = (tGbPlugin *)inst;
+    tGbPlugin * g      = (tGbPlugin *)inst;
+    bool        before = aligning(g);
 
     if (id < (uint32_t)kParamCount) {
         atomic_store(&g->values[id], normalized);
     }
+    role_changed(g, before);
 
     if (id == (uint32_t)kParamMeasure) {
         if (normalized >= 0.5) {
@@ -326,9 +377,12 @@ static void gb_param_points(void * inst, uint32_t id, const tSynthLibParamPoint 
     }
 
     // Everything else is a level, and a level is where it settles.
+    bool before = aligning(g);
+
     if (id < (uint32_t)kParamCount) {
         atomic_store(&g->values[id], points[count - 1].value);
     }
+    role_changed(g, before);
     gb_bridge_parameter(g->bridge, id, points[count - 1].value, (int32_t)points[count - 1].sampleOffset,
                         g->blockHostTime);
 }
@@ -398,6 +452,9 @@ static uint32_t gb_state_params(const tSynthLibPluginDesc * desc, const void * d
                   (ms - GB_OFFSET_MIN_MS) / (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS));
     }
 
+    put_value(out, capacity, &count, kParamExtraLatency, active.extraLatencyMs / GB_EXTRA_LATENCY_MAX_MS);
+    put_value(out, capacity, &count, kParamRole, (active.role == GB_ROLE_ALIGN) ? 1.0 : 0.0);
+
     if (!active.valid) {
         return count;
     }
@@ -453,6 +510,8 @@ static void gb_set_state(void * inst, const void * data, size_t len) {
     if ((data == NULL) || (len == 0u)) {
         return;
     }
+    bool before = aligning(g);
+
     gb_bridge_set_state(g->bridge, (const char *)data, len);
 
     // And what the parameters are now, for getParam() - the wrapper reads them back after this.
@@ -463,6 +522,7 @@ static void gb_set_state(void * inst, const void * data, size_t len) {
             atomic_store(&g->values[values[i].id], values[i].value);
         }
     }
+    role_changed(g, before);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -480,10 +540,17 @@ static void * gb_create(const tSynthLibPluginDesc * desc) {
     atomic_init(&g->statusSlot, -1);
     atomic_init(&g->measurePending, false);
 
+    // By registration index, stored by id - the two differ from GB_EXTRA_LATENCY_INDEX on (params notes §5)
+    for (int i = 0; i < kParamCount; i++) {
+        atomic_init(&g->values[i], 0.0);
+    }
+
     for (int i = 0; i < kParamCount; i++) {
         tGbParamInfo info;
 
-        atomic_init(&g->values[i], gb_param_info(i, g->instrument, &info) ? info.defaultNormalized : 0.0);
+        if (gb_param_info(i, g->instrument, &info) && (info.id < (uint32_t)kParamCount)) {
+            atomic_store(&g->values[info.id], info.defaultNormalized);
+        }
     }
     g->bridge = gb_bridge_create(g->instrument);
 
@@ -498,12 +565,22 @@ static void * gb_create(const tSynthLibPluginDesc * desc) {
     tGbHostOps ops = { g, gb_on_bridge_message };
 
     gb_bridge_connect(g->bridge, &ops);
+
+    // gbAlign notes §1 - a full registry leaves an instance unable to align or be aligned, nothing worse
+    atomic_init(&g->hostRate, 48000.0);
+    g->alignSender = gb_align_sender_create(g, gb_align_apply);
+
+    if (!g->instrument) {
+        g->alignReceiver = gb_align_receiver_create();
+    }
     return g;
 }
 
 static void gb_destroy(void * inst) {
     tGbPlugin * g = (tGbPlugin *)inst;
 
+    gb_align_receiver_destroy(g->alignReceiver);
+    gb_align_sender_destroy(g->alignSender);
     gb_bridge_disconnect(g->bridge);
     gb_bridge_destroy(g->bridge);
     free(g);
@@ -520,6 +597,9 @@ static void gb_terminate(void * inst) {
 }
 
 static void gb_prepare(void * inst, const tSynthLibSetup * setup) {
+    if (setup->sampleRate > 0.0) {
+        atomic_store(&((tGbPlugin *)inst)->hostRate, setup->sampleRate);
+    }
     gb_bridge_setup_processing(((tGbPlugin *)inst)->bridge, setup->sampleRate,
                                (int32_t)setup->maxFrames, setup->offline);
 }
@@ -537,6 +617,10 @@ static void gb_set_processing(void * inst, bool running) {
 }
 
 static uint32_t gb_latency_samples(void * inst) {
+    // An aligning instance adds nothing to the recording track it sits on
+    if (aligning((tGbPlugin *)inst)) {
+        return 0;
+    }
     return gb_bridge_latency(((tGbPlugin *)inst)->bridge);
 }
 
@@ -585,11 +669,31 @@ static void gb_probe_host_input(tGbPlugin * g, const float * const * in, uint32_
 // routed nothing, which the bridge treats as silence rather than as an error.
 static void gb_process(void * inst, const float * const * in, uint32_t numIn, float ** out,
                        uint32_t numOut, uint32_t frames, const tSynthLibTransport * transport) {
-    tGbPlugin * g = (tGbPlugin *)inst;
-
-    (void)transport;
+    tGbPlugin * g    = (tGbPlugin *)inst;
+    double      rate = atomic_load(&g->hostRate);
 
     if ((out == NULL) || (numOut < (uint32_t)GB_CHANNELS)) {
+        return;
+    }
+
+    // gbAlign notes §1 - the recording track's audio passes through untouched while it is measured
+    if (aligning(g)) {
+        for (uint32_t c = 0; c < (uint32_t)GB_CHANNELS; c++) {
+            const float * from = ((in != NULL) && (numIn > 0u)) ? in[(c < numIn) ? c : (numIn - 1u)] : NULL;
+
+            if (out[c] == NULL) {
+                continue;
+            }
+
+            if (from == NULL) {
+                memset(out[c], 0, (size_t)frames * sizeof(float));
+            } else if (from != out[c]) {
+                memmove(out[c], from, (size_t)frames * sizeof(float));
+            }
+        }
+        bool recording = (transport != NULL) && transport->valid && transport->recording;
+
+        gb_align_receiver_write(g->alignReceiver, in, numIn, frames, rate, recording);
         return;
     }
 
@@ -597,6 +701,10 @@ static void gb_process(void * inst, const float * const * in, uint32_t numIn, fl
         gb_probe_host_input(g, in, numIn, frames);
     }
     gb_bridge_render(g->bridge, out, in, (int32_t)numIn, (int32_t)frames, g->blockHostTime);
+
+    gb_align_sender_write(g->alignSender, out, (uint32_t)GB_CHANNELS, frames, rate,
+                          atomic_load(&g->values[kParamExtraLatency]) * GB_EXTRA_LATENCY_MAX_MS,
+                          atomic_load(&g->statusSlot));
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -649,6 +757,17 @@ static void gb_on_edit(void * user, const tGbEditRequest * request) {
         case eGbEditMeasure:      id = kParamMeasure;      break;
         case eGbEditOffset:       id = kParamOffsetMs;     break;
         case eGbEditSource:       id = kParamSource;       break;
+        case eGbEditRole:         id = kParamRole;         break;
+
+        case eGbEditExtraLatency:
+            id = kParamExtraLatency;
+            gb_align_sender_manual(g->alignSender);
+            break;
+
+        case eGbEditRealign:
+            gb_align_receiver_realign(g->alignReceiver);   // not a parameter: nothing to save or automate
+            return;
+
         default:                  return;
     }
     synthlib_plugin_param_edited(g, id, request->normalized);
@@ -681,6 +800,15 @@ static void gb_sync(void * user, bool instrument) {
                        synthlib_plugin_param_value(g, kParamMidiChannel),
                        synthlib_plugin_param_value(g, kParamTestNote),
                        synthlib_plugin_param_value(g, kParamSource));
+
+    tGbDrawAlign align;
+
+    memset(&align, 0, sizeof(align));
+    align.extraLatency = synthlib_plugin_param_value(g, kParamExtraLatency);
+    align.aligning     = !instrument && (synthlib_plugin_param_value(g, kParamRole) >= 0.5);
+    align.autoSet      = gb_align_sender_auto_set(g->alignSender);
+    gb_align_receiver_status(g->alignReceiver, &align.status);
+    gb_draw_set_align(&align);
 }
 
 static void gb_sync_effect(void * user) {
@@ -828,7 +956,7 @@ static const tSynthLibPluginDesc gVariants[2] = {
         .outputs            = gOutputs,
         .numOutputs         = 1,
         .wantsMidiIn        = false,
-        .wantsTransport     = false,
+        .wantsTransport     = true,         // the Align role holds still while Live records
 
         .vst3ProcessorUid   = gEffectProcessorUid,
         .vst3ControllerUid  = gEffectControllerUid,

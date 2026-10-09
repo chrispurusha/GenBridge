@@ -661,6 +661,221 @@ static bool sink_create(void) {
     return st == noErr;
 }
 
+
+// notes §49 - TWO EFFECTS ON ONE DEVICE (gbBridge notes §75). Opens the named device, which nothing
+// else should be using, from two instances at different buffer sizes and reads the device's own buffer
+// size back from CoreAudio after each step.
+static AudioObjectID device_named(const char * name) {
+    AudioObjectPropertyAddress all = { kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal,
+                                       kAudioObjectPropertyElementMain };
+    UInt32                     size = 0;
+
+    AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &all, 0, nullptr, &size);
+    std::vector<AudioObjectID> ids(size / sizeof(AudioObjectID));
+    AudioObjectGetPropertyData(kAudioObjectSystemObject, &all, 0, nullptr, &size, ids.data());
+
+    for (AudioObjectID id : ids) {
+        CFStringRef                cf    = nullptr;
+        UInt32                     len   = sizeof(cf);
+        AudioObjectPropertyAddress named = { kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
+                                             kAudioObjectPropertyElementMain };
+        char                       text[256] = { 0 };
+
+        if ((AudioObjectGetPropertyData(id, &named, 0, nullptr, &len, &cf) == noErr) && (cf != nullptr)) {
+            CFStringGetCString(cf, text, sizeof(text), kCFStringEncodingUTF8);
+            CFRelease(cf);
+        }
+
+        AudioObjectPropertyAddress streams = { kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput,
+                                               kAudioObjectPropertyElementMain };
+        UInt32                     inputs  = 0;
+
+        AudioObjectGetPropertyDataSize(id, &streams, 0, nullptr, &inputs);
+
+        // the capture side: a dock or interface can register an output-only device under the same name
+        if ((strstr(text, name) != nullptr) && (inputs > 0)) {
+            return id;
+        }
+    }
+    return 0;
+}
+
+static uint32_t buffer_of(AudioObjectID id) {
+    AudioObjectPropertyAddress at     = { kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal,
+                                          kAudioObjectPropertyElementMain };
+    UInt32                     frames = 0;
+    UInt32                     size   = sizeof(frames);
+
+    AudioObjectGetPropertyData(id, &at, 0, nullptr, &size, &frames);
+    return frames;
+}
+
+// Find the normalised value whose text is exactly (or contains) what is wanted.
+static bool param_value_for(IEditController * ctrl, const char * title, const char * text, bool prefix,
+                            ParamID * idOut, ParamValue * out) {
+    for (int32 i = 0; i < ctrl->getParameterCount(); i++) {
+        ParameterInfo info;
+
+        if ((ctrl->getParameterInfo(i, info) != kResultOk) || (to_ascii(info.title) != title)) {
+            continue;
+        }
+
+        for (int32 slot = 0; slot <= info.stepCount; slot++) {
+            String128  name;
+            ParamValue norm = (info.stepCount > 0) ? ((ParamValue)slot / (ParamValue)info.stepCount) : 0.0;
+
+            ctrl->getParamStringByValue(info.id, norm, name);
+            std::string got = to_ascii(name);
+
+            if (prefix ? (got == text) : (got.find(text) != std::string::npos)) {
+                *idOut = info.id;
+                *out   = norm;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Two processors, each processed every block as a host would. A change list for either may be given.
+static void run_pair(IAudioProcessor * a, IAudioProcessor * b, int blocks, IParameterChanges * forA,
+                     IParameterChanges * forB) {
+    float   l[128];
+    float   r[128];
+    float * ch[2] = { l, r };
+
+    for (int block = 0; block < blocks; block++) {
+        IAudioProcessor *   who[2]     = { a, b };
+        IParameterChanges * changes[2] = { forA, forB };
+
+        for (int k = 0; k < 2; k++) {
+            if (who[k] == nullptr) {
+                continue;
+            }
+            ProcessData     data;
+            AudioBusBuffers bus;
+
+            memset(&data, 0, sizeof(data));
+            memset(&bus, 0, sizeof(bus));
+            bus.numChannels         = 2;
+            bus.channelBuffers32    = ch;
+            data.numSamples         = 128;
+            data.numOutputs         = 1;
+            data.outputs            = &bus;
+            data.symbolicSampleSize = kSample32;
+            data.processMode        = kRealtime;
+            data.inputParameterChanges = (block == 0) ? changes[k] : nullptr;
+            who[k]->process(data);
+        }
+        pace_to_deadline(AudioConvertNanosToHostTime((uint64_t)((128.0 / 48000.0) * 1.0e9)));
+    }
+}
+
+class TwoChanges : public IParameterChanges {
+public:
+    TwoChanges(ParamID a, ParamValue va, ParamID b, ParamValue vb) : first(a, va), second(b, vb) {}
+    tresult PLUGIN_API queryInterface(const TUID, void ** obj) override { *obj = nullptr; return kNoInterface; }
+    uint32 PLUGIN_API addRef() override { return 1; }
+    uint32 PLUGIN_API release() override { return 1; }
+    int32 PLUGIN_API getParameterCount() override { return 2; }
+    IParamValueQueue * PLUGIN_API getParameterData(int32 index) override {
+        return (index == 0) ? first.getParameterData(0) : second.getParameterData(0);
+    }
+    IParamValueQueue * PLUGIN_API addParameterData(const ParamID &, int32 &) override { return nullptr; }
+private:
+    OneChange first;
+    OneChange second;
+};
+
+static void shared_device_test(IPluginFactory * factory, const TUID processorCid, IEditController * ctrl,
+                               FUnknown * hostApp, const char * deviceName) {
+    printf("\ntwo effects on one device: '%s'\n", deviceName);
+
+    AudioObjectID dev = device_named(deviceName);
+
+    check("the device exists", dev != 0);
+
+    if (dev == 0) {
+        return;
+    }
+    uint32_t original = buffer_of(dev);
+    const char * sizeA = (original == 64) ? "128" : "64";
+    uint32_t     framesA = (uint32_t)atoi(sizeA);
+
+    printf("    device buffer before: %u; instance A asks %s, then instance B asks 16\n", original, sizeA);
+
+    ParamID    deviceId = 0, framesId = 0;
+    ParamValue deviceValue = 0.0, valueA = 0.0, value16 = 0.0;
+    bool       ok = param_value_for(ctrl, "Capture Device", deviceName, false, &deviceId, &deviceValue)
+                    && param_value_for(ctrl, "Device Buffer", sizeA, true, &framesId, &valueA)
+                    && param_value_for(ctrl, "Device Buffer", "16", true, &framesId, &value16);
+
+    check("found the device and both buffer sizes among the parameter values", ok);
+
+    if (!ok) {
+        return;
+    }
+    IComponent * compA = nullptr;
+    IComponent * compB = nullptr;
+
+    factory->createInstance(processorCid, IComponent::iid, (void **)&compA);
+    factory->createInstance(processorCid, IComponent::iid, (void **)&compB);
+
+    if ((compA == nullptr) || (compB == nullptr)) {
+        check("two processors instantiate", false);
+        return;
+    }
+    IAudioProcessor * a = nullptr;
+    IAudioProcessor * b = nullptr;
+
+    compA->initialize(hostApp);
+    compB->initialize(hostApp);
+    compA->queryInterface(IAudioProcessor::iid, (void **)&a);
+    compB->queryInterface(IAudioProcessor::iid, (void **)&b);
+
+    ProcessSetup setup;
+
+    memset(&setup, 0, sizeof(setup));
+    setup.processMode        = kRealtime;
+    setup.symbolicSampleSize = kSample32;
+    setup.maxSamplesPerBlock = 128;
+    setup.sampleRate         = 48000.0;
+    a->setupProcessing(setup);
+    b->setupProcessing(setup);
+    compA->setActive(true);
+    compB->setActive(true);
+
+    TwoChanges pickA(deviceId, deviceValue, framesId, valueA);
+    TwoChanges pickB(deviceId, deviceValue, framesId, value16);
+
+    run_pair(a, nullptr, 1100, &pickA, nullptr);         // ~3 s: the settle, then the open
+    printf("    A alone: device at %u\n", buffer_of(dev));
+    check("A alone sets its size", buffer_of(dev) == framesA);
+
+    run_pair(a, b, 1100, nullptr, &pickB);
+    printf("    B joins asking 16: device at %u\n", buffer_of(dev));
+    check("B, another GenBridge, may change the shared device (16)", buffer_of(dev) == 16);
+
+    run_pair(a, b, 1100, nullptr, nullptr);
+    printf("    3 s later: device at %u\n", buffer_of(dev));
+    check("A follows rather than setting its own size back", buffer_of(dev) == 16);
+
+    compB->setActive(false);
+    run_pair(a, nullptr, 400, nullptr, nullptr);
+    printf("    B closes: device at %u\n", buffer_of(dev));
+    check("closing B leaves A's device alone - no restore while A holds it", buffer_of(dev) == 16);
+
+    compA->setActive(false);
+    usleep(300000);
+    printf("    A closes: device at %u\n", buffer_of(dev));
+    check("the last one out hands back the original size", buffer_of(dev) == original);
+
+    compA->terminate();
+    compB->terminate();
+    compA->release();
+    compB->release();
+}
+
 static void midi_out_test(IPluginFactory * factory, IPluginFactory2 * factory2, FUnknown * hostApp) {
     printf("\nMIDI out, with no hardware: host note -> plug-in -> virtual destination\n");
 
@@ -963,6 +1178,7 @@ int main(int argc, char ** argv) {
         printf("  --buffer N        device buffer to impose, by the label's leading text (e.g. 64)\n");
         printf("  --channel N       the plug-in's MIDI Channel, 1-16 (default Source)\n");
         printf("  --rate HZ         the device rate the plug-in asks for: 44100, 48000, 88200 or 96000\n");
+        printf("  --shared NAME     ONLY two effects sharing the named device's buffer size, then exit\n");
         return 2;
     }
 
@@ -971,9 +1187,12 @@ int main(int argc, char ** argv) {
     const char * playMidi   = nullptr;
     int          measureRuns = 1;
     const char * playBuffer = nullptr;
+    const char * sharedName = nullptr;
 
     for (int i = 2; i < argc; i++) {
-        if ((strcmp(argv[i], "--block") == 0) && ((i + 1) < argc)) {
+        if ((strcmp(argv[i], "--shared") == 0) && ((i + 1) < argc)) {
+            sharedName = argv[i + 1];
+        } else if ((strcmp(argv[i], "--block") == 0) && ((i + 1) < argc)) {
             maxBlock = atoi(argv[i + 1]);
         } else if ((strcmp(argv[i], "--play") == 0) && ((i + 2) < argc)) {
             playDevice = argv[i + 1];
@@ -1130,6 +1349,14 @@ int main(int argc, char ** argv) {
                        to_ascii(info.title).c_str(), info.stepCount);
             }
         }
+    }
+
+    // notes §49 - --shared runs only the shared-device check: the rest would open other devices
+    if ((sharedName != nullptr) && (controller != nullptr)) {
+        shared_device_test(factory, processorCid, controller, &hostApp, sharedName);
+        printf("\n%s (%d failure%s)\n", (gFailures == 0) ? "all checks passed" : "CHECKS FAILED",
+               gFailures, (gFailures == 1) ? "" : "s");
+        return (gFailures == 0) ? 0 : 1;
     }
 
     // ---- state ----
@@ -2425,6 +2652,58 @@ int main(int argc, char ** argv) {
                 printf("    moved %u samples across the reopen\n", moved);
 
                 check("a reopen keeps the tuned setpoint", moved < 128);
+
+                // params notes §5 - Extra Latency, on the effect: 300 ms more, told to the host
+                ParamID extraId    = 0;
+                bool    foundExtra = false;
+
+                for (int32 e = 0; e < controller->getParameterCount(); e++) {
+                    ParameterInfo pi;
+
+                    if ((controller->getParameterInfo(e, pi) == kResultOk) && (to_ascii(pi.title) == "Extra Latency")) {
+                        extraId    = pi.id;
+                        foundExtra = true;
+                        break;
+                    }
+                }
+                check("the effect exposes an Extra Latency parameter", foundExtra);
+
+                if (foundExtra) {
+                    uint32      plain     = processor->getLatencySamples();
+                    int         restarts  = handler.restarts;
+                    OneChange   extra(extraId, 0.3);    // 300 of 1000 ms
+                    ProcessData run;
+                    float       l[128]    = { 0.0f };
+                    float       r[128]    = { 0.0f };
+                    float *     ch[2]     = { l, r };
+                    AudioBusBuffers bus;
+
+                    memset(&run, 0, sizeof(run));
+                    memset(&bus, 0, sizeof(bus));
+                    bus.numChannels           = 2;
+                    bus.channelBuffers32      = ch;
+                    run.numSamples            = 128;
+                    run.numOutputs            = 1;
+                    run.outputs               = &bus;
+                    run.symbolicSampleSize    = kSample32;
+                    run.processMode           = kRealtime;
+                    run.inputParameterChanges = &extra;
+                    processor->process(run);
+                    wait_ms(800);            // the offset's settle, then the worker tells the host
+
+                    uint32 withExtra = processor->getLatencySamples();
+                    int    added     = (int)withExtra - (int)plain;
+
+                    printf("    extra latency 300 ms: %u -> %u samples (+%.1f ms)\n", plain, withExtra, added / 48.0);
+                    check("Extra Latency adds its milliseconds to the reported latency",
+                          (added > (14400 - 128)) && (added < (14400 + 128)));
+                    check("and the host is told", handler.restarts > restarts);
+
+                    MemStream saved;
+
+                    component->getState(&saved);
+                    check("Extra Latency is saved with the state", saved.buf.find("extra=300.0") != std::string::npos);
+                }
                 break;
             }
         }

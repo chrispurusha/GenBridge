@@ -28,6 +28,7 @@ extern "C" {
 #include <stdbool.h>
 
 #include "device.h"
+#include "gbAlign.h"
 #include "gbParams.h"
 
 // The editor's contents, drawn through SynthLib's renderer - the same render_rectangle(),
@@ -54,6 +55,9 @@ typedef enum {
     eGbEditMidiChannel,
     eGbEditTestNote,
     eGbEditSource,        // an audio device, or the host's own input - the External Instrument mode
+    eGbEditRole,          // the effect: capture a device, or align a recording (params notes §6)
+    eGbEditExtraLatency,
+    eGbEditRealign,       // a button, not a parameter
 } tGbEdit;
 
 typedef struct {
@@ -90,6 +94,16 @@ bool gb_draw_menu_active(void);
 void gb_draw_set_values(double device, double rate, double frames, double trim,
                         double mode, double firstChannel, double midiDest, double offset,
                         double midiChannel, double testNote, double source);
+
+// The Extra Latency row and the Align role's report - gbAlign notes §1.
+typedef struct {
+    double         extraLatency;    // normalised
+    bool           aligning;        // the effect is in the Align role
+    bool           autoSet;         // this instance's Extra Latency was set by an aligning one
+    tGbAlignStatus status;          // the Align role's findings
+} tGbDrawAlign;
+
+void gb_draw_set_align(const tGbDrawAlign * align);
 
 #ifdef __cplusplus
 }

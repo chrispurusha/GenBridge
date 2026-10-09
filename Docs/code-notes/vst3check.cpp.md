@@ -514,3 +514,11 @@ this rig is several hundred samples. The reported figure now follows a live
 measurement of the pipeline rather than a constant derived from the setpoint, so
 it legitimately differs by a few samples across a reopen; demanding equality
 would be testing the noise floor of a measurement, not the behaviour.
+
+## 49. `--shared NAME` (2026-10-09)
+
+TWO EFFECTS ON ONE DEVICE, for gbBridge notes §75. Instance A opens the named device at 64 frames (128 if
+it already sits at 64), instance B joins asking 16, and the device's own buffer size is read back from
+CoreAudio after each step: B may change it, A follows instead of setting its own back, closing B leaves
+it alone while A holds it, and closing A hands back what the device had before. Runs on its own and
+exits, because the rest of vst3check opens other devices. Point it at a device nothing else is using.

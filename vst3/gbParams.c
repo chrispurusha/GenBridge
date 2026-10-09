@@ -35,7 +35,7 @@ const int    gGbFrameCount = (int)(sizeof(gGbFrames) / sizeof(gGbFrames[0]));
 int32_t gb_param_count(bool instrument) {
     // The pass-throughs exist only where there is a MIDI destination to pass them to.
     return instrument ? (int32_t)(kParamCount + GB_CC_COUNT)
-                      : (int32_t)(kParamCount - GB_PARAMS_INSTRUMENT_ONLY);
+                      : (int32_t)(kParamCount - GB_PARAMS_INSTRUMENT_ONLY);   // up to and including the role
 }
 
 // The names are COPIED IN rather than pointed at, so a filled-in tGbParamInfo owns everything it
@@ -87,7 +87,13 @@ bool gb_param_info(int32_t index, bool instrument, tGbParamInfo * out) {
     // notes §1
     out->automatable = true;
 
-    switch (index) {
+    // notes §5, §6 - a registration index, not an id: the extra latency and the role sit between the
+    // shared and the instrument-only entries, their ids after them all
+    int32_t which = (index == GB_EXTRA_LATENCY_INDEX) ? (int32_t)kParamExtraLatency
+                    : (index == GB_ROLE_INDEX) ? (int32_t)kParamRole
+                    : ((index > GB_ROLE_INDEX) ? (index - 2) : index);
+
+    switch (which) {
         case kParamDevice:
             out->id = kParamDevice;
             name_it(out, "Capture Device", "Device", NULL);
@@ -132,6 +138,19 @@ bool gb_param_info(int32_t index, bool instrument, tGbParamInfo * out) {
             out->list      = true;
             return true;
 
+        case kParamExtraLatency:
+            out->id = kParamExtraLatency;
+            name_it(out, "Extra Latency", "Extra", "ms");
+            return true;
+
+        case kParamRole:
+            out->id = kParamRole;
+            name_it(out, "Role", "Role", NULL);
+            out->stepCount   = 1;
+            out->list        = true;
+            out->automatable = !instrument;    // the instrument always captures
+            return true;
+
         default:
             break;
     }
@@ -142,7 +161,7 @@ bool gb_param_info(int32_t index, bool instrument, tGbParamInfo * out) {
         return false;
     }
 
-    switch (index) {
+    switch (which) {
         case kParamMidiDest:
             out->id = kParamMidiDest;
             name_it(out, "MIDI Destination", "MIDI", NULL);
@@ -254,6 +273,14 @@ bool gb_param_text(uint32_t id, double normalized, char * out, unsigned long len
         case kParamOffsetMs:
             snprintf(out, len, "%+.1f",
                      GB_OFFSET_MIN_MS + (normalized * (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS)));
+            return true;
+
+        case kParamExtraLatency:
+            snprintf(out, len, "%.0f", normalized * GB_EXTRA_LATENCY_MAX_MS);
+            return true;
+
+        case kParamRole:
+            snprintf(out, len, "%s", (normalized < 0.5) ? "Capture" : "Align recording");
             return true;
 
         case kParamTestNote: {

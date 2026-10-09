@@ -79,6 +79,7 @@ static void gb_device_list_changed(void * user) {
     tGbBridge * self = (tGbBridge *)user;
 
     gb_device_list_invalidate();
+    atomic_store(&self->deviceListChanged, true);
     gb_request_device(self);
 }
 
@@ -125,6 +126,7 @@ static uint32_t gb_snapshot_latency(tGbBridge * self) {
     if (self->instrument) {
         total += (atomic_load(&self->offsetMs) / 1000.0) * atomic_load(&self->snapHostRate);
     }
+    total += (atomic_load(&self->extraLatencyMs) / 1000.0) * atomic_load(&self->snapHostRate);
 
     return (total > 0.0) ? (uint32_t)total : 0;
 }
@@ -185,6 +187,7 @@ uint32_t gb_report_latency(tGbBridge * self) {
     if (self->instrument) {
         total += (atomic_load(&self->offsetMs) / 1000.0) * self->hostRate;
     }
+    total += (atomic_load(&self->extraLatencyMs) / 1000.0) * self->hostRate;
 
     return (total > 0.0) ? (uint32_t)total : 0;
 }
@@ -740,7 +743,36 @@ static void gb_reconfigure_serialised(tGbBridge * self) {
         return;
     }
 
+    // params notes §6 - an aligning instance captures nothing, so it holds no device either: one it
+    // kept open would share the device with the instance it is aligning and pin its buffer size
+    if (atomic_load(&self->role) == GB_ROLE_ALIGN) {
+        pthread_mutex_lock(&self->configLock);
+        gb_close_capture_locked(self);
+        pthread_mutex_unlock(&self->configLock);
+        gb_publish_waiting(self, false, NULL);
+        synthlib_log_line("role: ALIGN - no device opened (slot %d kept for a return to Capture)", index);
+        return;
+    }
+
     synthlib_log_line("reconfigure: slot %d, saved uid '%s'", index, self->deviceSelector);
+
+    // notes §74 - the list changed under us, which is not a choice: follow the device, not its slot
+    if (atomic_exchange(&self->deviceListChanged, false) && (self->deviceSelector[0] != '\0')
+        && (index == self->appliedDevice) && !atomic_load(&self->savedDevicePending)) {
+        int slot = gb_slot_for_uid(self->deviceSelector);
+
+        if (slot < 0) {
+            atomic_store(&self->savedDevicePending, true);
+            synthlib_log_line("device list changed: '%s' is gone - waiting for it rather than opening slot %d",
+                              self->deviceSelector, index);
+        } else if (slot != index) {
+            synthlib_log_line("device list changed: '%s' moved from slot %d to %d - following it",
+                              self->deviceSelector, index, slot);
+            atomic_store(&self->wantedDevice, slot);
+            index = slot;
+            gb_send_message(self, "gbDeviceSlot", slot);
+        }
+    }
 
     // notes §28
     if (atomic_load(&self->savedDevicePending) && !(self->deviceSelector[0] == '\0')) {
@@ -1091,6 +1123,117 @@ static void gb_revert_retune(tGbBridge * self) {
     }
 }
 
+// notes §75 - A DEVICE'S RATE AND BUFFER SIZE ARE THE DEVICE'S, shared by every GenBridge in this host
+#define GB_SHARED_DEVICES    (16)
+#define GB_SHARED_HOLDERS    (16)
+
+typedef struct {
+    AudioObjectID id;                           // 0 = a free entry
+    bool          foreign;                      // running for something other than GenBridge at first open
+    uint32_t      originalFrames;               // what to hand back when the last of us closes; 0 = untouched
+    double        originalRate;
+    tGbBridge *   holders[GB_SHARED_HOLDERS];
+    int           holderCount;
+} tGbSharedDevice;
+
+static tGbSharedDevice gShared[GB_SHARED_DEVICES];
+static pthread_mutex_t gSharedLock = PTHREAD_MUTEX_INITIALIZER;
+
+// gSharedLock held.
+static tGbSharedDevice * gb_shared_find(AudioObjectID id, bool add) {
+    tGbSharedDevice * free = NULL;
+
+    for (int i = 0; i < GB_SHARED_DEVICES; i++) {
+        if (gShared[i].id == id) {
+            return &gShared[i];
+        }
+
+        if ((free == NULL) && (gShared[i].id == 0)) {
+            free = &gShared[i];
+        }
+    }
+
+    if (!add || (free == NULL)) {
+        return NULL;
+    }
+    memset(free, 0, sizeof(*free));
+    free->id = id;
+    return free;
+}
+
+// Tell every other GenBridge on this device that its rate or buffer moved, so each reopens on it and its
+// panel shows it. gSharedLock held.
+static void gb_shared_tell_others(tGbSharedDevice * shared, tGbBridge * self, uint32_t frames, double rate) {
+    for (int i = 0; i < shared->holderCount; i++) {
+        tGbBridge * other = shared->holders[i];
+
+        if (other == self) {
+            continue;
+        }
+
+        if (frames > 0) {
+            atomic_store(&other->wantedFrames, (int)frames);
+            atomic_store(&other->shownFrames, (int)frames);
+            gb_send_message(other, "gbFrames", (int)frames);
+        }
+
+        if (rate > 0.0) {
+            atomic_store(&other->wantedRate, rate);
+            gb_send_message(other, "gbRate", (int)rate);
+        }
+        gb_request_device(other);
+    }
+
+    if (shared->holderCount > 1) {
+        synthlib_log_line("shared device: told %d other GenBridge(s) it is now %u frames%s", shared->holderCount - 1,
+                          frames, (rate > 0.0) ? " and a new rate" : "");
+    }
+}
+
+// The close half: the device's settings go back only when the last GenBridge holding it lets go.
+static void gb_shared_release(tGbBridge * self) {
+    if (self->sharedDevice == 0) {
+        return;
+    }
+    pthread_mutex_lock(&gSharedLock);
+
+    tGbSharedDevice * shared = gb_shared_find(self->sharedDevice, false);
+
+    if (shared != NULL) {
+        for (int i = 0; i < shared->holderCount; i++) {
+            if (shared->holders[i] == self) {
+                shared->holders[i] = shared->holders[--shared->holderCount];
+                break;
+            }
+        }
+
+        if (shared->holderCount > 0) {
+            synthlib_log_line("shared device: %d other GenBridge(s) still use it - its settings stay",
+                              shared->holderCount);
+        } else if (shared->id == self->keepSettingsFor) {
+            // notes §46 - about to reopen it; handing the old size back would only be set straight back
+            synthlib_log_line("reopening the same device - leaving its buffer alone rather than restoring "
+                              "%u frames and setting it straight back", shared->originalFrames);
+        } else {
+            if (shared->originalFrames > 0) {
+                device_set_buffer_frames(shared->id, shared->originalFrames);
+            }
+
+            if (shared->originalRate > 0.0) {
+                device_set_sample_rate(shared->id, shared->originalRate);
+            }
+
+            if ((shared->originalFrames > 0) || (shared->originalRate > 0.0)) {
+                synthlib_log_line("restored device settings: %u frames, %.0f Hz", shared->originalFrames,
+                                  shared->originalRate);
+            }
+            memset(shared, 0, sizeof(*shared));
+        }
+    }
+    pthread_mutex_unlock(&gSharedLock);
+    self->sharedDevice = 0;
+}
+
 static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
     tDeviceSettings * settings = gb_ensure_settings(self, info->uid);
 
@@ -1172,7 +1315,27 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
 
     self->gPhaseIdle = gb_now_ms();
 
-    bool deviceIsShared = device_is_running_somewhere(info->id);
+    // notes §75 - only something OUTSIDE GenBridge stops us setting the device; another GenBridge shares it
+    pthread_mutex_lock(&gSharedLock);
+
+    tGbSharedDevice * shared = gb_shared_find(info->id, true);
+    bool              deviceIsShared;
+    uint32_t          setFrames = 0;
+    double            setRate   = 0.0;
+
+    if (shared != NULL) {
+        if (shared->holderCount == 0) {
+            shared->foreign = device_is_running_somewhere(info->id);
+        }
+
+        if (shared->holderCount < GB_SHARED_HOLDERS) {
+            shared->holders[shared->holderCount++] = self;
+            self->sharedDevice                     = info->id;
+        }
+        deviceIsShared = shared->foreign;
+    } else {
+        deviceIsShared = device_is_running_somewhere(info->id);     // the record is full: the old rule
+    }
 
     if (deviceIsShared && ((settings->rate > 0.0) || (settings->frames > 0))) {
         synthlib_log_line("device '%s' is already running for another client - leaving its rate and"
@@ -1194,14 +1357,18 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
     // Rate before buffer size: changing the nominal rate can reset the buffer size on some
     // devices, so doing it the other way round silently loses the buffer setting.
     if (!deviceIsShared && (settings->rate > 0.0)) {
-        // WHAT IT WAS, so gb_close_capture_locked(self) can hand the device back as it found it.
-        // Recorded only when we are actually about to change it, and only for the device we
-        // changed - restoring one we never touched would be its own kind of interference.
-        if (device_sample_rate(info->id) != settings->rate) {
-            self->restoreDevice = info->id;
-            self->restoreRate   = device_sample_rate(info->id);
+        // WHAT IT WAS, so the last GenBridge to close it can hand the device back as it was found.
+        // Recorded only when we are actually about to change it - and only the first time, since a
+        // second GenBridge would otherwise record the first one's setting as the original.
+        double was = device_sample_rate(info->id);
+
+        if (was != settings->rate) {
+            if ((shared != NULL) && (shared->originalRate <= 0.0)) {
+                shared->originalRate = was;
+            }
+            device_set_sample_rate_and_wait(info->id, settings->rate);
+            setRate = settings->rate;
         }
-        device_set_sample_rate_and_wait(info->id, settings->rate);
     }
 
     if (!deviceIsShared && (settings->frames > 0)) {
@@ -1222,17 +1389,21 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
             }
         }
 
-        if (device_buffer_frames(info->id) != wanted) {
-            self->restoreDevice = info->id;
-            self->restoreFrames = device_buffer_frames(info->id);
-        }
+        uint32_t was = device_buffer_frames(info->id);
+
         // notes §35
-        if (!device_set_buffer_frames(info->id, wanted) && (self->restoreDevice == info->id)) {
-            // Nothing was changed, so there is nothing to hand back on close.
-            self->restoreDevice = 0;
-            self->restoreFrames = 0;
+        if ((was != wanted) && device_set_buffer_frames(info->id, wanted)) {
+            if ((shared != NULL) && (shared->originalFrames == 0)) {
+                shared->originalFrames = was;
+            }
+            setFrames = wanted;
         }
     }
+
+    if ((shared != NULL) && ((setFrames > 0) || (setRate > 0.0))) {
+        gb_shared_tell_others(shared, self, setFrames, setRate);
+    }
+    pthread_mutex_unlock(&gSharedLock);
 
     double deviceRate = device_sample_rate(info->id);
 
@@ -1444,6 +1615,7 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
     return true;
 
 failed_unlocked:
+    gb_shared_release(self);                 // notes §75 - a failed open holds nothing
     pthread_mutex_lock(&self->configLock);   // the caller unlocks it
     self->openUnlockedMs = gb_now_ms() - unlockedAt;
     return false;
@@ -1474,24 +1646,8 @@ static void gb_close_capture_locked(tGbBridge * self) {
     self->deviceLatency  = 0;
     gb_publish_config_snapshot(self);
 
-    // notes §46
-    if ((self->restoreDevice != 0) && (self->restoreDevice == self->keepSettingsFor)) {
-        synthlib_log_line("reopening the same device - leaving its buffer alone rather than restoring "
-                 "%u frames and setting it straight back", self->restoreFrames);
-    } else if (self->restoreDevice != 0) {
-        if (self->restoreFrames > 0) {
-            device_set_buffer_frames(self->restoreDevice, self->restoreFrames);
-        }
-
-        if (self->restoreRate > 0.0) {
-            device_set_sample_rate(self->restoreDevice, self->restoreRate);
-        }
-        synthlib_log_line("restored device settings: %u frames, %.0f Hz", self->restoreFrames, self->restoreRate);
-
-        self->restoreDevice = 0;
-        self->restoreFrames = 0;
-        self->restoreRate   = 0.0;
-    }
+    // notes §46, §75
+    gb_shared_release(self);
 
     // notes §47
     self->observedFrames = 0;
@@ -1733,6 +1889,19 @@ void gb_bridge_parameter(tGbBridge * self, uint32_t id, double value, int32_t sa
         atomic_store(&self->lastOffsetChangeMs, gb_now_ms());
         atomic_store(&self->offsetDirty, true);
         gb_wake_worker(self);
+    } else if (id == kParamExtraLatency) {
+        atomic_store(&self->extraLatencyMs, value * GB_EXTRA_LATENCY_MAX_MS);
+
+        // as the offset: settle, then tell the host once (notes §59)
+        atomic_store(&self->lastOffsetChangeMs, gb_now_ms());
+        atomic_store(&self->offsetDirty, true);
+        gb_wake_worker(self);
+    } else if (id == kParamRole) {
+        int wanted = (value < 0.5) ? GB_ROLE_CAPTURE : GB_ROLE_ALIGN;
+
+        if (wanted != atomic_exchange(&self->role, wanted)) {
+            gb_request_device(self);       // params notes §6 - aligning holds no device
+        }
     } else if (id == kParamSource) {
         int wanted = (value < 0.5) ? GB_SOURCE_DEVICE : GB_SOURCE_HOST;
 

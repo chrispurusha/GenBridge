@@ -6,7 +6,7 @@ Built-but-unchecked work goes in to-test.md.
 
 Shared with the sibling projects
 
-- Using the app to monitor guitar on a Line6 USB audio channel is working well. However, then using the fx plugin in Ableton can suffer problems with latency when recording. I have a busy project, using plugins with lots of latency. I have to change the track delay to -300ms to re-align. Any way to deal with that via our plugin? WIld idea - maybe we could time-stamp samples on the app and some pick up a stream from the app and adjust automatically?
+- Align role BUILT 2026-10-09 (to-test): Extra Latency confirmed in Live by CT, now set automatically by an aligning instance on the recording track (gbAlign notes). Next: the instrument panel has no Extra row yet (generic parameters only)
 - Need to be able to host multiple instances of this plugin on a DAW. Can we make sure we're OK on that? I've had the Kronos stop sending audio 'til I rebooted it, which happened after I added a track for TB03.
 - I'm not sure we're defaulting to stereo audio connection? We should be, if not.
 - Being able to select Host input for the instrument plugin, possibly makes no sense in hindsight? Can we see a use for that? Might make more sense for the effects plugin, even there, there might be no point.
@@ -24,6 +24,7 @@ Features
 - Option to filter out MIDI messages coming FROM the device, in case it is not purely in local-off mode - a synth whose own keyboard or sequencer still sends MIDI can echo notes back into the DAW (doubled notes, or a loop through GenBridge's MIDI out); filter by message type (notes, CCs, clock, transport) per device
 
 Bugs
+
 
 - A fresh panel now reads Buffer 32 samples, the default GenBridge has always registered with hosts; the old gbEditor.mm panel hard-coded 64 and disagreed with it (2026-09-11). Decide which the default should be and make the registered value say it
 - The device buffer size is stored per PROJECT, but it is arguably a property of the INTERFACE - the same value is wanted in every project on the machine, and a setting chosen but not saved is silently lost (findings 2026-09-08 (17), which cost an evening). Consider a machine-wide preference keyed by device UID, with the project state overriding it where present

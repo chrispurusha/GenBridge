@@ -83,3 +83,15 @@ panel shows, which on VST3 is the controller's copy and moves the moment an edit
 WHICH VARIANT comes from the panel table rather than the instance, so it is right even for a view
 with no instance behind it (see gb_create_view()): the hit test only offers Measure and Offset on
 the instrument.
+
+## 9. the Align role in the instance
+
+Every instance registers as a gbAlign sender at create and writes its output after each render; an
+effect also registers a receiver, which only does anything in the Align role (gbAlign notes §1). In
+that role process() copies the input to the output and skips the bridge, latencySamples() answers 0,
+and a change of role tells the host to read the latency again. A receiver correcting a sender calls
+gb_align_apply(), which sets the bridge directly and also tells the host (param_edited), so the
+host's copy - which it re-sends - and the saved project both carry the new figure.
+
+The effect now asks for the transport (wantsTransport), only for the "recording" flag: no correction
+is made mid-take.

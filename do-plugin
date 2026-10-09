@@ -141,6 +141,7 @@ SOURCES=(
     "$HERE/vst3/gbState.c"
     "$HERE/vst3/gbStatus.c"
     "$HERE/vst3/gbMidi.c"
+    "$HERE/vst3/gbAlign.c"
     "$HERE/vst3/gbDraw.c"
     "$HERE/vst3/gbPlugin.c"
 

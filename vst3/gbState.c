@@ -198,6 +198,8 @@ bool gb_parse_state(tGbBridge * self, const char * blob, size_t length) {
 
     // notes §8
     atomic_store(&self->offsetMs, 0.0);
+    atomic_store(&self->extraLatencyMs, 0.0);
+    atomic_store(&self->role, GB_ROLE_CAPTURE);
     atomic_store(&self->captureSource, GB_SOURCE_DEVICE);
     self->offsetUid[0]  = '\0';
     self->offsetDest[0] = '\0';
@@ -232,6 +234,15 @@ bool gb_parse_state(tGbBridge * self, const char * blob, size_t length) {
             if ((frames > 0) && (frames <= (GB_MAX_BLOCK_FRAMES))) {
                 self->observedMaxFrames = frames;
             }
+        } else if (line_key(&line, "extra=", &value, &valueLen)) {
+            copy_field(scratch, sizeof(scratch), value, valueLen);
+
+            double ms = atof(scratch);
+
+            atomic_store(&self->extraLatencyMs, (ms < 0.0) ? 0.0 : ((ms > GB_EXTRA_LATENCY_MAX_MS) ? GB_EXTRA_LATENCY_MAX_MS : ms));
+        } else if (line_key(&line, "role=", &value, &valueLen)) {
+            copy_field(scratch, sizeof(scratch), value, valueLen);
+            atomic_store(&self->role, (strcmp(scratch, "align") == 0) ? GB_ROLE_ALIGN : GB_ROLE_CAPTURE);
         } else if (line_key(&line, "source=", &value, &valueLen)) {
             copy_field(scratch, sizeof(scratch), value, valueLen);
             atomic_store(&self->captureSource,
@@ -447,6 +458,11 @@ const char * gb_bridge_state(tGbBridge * self, size_t * length) {
 
     text_add(self, "GENBRIDGE3\n");
     text_add(self, "active=%s\n", self->deviceSelector);
+    text_add(self, "extra=%.1f\n", atomic_load(&self->extraLatencyMs));    // params notes §5; a new key
+
+    if (atomic_load(&self->role) == GB_ROLE_ALIGN) {
+        text_add(self, "role=align\n");      // params notes §6; absent means capture
+    }
 
     // notes §14
     if (self->observedMaxFrames > 0) {
@@ -583,6 +599,14 @@ void gb_state_parse_active(const char * blob, size_t length, tGbActive * out) {
         } else if (line_key(&line, "source=", &value, &valueLen)) {
             copy_field(scratch, sizeof(scratch), value, valueLen);
             out->hostInput = (strcmp(scratch, "host") == 0);
+        } else if (line_key(&line, "role=", &value, &valueLen)) {
+            copy_field(scratch, sizeof(scratch), value, valueLen);
+            out->role = (strcmp(scratch, "align") == 0) ? GB_ROLE_ALIGN : GB_ROLE_CAPTURE;
+        } else if (line_key(&line, "extra=", &value, &valueLen)) {
+            copy_field(scratch, sizeof(scratch), value, valueLen);
+            out->extraLatencyMs = atof(scratch);
+            out->extraLatencyMs = (out->extraLatencyMs < 0.0) ? 0.0
+                                  : ((out->extraLatencyMs > GB_EXTRA_LATENCY_MAX_MS) ? GB_EXTRA_LATENCY_MAX_MS : out->extraLatencyMs);
         } else if (line_key(&line, "testnote=", &value, &valueLen)) {
             copy_field(scratch, sizeof(scratch), value, valueLen);
             out->testNote = atoi(scratch);

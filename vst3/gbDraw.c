@@ -142,6 +142,12 @@ static double gTestNote  = 60.0 / 127.0;
 static double gMidiChan  = 0.0;
 static double gSource    = 0.0;    // 0 = an audio device, 1 = the host's own input
 
+static tGbDrawAlign gAlign;
+
+void gb_draw_set_align(const tGbDrawAlign * align) {
+    gAlign = *align;
+}
+
 
 // Which processor's figures this panel shows. -1 until the host has connected the two ends, which
 // it may do before or after the editor opens - so the panel simply shows no live figures until it
@@ -169,14 +175,14 @@ typedef enum {
     eRowCount
 } tGbRow;
 
-// Where a row actually sits. On the effect there is no Source row, so everything below it moves up.
+// Where a row actually sits. The first row is the instrument's Source and the effect's Role.
 static int row_of(tGbRow which) {
-    return gInstrument ? (int)which : ((int)which - 1);
+    return (int)which;
 }
 
 static int row_count(void) {
-    // The effect drops three: the source, and the two MIDI rows.
-    return gInstrument ? (int)eRowCount : ((int)eRowCount - 3);
+    // The effect drops the two MIDI rows.
+    return gInstrument ? (int)eRowCount : ((int)eRowCount - 2);
 }
 
 static double row_y(int row) {
@@ -192,7 +198,8 @@ static double trim_y(void)      { return rows_bottom() + 8.0; }
 static double level_y(void)     { return trim_y() + 30.0; }
 static double measure_y(void)   { return level_y() + 40.0; }
 static double offset_y(void)    { return measure_y() + 34.0; }
-static double telemetry_y(void) { return (gInstrument ? offset_y() : level_y()) + 42.0; }
+static double extra_y(void)     { return measure_y(); }    // the effect's Extra Latency or Align row
+static double telemetry_y(void) { return (gInstrument ? offset_y() : extra_y()) + 42.0; }
 
 
 // notes §5
@@ -203,7 +210,8 @@ static bool row_is_menu(int row) {
 
 // notes §6
 static bool row_live(tGbRow which) {
-    if (gSource < 0.5) {
+    // An aligning effect captures nothing, so its device rows go grey as host input's do
+    if (gInstrument ? (gSource < 0.5) : !gAlign.aligning) {
         return true;
     }
 
@@ -309,6 +317,34 @@ static tRectangle offset_arrow(int slot) {
 static tRectangle offset_value_box(void) {
     return (tRectangle){ { LABEL_W + (2.0 * (ARROW_W + OFFSET_GAP)), offset_y() },
                          { OFFSET_VALUE_W, 20.0 } };
+}
+
+// The effect's Extra Latency arrows: the offset's geometry, on its own row.
+static tRectangle extra_arrow(int slot) {
+    tRectangle r = offset_arrow(slot);
+
+    r.coord.y = extra_y();
+    return r;
+}
+
+static tRectangle extra_value_box(void) {
+    tRectangle r = offset_value_box();
+
+    r.coord.y = extra_y();
+    return r;
+}
+
+#define GB_EXTRA_STEP_FINE_MS      (1.0)
+#define GB_EXTRA_STEP_COARSE_MS    (10.0)
+
+#define REALIGN_LABEL     "Re-align"
+
+static tRectangle realign_button(void) {
+    return (tRectangle){ { LABEL_W, extra_y() }, { get_text_width(REALIGN_LABEL, BUTTON_H, eCache), BUTTON_H } };
+}
+
+static tRectangle realign_bounds(void) {
+    return draw_button_bounds(realign_button());
 }
 
 static tRectangle trim_track(void) {
@@ -566,6 +602,128 @@ static void meter(double x, double y, double w, float peak) {
     }
 }
 
+// gbAlign notes §1 - what the Align role found, in words
+static void align_text(char * line1, unsigned long len1, char * line2, unsigned long len2, tRgb * colour) {
+    const tGbAlignStatus * a = &gAlign.status;
+    tGbStatus *            s = gb_status(a->senderSlot);
+    char                   who[96];
+    const tRgb             grey  = { 0.72, 0.72, 0.74 };
+    const tRgb             green = { 0.45, 0.75, 0.50 };
+    const tRgb             amber = { 0.85, 0.60, 0.25 };
+
+    if ((s != NULL) && (s->deviceName[0] != '\0')) {
+        snprintf(who, sizeof(who), "the GenBridge on %s", s->deviceName);
+    } else {
+        snprintf(who, sizeof(who), "%s", "the GenBridge track");
+    }
+    line2[0] = '\0';
+    *colour  = amber;
+
+    switch (a->state) {
+        case eGbAlignListening:
+            snprintf(line1, len1, "%s", "listening - play something on the GenBridge track");
+            *colour = grey;
+            break;
+
+        case eGbAlignNoSender:
+            snprintf(line1, len1, "%s", "no GenBridge is capturing in this set");
+            break;
+
+        case eGbAlignNoAudio:
+            snprintf(line1, len1, "%s", "nothing arriving here while GenBridge plays");
+            snprintf(line2, len2, "%s", "Audio From the GenBridge track, Post FX, and Monitor In");
+            break;
+
+        case eGbAlignUnsure:
+            snprintf(line1, len1, "%s", "cannot match the audio yet");
+            snprintf(line2, len2, "%s", "play something with clear attacks");
+            break;
+
+        case eGbAlignAligned:
+            snprintf(line1, len1, "aligned - %+.1f ms", a->lateMs);
+            snprintf(line2, len2, "%s reports %.0f ms extra", who, a->extraMs);
+            *colour = green;
+            break;
+
+        case eGbAlignAdjusting:
+            snprintf(line1, len1, "%.1f ms late - correcting", a->lateMs);
+            snprintf(line2, len2, "%s now reports %.0f ms extra", who, a->extraMs);
+            *colour = grey;
+            break;
+
+        case eGbAlignHostStuck:
+            snprintf(line1, len1, "still %.1f ms late after the change", a->lateMs);
+            snprintf(line2, len2, "%s", "stop and restart playback so the host re-reads it");
+            break;
+
+        case eGbAlignHeldRecording:
+            snprintf(line1, len1, "%.1f ms late - correcting after this take", a->lateMs);
+            break;
+
+        case eGbAlignTwoSenders:
+            snprintf(line1, len1, "%s", "two GenBridges send the same audio");
+            snprintf(line2, len2, "%s", "point one at another input to align");
+            break;
+
+        case eGbAlignAtLimit:
+            snprintf(line1, len1, "%.1f ms late - beyond what Extra Latency can add", a->lateMs);
+            snprintf(line2, len2, "%s is at %.0f ms", who, a->extraMs);
+            break;
+    }
+}
+
+// The effect's row below the level meters: Extra Latency when capturing, the Align report when aligning.
+static void draw_effect_latency_row(char * buffer, unsigned long len) {
+    if (gAlign.aligning) {
+        char line2[160];
+        tRgb colour;
+
+        label(20.0, extra_y() + 4.0, "Align");
+        draw_button(mainArea, realign_button(), REALIGN_LABEL, (tRgb){ 0.30, 0.42, 0.55 });
+
+        align_text(buffer, len, line2, sizeof(line2), &colour);
+
+        tRectangle bounds = realign_bounds();
+        double     textX  = bounds.coord.x + bounds.size.w + 14.0;
+
+        set_rgb_colour(colour);
+        render_text(mainArea, (tRectangle){ { textX, extra_y() + 5.0 }, { 0.0, 11.0 } }, buffer);
+        set_rgb_colour((tRgb)GB_CAPTION_GREY);
+        render_text(mainArea, (tRectangle){ { textX, extra_y() + 21.0 }, { 0.0, 11.0 } }, line2);
+        return;
+    }
+
+    static const char * const kArrow[4] = { "<<", "<", ">", ">>" };
+
+    label(20.0, extra_y() + 4.0, "Extra");
+
+    for (int slot = 0; slot < 4; slot++) {
+        draw_button(mainArea, extra_arrow(slot), kArrow[slot], (tRgb){ 0.30, 0.30, 0.33 });
+    }
+    tRectangle valueBox = extra_value_box();
+
+    snprintf(buffer, len, "%.0f ms", gAlign.extraLatency * GB_EXTRA_LATENCY_MAX_MS);
+    set_rgb_colour((tRgb){ 0.92, 0.92, 0.94 });
+
+    // eNoCache: a formatted buffer, and the cache is keyed on the pointer
+    double textW = get_text_width(buffer, 11.0, eNoCache);
+
+    render_text(mainArea, (tRectangle){ { valueBox.coord.x + ((valueBox.size.w - textW) / 2.0), extra_y() + 6.0 },
+                                        { 0.0, 11.0 } }, buffer);
+
+    set_rgb_colour((tRgb)GB_CAPTION_GREY);
+
+    if (gAlign.autoSet) {
+        snprintf(buffer, len, "%s", "set by Align on the recording track");
+        set_rgb_colour((tRgb){ 0.45, 0.75, 0.50 });
+    } else if (gAlign.extraLatency > 0.0) {
+        snprintf(buffer, len, "%s", "reported on top of GenBridge's own");
+    } else {
+        snprintf(buffer, len, "%s", "for Live's delay compensation");
+    }
+    render_text(mainArea, (tRectangle){ { 270.0, extra_y() + 6.0 }, { 0.0, 11.0 } }, buffer);
+}
+
 void gb_draw_frame(int pixelWidth, int pixelHeight) {
     tGbStatus * status = gb_status(gStatusSlot);
     char        buffer[192];
@@ -594,7 +752,11 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
     set_rgb_colour((tRgb){ 0.95, 0.95, 0.97 });
     render_text(mainArea, (tRectangle){ { 20.0, 18.0 }, { 0.0, 20.0 } }, "GenBridge");
 
-    if (gSource >= 0.5) {
+    if (!gInstrument && gAlign.aligning) {
+        set_rgb_colour((gAlign.status.state == eGbAlignAligned) ? (tRgb){ 0.45, 0.75, 0.50 }
+                       : (tRgb){ 0.72, 0.72, 0.74 });
+        snprintf(buffer, sizeof(buffer), "%s", "aligning a recording - captures nothing, passes this track through");
+    } else if (gSource >= 0.5) {
         // notes §16
         if (status == NULL) {
             // NOT AN ANSWER, so it does not claim one. Without a status slot the panel knows nothing
@@ -642,6 +804,8 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
     if (gInstrument) {
         stepper_row(eRowSource, "Source",
                     (gSource < 0.5) ? "Audio device" : "Host input (external instrument)");
+    } else {
+        stepper_row(eRowSource, "Role", gAlign.aligning ? "Align a recording" : "Capture a device");
     }
 
     if ((status != NULL) && (atomic_load(&status->waitingForDevice) != 0)) {
@@ -840,6 +1004,10 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
         render_text(mainArea, (tRectangle){ { 270.0, offset_y() + 6.0 }, { 0.0, 11.0 } }, buffer);
     }
 
+    if (!gInstrument) {
+        draw_effect_latency_row(buffer, sizeof(buffer));
+    }
+
     label(20.0, trim_y() + 2.0, "Trim");
 
     tRectangle track = trim_track();
@@ -860,6 +1028,14 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
           (status != NULL) ? atomic_load(&status->peakLeft) : 0.0f);
     meter(LABEL_W, level_y() + 14.0, GB_CANVAS_W - LABEL_W - RIGHT_GUTTER,
           (status != NULL) ? atomic_load(&status->peakRight) : 0.0f);
+
+    // An aligning instance runs no bridge, so its figures would describe nothing
+    if (!gInstrument && gAlign.aligning) {
+        update_context_menu_hover();
+        render_context_menu();
+        render_backend_flush();
+        return;
+    }
 
     // notes §22
     int rate = (status != NULL) ? atomic_load(&status->deviceRate) : 0;
@@ -1046,6 +1222,10 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
                     request->normalized = (double)choice;       // 0 device, 1 host input
                     break;
 
+                case eGbEditRole:
+                    request->normalized = (double)choice;       // 0 capture, 1 align
+                    break;
+
                 default:
                     request->which = eGbEditNone;
                     return false;
@@ -1059,7 +1239,7 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
     // same parameter, so nothing is lost either way - see the note on gMouse above for why both.
     {
         struct { tGbEdit which; tGbRow row; } menus[] = {
-            { eGbEditSource,       eRowSource       },
+            { gInstrument ? eGbEditSource : eGbEditRole, eRowSource },
             { eGbEditDevice,       eRowDevice       },
             { eGbEditRate,         eRowRate         },
             { eGbEditFrames,       eRowFrames       },
@@ -1088,6 +1268,12 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
                     snprintf(gMenuLabels[0], sizeof(gMenuLabels[0]), "%s", "Audio device");
                     snprintf(gMenuLabels[1], sizeof(gMenuLabels[1]), "%s",
                              "Host input (external instrument)");
+                    break;
+
+                case eGbEditRole:
+                    count = 2;
+                    snprintf(gMenuLabels[0], sizeof(gMenuLabels[0]), "%s", "Capture a device");
+                    snprintf(gMenuLabels[1], sizeof(gMenuLabels[1]), "%s", "Align a recording");
                     break;
 
                 case eGbEditDevice:
@@ -1311,6 +1497,31 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
 
             request->which      = eGbEditOffset;
             request->normalized = (ms - GB_OFFSET_MIN_MS) / (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS);
+            return true;
+        }
+    }
+
+    if (!gInstrument && gAlign.aligning && hit(realign_bounds(), x, y)) {
+        request->which      = eGbEditRealign;
+        request->normalized = 1.0;
+        return true;
+    }
+
+    if (!gInstrument && !gAlign.aligning) {
+        for (int slot = 0; slot < 4; slot++) {
+            if (!hit(extra_arrow(slot), x, y)) {
+                continue;
+            }
+
+            static const double kStep[4] = { -GB_EXTRA_STEP_COARSE_MS, -GB_EXTRA_STEP_FINE_MS,
+                                             GB_EXTRA_STEP_FINE_MS, GB_EXTRA_STEP_COARSE_MS };
+
+            double ms = round((gAlign.extraLatency * GB_EXTRA_LATENCY_MAX_MS) + kStep[slot]);
+
+            ms = (ms < 0.0) ? 0.0 : ((ms > GB_EXTRA_LATENCY_MAX_MS) ? GB_EXTRA_LATENCY_MAX_MS : ms);
+
+            request->which      = eGbEditExtraLatency;
+            request->normalized = ms / GB_EXTRA_LATENCY_MAX_MS;
             return true;
         }
     }

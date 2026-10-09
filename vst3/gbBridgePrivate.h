@@ -210,6 +210,8 @@ struct tGbBridge {
     _Atomic int            midiDestination;
     _Atomic bool           offlineRender;
     _Atomic double         offsetMs;
+    _Atomic double         extraLatencyMs;     // params notes §5 - both variants, added to what is reported
+    _Atomic int            role;               // GB_ROLE_* - params notes §6; kept here so the state carries it
     _Atomic int            midiChannel; // 0 = whatever the note arrived on
     _Atomic int            lastNoteChannel; // the channel the host's last note arrived on - gbMeasure notes §20
 
@@ -321,16 +323,14 @@ struct tGbBridge {
     // device change - see GB_DEVICE_SETTLE_MS.
     _Atomic double         lastDeviceRequestMs;
 
-    // What the currently open device's rate and buffer size were before this plug-in changed them,
-    // and which device that was. Zero means "changed nothing, restore nothing". Worker thread only,
-    // written under configLock alongside the open and close they belong to.
-    AudioObjectID          restoreDevice;
-    uint32_t               restoreFrames;
-    double                 restoreRate;
+    // The device this bridge holds in the host-wide record of shared devices (notes §75); 0 = none.
+    // What to hand back on close lives in that record, not here: it is the device's, not ours.
+    AudioObjectID          sharedDevice;
     _Atomic int            resyncs; // how often the ring had to be snapped back; 0 is healthy
     _Atomic bool           workerQuit;
     _Atomic int            wantedDevice;
     _Atomic bool           savedDevicePending; // a project named a device; honour it, not a slot
+    _Atomic bool           deviceListChanged;  // notes §74 - set by the hot-plug watcher
     _Atomic bool           deviceParamSeen; // the host's restored value has been and gone
     char                   savedDeviceName[DEVICE_NAME_LEN];  // for the panel: an absent device has no name
     _Atomic double         wantedRate;
