@@ -10,6 +10,7 @@ Shared with the sibling projects
 - If sample rates are the same, can we synch without drift? Might not be able to, so that's fine.
 - Should be able to set input sample rate unless we're sharing?
 - Host a VST3 or AU plugin like Line6 Helix, for live guitar monitoring.
+- Need more than +6dB trim boost. +12dB?
 - Application needs to build as an XCode project, for debugging.
 - Align role BUILT 2026-10-09 (to-test): Extra Latency confirmed in Live by CT, now set automatically by an aligning instance on the recording track (gbAlign notes). Next: the instrument panel has no Extra row yet (generic parameters only)
 - Need to be able to host multiple instances of this plugin on a DAW. Can we make sure we're OK on that? I've had the Kronos stop sending audio 'til I rebooted it, which happened after I added a track for TB03.
