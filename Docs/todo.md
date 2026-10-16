@@ -6,8 +6,9 @@ Built-but-unchecked work goes in to-test.md.
 
 Shared with the sibling projects
 
+- Bug - application looks like it's not opening if display has been turned off. Should at least display window contents to start off, even with Display disabled.
 - Host a VST3 or AU plugin like Line6 Helix, for live guitar monitoring.
-- Application needs to build as an XCode project, for debugging
+- Application needs to build as an XCode project, for debugging.
 - Align role BUILT 2026-10-09 (to-test): Extra Latency confirmed in Live by CT, now set automatically by an aligning instance on the recording track (gbAlign notes). Next: the instrument panel has no Extra row yet (generic parameters only)
 - Need to be able to host multiple instances of this plugin on a DAW. Can we make sure we're OK on that? I've had the Kronos stop sending audio 'til I rebooted it, which happened after I added a track for TB03.
 - I'm not sure we're defaulting to stereo audio connection? We should be, if not.
