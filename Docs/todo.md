@@ -7,6 +7,8 @@ Built-but-unchecked work goes in to-test.md.
 Shared with the sibling projects
 
 - Bug - application looks like it's not opening if display has been turned off. Should at least display window contents to start off, even with Display disabled.
+- If sample rates are the same, can we synch without drift? Might not be able to, so that's fine.
+- Should be able to set input sample rate unless we're sharing?
 - Host a VST3 or AU plugin like Line6 Helix, for live guitar monitoring.
 - Application needs to build as an XCode project, for debugging.
 - Align role BUILT 2026-10-09 (to-test): Extra Latency confirmed in Live by CT, now set automatically by an aligning instance on the recording track (gbAlign notes). Next: the instrument panel has no Extra row yet (generic parameters only)
