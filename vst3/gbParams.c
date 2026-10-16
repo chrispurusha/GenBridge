@@ -27,8 +27,8 @@
 
 // THE STEPPER LISTS. 44.1 through 96 covers what the hardware this is aimed at actually runs at;
 // 16 through 1024 frames is what a CoreAudio device will normally accept.
-const double gGbRates[]    = { 44100.0, 48000.0, 88200.0, 96000.0 };
-const int    gGbFrames[]   = { 16, 32, 64, 128, 256, 512, 1024 };
+const double gGbRates[]    = {44100.0, 48000.0, 88200.0, 96000.0};
+const int    gGbFrames[]   = {16, 32, 64, 128, 256, 512, 1024};
 const int    gGbRateCount  = (int)(sizeof(gGbRates) / sizeof(gGbRates[0]));
 const int    gGbFrameCount = (int)(sizeof(gGbFrames) / sizeof(gGbFrames[0]));
 
@@ -58,11 +58,10 @@ static bool controller_info(int32_t index, tGbParamInfo * out) {
     if (offset >= (uint32_t)GB_CC_COUNT) {
         return false;
     }
-
     snprintf(title, sizeof(title), "Ch%u CC%u", channel + 1, controller);
 
-    out->id        = (uint32_t)GB_CC_BASE + offset;
-    out->stepCount = 0;
+    out->id                = (uint32_t)GB_CC_BASE + offset;
+    out->stepCount         = 0;
 
     name_it(out, title, title, NULL);
 
@@ -83,7 +82,6 @@ bool gb_param_info(int32_t index, bool instrument, tGbParamInfo * out) {
     if (index >= (int32_t)kParamCount) {
         return instrument ? controller_info(index, out) : false;
     }
-
     // notes §1
     out->automatable = true;
 
@@ -95,20 +93,20 @@ bool gb_param_info(int32_t index, bool instrument, tGbParamInfo * out) {
 
     switch (which) {
         case kParamDevice:
-            out->id = kParamDevice;
+            out->id                = kParamDevice;
             name_it(out, "Capture Device", "Device", NULL);
-            out->stepCount = GB_DEVICE_SLOTS - 1;
-            out->list      = true;
+            out->stepCount         = GB_DEVICE_SLOTS - 1;
+            out->list              = true;
             return true;
 
         case kParamTrim:
-            out->id = kParamTrim;
-            name_it(out, "Output Trim", "Trim", "x");
-            out->defaultNormalized = 0.5;      // unity, since the value maps to 0..2
+            out->id                = kParamTrim;
+            name_it(out, "Output Trim", "Trim", "dB");
+            out->defaultNormalized = trim_unity();   // 0 dB
             return true;
 
         case kParamRate:
-            out->id = kParamRate;
+            out->id                = kParamRate;
             name_it(out, "Sample Rate", "Rate", NULL);
             out->stepCount         = gGbRateCount - 1;
             out->defaultNormalized = 1.0 / (double)(gGbRateCount - 1);   // 48000
@@ -116,7 +114,7 @@ bool gb_param_info(int32_t index, bool instrument, tGbParamInfo * out) {
             return true;
 
         case kParamFrames:
-            out->id = kParamFrames;
+            out->id                = kParamFrames;
             name_it(out, "Device Buffer", "Buffer", NULL);
             out->stepCount         = gGbFrameCount - 1;
             out->defaultNormalized = 1.0 / (double)(gGbFrameCount - 1); // 32, gGbFrames[1] - GB_FRAMES_SHOWN_DEFAULT
@@ -124,7 +122,7 @@ bool gb_param_info(int32_t index, bool instrument, tGbParamInfo * out) {
             return true;
 
         case kParamMode:
-            out->id = kParamMode;
+            out->id                = kParamMode;
             name_it(out, "Channel Mode", "Mode", NULL);
             out->stepCount         = 1;
             out->defaultNormalized = 1.0;      // stereo
@@ -132,23 +130,23 @@ bool gb_param_info(int32_t index, bool instrument, tGbParamInfo * out) {
             return true;
 
         case kParamFirstChannel:
-            out->id = kParamFirstChannel;
+            out->id                = kParamFirstChannel;
             name_it(out, "First Channel", "Chan", NULL);
-            out->stepCount = GB_MAX_FIRST_CHANNEL - 1;
-            out->list      = true;
+            out->stepCount         = GB_MAX_FIRST_CHANNEL - 1;
+            out->list              = true;
             return true;
 
         case kParamExtraLatency:
-            out->id = kParamExtraLatency;
+            out->id                = kParamExtraLatency;
             name_it(out, "Extra Latency", "Extra", "ms");
             return true;
 
         case kParamRole:
-            out->id = kParamRole;
+            out->id                = kParamRole;
             name_it(out, "Role", "Role", NULL);
-            out->stepCount   = 1;
-            out->list        = true;
-            out->automatable = !instrument;    // the instrument always captures
+            out->stepCount         = 1;
+            out->list              = true;
+            out->automatable       = !instrument; // the instrument always captures
             return true;
 
         default:
@@ -163,33 +161,33 @@ bool gb_param_info(int32_t index, bool instrument, tGbParamInfo * out) {
 
     switch (which) {
         case kParamMidiDest:
-            out->id = kParamMidiDest;
+            out->id                = kParamMidiDest;
             name_it(out, "MIDI Destination", "MIDI", NULL);
-            out->stepCount = GB_MIDI_SLOTS - 1;
-            out->list      = true;
+            out->stepCount         = GB_MIDI_SLOTS - 1;
+            out->list              = true;
             return true;
 
         case kParamMidiChannel:
-            out->id = kParamMidiChannel;
+            out->id                = kParamMidiChannel;
             name_it(out, "MIDI Channel", "Channel", NULL);
-            out->stepCount = GB_CHANNEL_SLOTS - 1;   // default 0 is "Source"
-            out->list      = true;
+            out->stepCount         = GB_CHANNEL_SLOTS - 1; // default 0 is "Source"
+            out->list              = true;
             return true;
 
         case kParamMeasure:
-            out->id = kParamMeasure;
+            out->id                = kParamMeasure;
             name_it(out, "Measure Latency", "Measure", NULL);
-            out->stepCount = 1;
+            out->stepCount         = 1;
             return true;
 
         case kParamOffsetMs:
-            out->id = kParamOffsetMs;
+            out->id                = kParamOffsetMs;
             name_it(out, "Latency Offset", "Offset", "ms");
             out->defaultNormalized = -GB_OFFSET_MIN_MS / (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS);
             return true;
 
         case kParamTestNote:
-            out->id = kParamTestNote;
+            out->id                = kParamTestNote;
             name_it(out, "Test Note", "Note", NULL);
             out->stepCount         = 127;
             out->defaultNormalized = (double)GB_MEASURE_NOTE / 127.0;
@@ -197,7 +195,7 @@ bool gb_param_info(int32_t index, bool instrument, tGbParamInfo * out) {
             return true;
 
         case kParamSource:
-            out->id = kParamSource;
+            out->id                = kParamSource;
             name_it(out, "Capture Source", "Source", NULL);
             out->stepCount         = 1;
             out->defaultNormalized = 0.0;      // a device, which is what every saved project means
@@ -227,7 +225,7 @@ bool gb_param_text(uint32_t id, double normalized, char * out, unsigned long len
             return true;
 
         case kParamTrim:
-            snprintf(out, len, "%.2f", normalized * 2.0);
+            trim_text(normalized, out, len);
             return true;
 
         case kParamRate:
@@ -250,7 +248,8 @@ bool gb_param_text(uint32_t id, double normalized, char * out, unsigned long len
             gb_midi_destination_name(slot_of(normalized, GB_MIDI_SLOTS), out, len);
             return true;
 
-        case kParamMidiChannel: {
+        case kParamMidiChannel:
+        {
             int slot = slot_of(normalized, GB_CHANNEL_SLOTS);
 
             if (slot <= 0) {
@@ -258,7 +257,6 @@ bool gb_param_text(uint32_t id, double normalized, char * out, unsigned long len
             } else {
                 snprintf(out, len, "%d", slot);
             }
-
             return true;
         }
 
@@ -283,13 +281,16 @@ bool gb_param_text(uint32_t id, double normalized, char * out, unsigned long len
             snprintf(out, len, "%s", (normalized < 0.5) ? "Capture" : "Align recording");
             return true;
 
-        case kParamTestNote: {
+        case kParamTestNote:
+        {
             // C-2 IS NOTE 0, the convention where middle C is C3 - which is what the hardware this
             // is aimed at prints on its own screen. An Analog Rytm's lowest pad is C-2 and a user
             // reading "C-1" there would be a semitone-free octave out.
-            static const char * const kName[12] = { "C",  "C#", "D",  "D#", "E",  "F",
-                                                    "F#", "G",  "G#", "A",  "A#", "B" };
-            int note = slot_of(normalized, 128);
+            static const char *const kName[12] = {
+                "C",  "C#", "D",  "D#", "E",  "F",
+                "F#", "G",  "G#", "A",  "A#", "B"
+            };
+            int                      note      = slot_of(normalized, 128);
 
             snprintf(out, len, "%s%d (%d)", kName[note % 12], (note / 12) - 2, note);
             return true;
@@ -298,6 +299,5 @@ bool gb_param_text(uint32_t id, double normalized, char * out, unsigned long len
         default:
             break;
     }
-
     return false;
 }

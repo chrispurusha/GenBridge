@@ -27,6 +27,8 @@
 
 #include "gbDraw.h"
 #include "gbMidi.h"
+#include "gbParams.h"
+#include "trim.h"         // trim_text()
 #include "gbStatus.h"
 
 #include "device.h"
@@ -39,24 +41,24 @@
 #include "contextMenu.h"
 #include "synthlibTypes.h"
 
-#define FONT_PATH             "/System/Library/Fonts/Supplemental/Arial.ttf"
-#define FONT_PRELOAD_SIZE     (16.0)
+#define FONT_PATH            "/System/Library/Fonts/Supplemental/Arial.ttf"
+#define FONT_PRELOAD_SIZE    (16.0)
 
-#define ROW_H                 (26.0)
-#define LABEL_W               (74.0)
-#define ARROW_W               (22.0)
-#define TEXT_H                (13.0)
+#define ROW_H                (26.0)
+#define LABEL_W              (74.0)
+#define ARROW_W              (22.0)
+#define TEXT_H               (13.0)
 
 // The lists the stepper parameters index into. These must agree with the processor's own mapping,
 // which is why both read them from here rather than each keeping a copy.
 // The stepper lists are defined in gbParams.c, beside the parameter table that scales them.
 
-static bool   gFontReady  = false;
+static bool      gFontReady  = false;
 
 // notes §2
-#define GB_MENU_BG    ((tRgb){ 0.22, 0.22, 0.24 })
+#define GB_MENU_BG    ((tRgb){0.22, 0.22, 0.24})
 
-static tCoord gMouse      = { 0.0, 0.0 };
+static tCoord    gMouse      = {0.0, 0.0};
 
 static void gb_mouse_coord(tCoord * coord) {
     if (coord != NULL) {
@@ -76,16 +78,16 @@ bool gb_draw_menu_active(void) {
 // What a menu selection produced, picked up by gb_draw_click() on the click that made it. The action
 // callback carries only an index, so the menu that is open has to be recorded alongside it - the
 // same "keep it in your own app-local struct" arrangement contextMenu.h describes for G2-Edit.
-static tGbEdit gMenuFor      = eGbEditNone;
-static int     gMenuChoice   = -1;
+static tGbEdit   gMenuFor    = eGbEditNone;
+static int       gMenuChoice = -1;
 
 // Labels must outlive the click that opens the menu: tMenuItem holds a const char *, it does not
 // copy. One buffer per slot, filled when the menu is built.
 #define GB_MENU_MAX      (GB_DEVICE_SLOTS + 1)
 #define GB_MENU_LABEL    (64)
 
-static char       gMenuLabels[GB_MENU_MAX][GB_MENU_LABEL];
-static tMenuItem  gMenuItems[GB_MENU_MAX];
+static char      gMenuLabels[GB_MENU_MAX][GB_MENU_LABEL];
+static tMenuItem gMenuItems[GB_MENU_MAX];
 
 static void gb_menu_action(int index) {
     gMenuChoice = index;
@@ -102,14 +104,15 @@ static void gb_open_menu(tGbEdit which, int count, tRectangle anchor) {
     }
 
     for (int i = 0; i < count; i++) {
-        gMenuItems[i].label           = gMenuLabels[i];
-        gMenuItems[i].colour          = GB_MENU_BG;
-        gMenuItems[i].action          = gb_menu_action;
-        gMenuItems[i].param           = (uint32_t)i;
-        gMenuItems[i].subMenu         = NULL;
-        gMenuItems[i].subMenuColumns  = 0;
+        gMenuItems[i].label            = gMenuLabels[i];
+        gMenuItems[i].colour           = GB_MENU_BG;
+        gMenuItems[i].action           = gb_menu_action;
+        gMenuItems[i].param            = (uint32_t)i;
+        gMenuItems[i].subMenu          = NULL;
+        gMenuItems[i].subMenuColumns   = 0;
         gMenuItems[i].subMenuCellWidth = 0.0;
     }
+
     gMenuItems[count].label  = NULL;
     gMenuItems[count].action = NULL;
 
@@ -117,30 +120,30 @@ static void gb_open_menu(tGbEdit which, int count, tRectangle anchor) {
     if ((count * 22) > (int)(GB_CANVAS_H - 40.0)) {
         columns = 2;
     }
-    gMenuFor    = which;
-    gMenuChoice = -1;
+    gMenuFor                 = which;
+    gMenuChoice              = -1;
     open_context_menu(below_rect(anchor), gMenuItems, (uint32_t)columns, 210.0);
 }
 
 // Set by the view before every frame rather than once at creation: like the status slot, one editor
 // must not answer for another's. With an effect and an instrument both open, whichever drew last
 // would otherwise decide the layout for both.
-static bool   gInstrument = false;
+static bool         gInstrument = false;
 
 void gb_draw_set_instrument(bool instrument) {
     gInstrument = instrument;
 }
-static double gDevice    = 0.0;
-static double gRate      = 0.0;
-static double gFrames    = 0.0;
-static double gTrim      = 0.5;
-static double gMode      = 1.0;
-static double gFirst     = 0.0;
-static double gMidiDest  = 0.0;
-static double gOffset    = 0.5;
-static double gTestNote  = 60.0 / 127.0;
-static double gMidiChan  = 0.0;
-static double gSource    = 0.0;    // 0 = an audio device, 1 = the host's own input
+static double       gDevice     = 0.0;
+static double       gRate       = 0.0;
+static double       gFrames     = 0.0;
+static double       gTrim       = 0.8; // 0 dB on trim.h's scale - see trim_unity()
+static double       gMode       = 1.0;
+static double       gFirst      = 0.0;
+static double       gMidiDest   = 0.0;
+static double       gOffset     = 0.5;
+static double       gTestNote   = 60.0 / 127.0;
+static double       gMidiChan   = 0.0;
+static double       gSource     = 0.0; // 0 = an audio device, 1 = the host's own input
 
 static tGbDrawAlign gAlign;
 
@@ -152,15 +155,15 @@ void gb_draw_set_align(const tGbDrawAlign * align) {
 // Which processor's figures this panel shows. -1 until the host has connected the two ends, which
 // it may do before or after the editor opens - so the panel simply shows no live figures until it
 // knows, rather than showing another instance's.
-static int    gStatusSlot = -1;
+static int          gStatusSlot = -1;
 
 void gb_draw_set_status_slot(int slot) {
     gStatusSlot = slot;
 }
 
 // notes §3
-#define ROW_TOP          (56.0)
-#define ROW_STEP         (36.0)
+#define ROW_TOP     (56.0)
+#define ROW_STEP    (36.0)
 
 // notes §4
 typedef enum {
@@ -194,13 +197,29 @@ static double rows_bottom(void) {
     return row_y(row_count() - 1) + ROW_STEP;
 }
 
-static double trim_y(void)      { return rows_bottom() + 8.0; }
-static double level_y(void)     { return trim_y() + 30.0; }
-static double measure_y(void)   { return level_y() + 40.0; }
-static double offset_y(void)    { return measure_y() + 34.0; }
-static double extra_y(void)     { return measure_y(); }    // the effect's Extra Latency or Align row
-static double telemetry_y(void) { return (gInstrument ? offset_y() : extra_y()) + 42.0; }
+static double trim_y(void) {
+    return rows_bottom() + 8.0;
+}
 
+static double level_y(void) {
+    return trim_y() + 30.0;
+}
+
+static double measure_y(void) {
+    return level_y() + 40.0;
+}
+
+static double offset_y(void) {
+    return measure_y() + 34.0;
+}
+
+static double extra_y(void) {
+    return measure_y();
+}                                                          // the effect's Extra Latency or Align row
+
+static double telemetry_y(void) {
+    return (gInstrument ? offset_y() : extra_y()) + 42.0;
+}
 
 // notes §5
 static bool row_is_menu(int row) {
@@ -229,18 +248,33 @@ static bool row_live(tGbRow which) {
 }
 
 static tRectangle row_prev(int row) {
-    return (tRectangle){ { LABEL_W, row_y(row) }, { ARROW_W, ROW_H - 6.0 } };
+    return (tRectangle){{
+                            LABEL_W, row_y(row)
+                        }, {
+                            ARROW_W, ROW_H - 6.0
+                        }
+    };
 }
 
 static tRectangle row_next(int row) {
-    return (tRectangle){ { GB_CANVAS_W - 30.0 - ARROW_W, row_y(row) }, { ARROW_W, ROW_H - 6.0 } };
+    return (tRectangle){{
+                            GB_CANVAS_W - 30.0 - ARROW_W, row_y(row)
+                        }, {
+                            ARROW_W, ROW_H - 6.0
+                        }
+    };
 }
 
 static tRectangle row_value(int row) {
     double x     = row_is_menu(row) ? LABEL_W : (LABEL_W + ARROW_W + 6.0);
     double right = row_is_menu(row) ? (GB_CANVAS_W - 30.0) : (GB_CANVAS_W - 36.0 - ARROW_W);
 
-    return (tRectangle){ { x, row_y(row) }, { right - x, ROW_H - 6.0 } };
+    return (tRectangle){{
+                            x, row_y(row)
+                        }, {
+                            right - x, ROW_H - 6.0
+                        }
+    };
 }
 
 #define RIGHT_GUTTER    (74.0)     // room for the trim readout, which sits outside the track
@@ -255,15 +289,20 @@ static tRectangle row_value(int row) {
 // notes §8
 #define OFFSET_GAP                  (10.0)
 
-#define MEASURE_LABEL     "Measure"
-#define BUTTON_H          (18.0)
+#define MEASURE_LABEL               "Measure"
+#define BUTTON_H                    (18.0)
 
 // draw_button() renders its label at the RECTANGLE'S OWN HEIGHT, not at some smaller text size, and
 // then draws the box a margin larger than what it was passed. Sizing the width from TEXT_H got both
 // of those wrong at once and the word ran out of its box.
 static tRectangle measure_button(void) {
-    return (tRectangle){ { LABEL_W, measure_y() },
-                         { get_text_width(MEASURE_LABEL, BUTTON_H, eCache), BUTTON_H } };
+    return (tRectangle){{
+                            LABEL_W, measure_y()
+                        },
+                        {
+                            get_text_width(MEASURE_LABEL, BUTTON_H, eCache), BUTTON_H
+                        }
+    };
 }
 
 // What draw_button actually paints, and therefore what a click has to land in.
@@ -283,21 +322,32 @@ static tRectangle note_arrow(int slot) {
     if (slot >= 2) {
         x += NOTE_VALUE_W + NOTE_GAP;
     }
-
-    return (tRectangle){ { x, measure_y() }, { NOTE_ARROW_W, BUTTON_H } };
+    return (tRectangle){{
+                            x, measure_y()
+                        }, {
+                            NOTE_ARROW_W, BUTTON_H
+                        }
+    };
 }
 
 static tRectangle note_value_box(void) {
-    return (tRectangle){ { NOTE_X + (2.0 * (NOTE_ARROW_W + NOTE_GAP + 4.0)), measure_y() },
-                         { NOTE_VALUE_W, BUTTON_H } };
+    return (tRectangle){{
+                            NOTE_X + (2.0 * (NOTE_ARROW_W + NOTE_GAP + 4.0)), measure_y()
+                        },
+                        {
+                            NOTE_VALUE_W, BUTTON_H
+                        }
+    };
 }
 
 // C-2 IS NOTE 0 - middle C as C3, which is what the hardware this is pointed at prints on its own
 // screen. Naming note 0 "C-1" instead would put a user an octave out on the one device that made
 // this control necessary.
 static void note_name(int note, char * out, unsigned long len) {
-    static const char * const kName[12] = { "C",  "C#", "D",  "D#", "E",  "F",
-                                            "F#", "G",  "G#", "A",  "A#", "B" };
+    static const char *const kName[12] = {
+        "C",  "C#", "D",  "D#", "E",  "F",
+        "F#", "G",  "G#", "A",  "A#", "B"
+    };
 
     note = (note < 0) ? 0 : ((note > 127) ? 127 : note);
     snprintf(out, len, "%s%d", kName[note % 12], (note / 12) - 2);
@@ -310,13 +360,22 @@ static tRectangle offset_arrow(int slot) {
     if (slot >= 2) {
         x += OFFSET_VALUE_W + OFFSET_GAP;
     }
-
-    return (tRectangle){ { x, offset_y() }, { ARROW_W, 20.0 } };
+    return (tRectangle){{
+                            x, offset_y()
+                        }, {
+                            ARROW_W, 20.0
+                        }
+    };
 }
 
 static tRectangle offset_value_box(void) {
-    return (tRectangle){ { LABEL_W + (2.0 * (ARROW_W + OFFSET_GAP)), offset_y() },
-                         { OFFSET_VALUE_W, 20.0 } };
+    return (tRectangle){{
+                            LABEL_W + (2.0 * (ARROW_W + OFFSET_GAP)), offset_y()
+                        },
+                        {
+                            OFFSET_VALUE_W, 20.0
+                        }
+    };
 }
 
 // The effect's Extra Latency arrows: the offset's geometry, on its own row.
@@ -337,10 +396,15 @@ static tRectangle extra_value_box(void) {
 #define GB_EXTRA_STEP_FINE_MS      (1.0)
 #define GB_EXTRA_STEP_COARSE_MS    (10.0)
 
-#define REALIGN_LABEL     "Re-align"
+#define REALIGN_LABEL              "Re-align"
 
 static tRectangle realign_button(void) {
-    return (tRectangle){ { LABEL_W, extra_y() }, { get_text_width(REALIGN_LABEL, BUTTON_H, eCache), BUTTON_H } };
+    return (tRectangle){{
+                            LABEL_W, extra_y()
+                        }, {
+                            get_text_width(REALIGN_LABEL, BUTTON_H, eCache), BUTTON_H
+                        }
+    };
 }
 
 static tRectangle realign_bounds(void) {
@@ -348,7 +412,12 @@ static tRectangle realign_bounds(void) {
 }
 
 static tRectangle trim_track(void) {
-    return (tRectangle){ { LABEL_W, trim_y() }, { GB_CANVAS_W - LABEL_W - RIGHT_GUTTER, 14.0 } };
+    return (tRectangle){{
+                            LABEL_W, trim_y()
+                        }, {
+                            GB_CANVAS_W - LABEL_W - RIGHT_GUTTER, 14.0
+                        }
+    };
 }
 
 static bool hit(tRectangle r, double x, double y) {
@@ -379,7 +448,6 @@ static const tDeviceInfo * device_list(uint32_t * count) {
         gCachedAt    = now;
         gCacheValid  = true;
     }
-
     *count = gCachedCount;
 
     return gCachedList;
@@ -406,7 +474,6 @@ int gb_slot_for_uid(const char * uid) {
         if (strcmp(list[i].uid, uid) == 0) {
             return seen;
         }
-
         seen++;
     }
 
@@ -421,7 +488,6 @@ int gb_device_slot(double normalized) {
     } else if (slot > (GB_DEVICE_SLOTS - 1)) {
         slot = GB_DEVICE_SLOTS - 1;
     }
-
     return slot;
 }
 
@@ -489,7 +555,6 @@ void gb_input_device_name(int index, char * out, unsigned long len) {
             snprintf(out, len, "%s", list[i].name);
             return;
         }
-
         seen++;
     }
 }
@@ -504,12 +569,12 @@ void gb_draw_set_values(double device, double rate, double frames, double trim,
     gOffset   = offset;
     gMidiChan = midiChannel;
     gTestNote = testNote;
-    gDevice = device;
-    gRate   = rate;
-    gFrames = frames;
-    gTrim   = trim;
-    gMode   = mode;
-    gFirst  = firstChannel;
+    gDevice   = device;
+    gRate     = rate;
+    gFrames   = frames;
+    gTrim     = trim;
+    gMode     = mode;
+    gFirst    = firstChannel;
 }
 
 void gb_draw_init(void) {
@@ -528,27 +593,29 @@ void gb_draw_init(void) {
     // contextMenu.c reaches back for the pointer position through this rather than declaring its own
     // extern - see synthlibHost.h. The redraw half is already covered by SynthLib/plugin/pluginStubs.c. No
     // pointerCaptured predicate: this panel never hides the pointer for a drag.
-    synthlib_host_init((tSynthLibHost){ .mouseCoord = gb_mouse_coord, .pointerCaptured = NULL });
+    synthlib_host_init((tSynthLibHost){.mouseCoord = gb_mouse_coord, .pointerCaptured = NULL});
 
     gFontReady = preload_glyph_textures(FONT_PATH, FONT_PRELOAD_SIZE);
 }
 
 static void label(double x, double y, const char * text) {
-    set_rgb_colour((tRgb){ 0.72, 0.72, 0.74 });
-    render_text(mainArea, (tRectangle){ { x, y }, { 0.0, TEXT_H } }, text);
+    set_rgb_colour((tRgb){0.72, 0.72, 0.74});
+    render_text(mainArea, (tRectangle){{x, y}, {0.0, TEXT_H}}, text);
 }
 
 static void value_box(int row, const char * text, bool live) {
     tRectangle box = row_value(row);
 
-    set_rgb_colour(live ? (tRgb){ 0.16, 0.16, 0.18 } : (tRgb){ 0.22, 0.22, 0.24 });
+    set_rgb_colour(live ? (tRgb){0.16, 0.16, 0.18}
+                                                     : (tRgb){0.22, 0.22, 0.24});
     render_rectangle(mainArea, box);
 
     // A DIM VALUE IS STILL A VALUE. What a greyed row shows is what the plug-in would go back to,
     // which is worth reading - so it drops a tier rather than blanking, the same treatment the
     // sibling projects' panels give a figure that is held rather than live.
-    set_rgb_colour(live ? (tRgb){ 0.92, 0.92, 0.94 } : (tRgb){ 0.48, 0.48, 0.50 });
-    render_text(mainArea, (tRectangle){ { box.coord.x + 8.0, box.coord.y + 5.0 }, { 0.0, TEXT_H } }, text);
+    set_rgb_colour(live ? (tRgb){0.92, 0.92, 0.94}
+                                                     : (tRgb){0.48, 0.48, 0.50});
+    render_text(mainArea, (tRectangle){{box.coord.x + 8.0, box.coord.y + 5.0}, {0.0, TEXT_H}}, text);
 }
 
 static void stepper_row(tGbRow which, const char * labelText, const char * valueText) {
@@ -558,58 +625,63 @@ static void stepper_row(tGbRow which, const char * labelText, const char * value
     if (live) {
         label(20.0, row_y(row) + 5.0, labelText);
     } else {
-        set_rgb_colour((tRgb){ 0.46, 0.46, 0.48 });
-        render_text(mainArea, (tRectangle){ { 20.0, row_y(row) + 5.0 }, { 0.0, TEXT_H } }, labelText);
+        set_rgb_colour((tRgb){0.46, 0.46, 0.48});
+        render_text(mainArea, (tRectangle){{20.0, row_y(row) + 5.0}, {0.0, TEXT_H}}, labelText);
     }
 
     if (!row_is_menu(row)) {
-        draw_button(mainArea, row_prev(row), "<", (tRgb){ 0.30, 0.30, 0.33 });
-        draw_button(mainArea, row_next(row), ">", (tRgb){ 0.30, 0.30, 0.33 });
+        draw_button(mainArea, row_prev(row), "<", (tRgb){0.30, 0.30, 0.33});
+        draw_button(mainArea, row_next(row), ">", (tRgb){0.30, 0.30, 0.33});
     }
-
     value_box(row, valueText, live);
 }
 
 // notes §14
-#define STAT_VALUE_DX    (52.0)
+#define STAT_VALUE_DX      (52.0)
 
 // notes §15
 #define GB_CAPTION_GREY    {0.60, 0.60, 0.63}
 
 static void stat(double x, double y, const char * name, const char * value) {
     set_rgb_colour((tRgb)GB_CAPTION_GREY);
-    render_text(mainArea, (tRectangle){ { x, y }, { 0.0, 11.0 } }, name);
+    render_text(mainArea, (tRectangle){{x, y}, {0.0, 11.0}}, name);
 
-    set_rgb_colour((tRgb){ 0.70, 0.70, 0.73 });
-    render_text(mainArea, (tRectangle){ { x + STAT_VALUE_DX, y }, { 0.0, 11.0 } }, value);
+    set_rgb_colour((tRgb){0.70, 0.70, 0.73});
+    render_text(mainArea, (tRectangle){{x + STAT_VALUE_DX, y}, {0.0, 11.0}}, value);
 }
 
 static void meter(double x, double y, double w, float peak) {
-    tRectangle back = { { x, y }, { w, 10.0 } };
+    tRectangle back  = {{x, y}, {w, 10.0}};
 
-    set_rgb_colour((tRgb){ 0.14, 0.14, 0.16 });
+    set_rgb_colour((tRgb){0.14, 0.14, 0.16});
     render_rectangle(mainArea, back);
 
-    double level = (peak > 1.0f) ? 1.0 : (double)peak;
+    double     level = (peak > 1.0f) ? 1.0 : (double)peak;
 
     if (level > 0.0) {
-        tRgb colour = (level > 0.98) ? (tRgb){ 0.90, 0.25, 0.20 }
-                      : (level > 0.7) ? (tRgb){ 0.90, 0.72, 0.20 }
-                      : (tRgb){ 0.35, 0.78, 0.42 };
+        tRgb colour = (level > 0.98) ? (tRgb){
+            0.90, 0.25, 0.20
+        }
+                      : (level > 0.7) ? (tRgb){
+            0.90, 0.72, 0.20
+        }
+                      : (tRgb){
+            0.35, 0.78, 0.42
+        };
 
         set_rgb_colour(colour);
-        render_rectangle(mainArea, (tRectangle){ { x, y }, { w * level, 10.0 } });
+        render_rectangle(mainArea, (tRectangle){{x, y}, {w * level, 10.0}});
     }
 }
 
 // gbAlign notes §1 - what the Align role found, in words
 static void align_text(char * line1, unsigned long len1, char * line2, unsigned long len2, tRgb * colour) {
-    const tGbAlignStatus * a = &gAlign.status;
-    tGbStatus *            s = gb_status(a->senderSlot);
+    const tGbAlignStatus * a     = &gAlign.status;
+    tGbStatus *            s     = gb_status(a->senderSlot);
     char                   who[96];
-    const tRgb             grey  = { 0.72, 0.72, 0.74 };
-    const tRgb             green = { 0.45, 0.75, 0.50 };
-    const tRgb             amber = { 0.85, 0.60, 0.25 };
+    const tRgb             grey  = {0.72, 0.72, 0.74};
+    const tRgb             green = {0.45, 0.75, 0.50};
+    const tRgb             amber = {0.85, 0.60, 0.25};
 
     if ((s != NULL) && (s->deviceName[0] != '\0')) {
         snprintf(who, sizeof(who), "the GenBridge on %s", s->deviceName);
@@ -675,11 +747,11 @@ static void align_text(char * line1, unsigned long len1, char * line2, unsigned 
 // The effect's row below the level meters: Extra Latency when capturing, the Align report when aligning.
 static void draw_effect_latency_row(char * buffer, unsigned long len) {
     if (gAlign.aligning) {
-        char line2[160];
-        tRgb colour;
+        char       line2[160];
+        tRgb       colour;
 
         label(20.0, extra_y() + 4.0, "Align");
-        draw_button(mainArea, realign_button(), REALIGN_LABEL, (tRgb){ 0.30, 0.42, 0.55 });
+        draw_button(mainArea, realign_button(), REALIGN_LABEL, (tRgb){0.30, 0.42, 0.55});
 
         align_text(buffer, len, line2, sizeof(line2), &colour);
 
@@ -687,41 +759,42 @@ static void draw_effect_latency_row(char * buffer, unsigned long len) {
         double     textX  = bounds.coord.x + bounds.size.w + 14.0;
 
         set_rgb_colour(colour);
-        render_text(mainArea, (tRectangle){ { textX, extra_y() + 5.0 }, { 0.0, 11.0 } }, buffer);
+        render_text(mainArea, (tRectangle){{textX, extra_y() + 5.0}, {0.0, 11.0}}, buffer);
         set_rgb_colour((tRgb)GB_CAPTION_GREY);
-        render_text(mainArea, (tRectangle){ { textX, extra_y() + 21.0 }, { 0.0, 11.0 } }, line2);
+        render_text(mainArea, (tRectangle){{textX, extra_y() + 21.0}, {0.0, 11.0}}, line2);
         return;
     }
-
-    static const char * const kArrow[4] = { "<<", "<", ">", ">>" };
+    static const char *const kArrow[4] = {"<<", "<", ">", ">>"};
 
     label(20.0, extra_y() + 4.0, "Extra");
 
     for (int slot = 0; slot < 4; slot++) {
-        draw_button(mainArea, extra_arrow(slot), kArrow[slot], (tRgb){ 0.30, 0.30, 0.33 });
+        draw_button(mainArea, extra_arrow(slot), kArrow[slot], (tRgb){0.30, 0.30, 0.33});
     }
-    tRectangle valueBox = extra_value_box();
+
+    tRectangle               valueBox  = extra_value_box();
 
     snprintf(buffer, len, "%.0f ms", gAlign.extraLatency * GB_EXTRA_LATENCY_MAX_MS);
-    set_rgb_colour((tRgb){ 0.92, 0.92, 0.94 });
+    set_rgb_colour((tRgb){0.92, 0.92, 0.94});
 
     // eNoCache: a formatted buffer, and the cache is keyed on the pointer
-    double textW = get_text_width(buffer, 11.0, eNoCache);
+    double                   textW     = get_text_width(buffer, 11.0, eNoCache);
 
-    render_text(mainArea, (tRectangle){ { valueBox.coord.x + ((valueBox.size.w - textW) / 2.0), extra_y() + 6.0 },
-                                        { 0.0, 11.0 } }, buffer);
+    render_text(mainArea, (tRectangle){{valueBox.coord.x + ((valueBox.size.w - textW) / 2.0), extra_y() + 6.0},
+                                       {0.0, 11.0}
+                }, buffer);
 
     set_rgb_colour((tRgb)GB_CAPTION_GREY);
 
     if (gAlign.autoSet) {
         snprintf(buffer, len, "%s", "set by Align on the recording track");
-        set_rgb_colour((tRgb){ 0.45, 0.75, 0.50 });
+        set_rgb_colour((tRgb){0.45, 0.75, 0.50});
     } else if (gAlign.extraLatency > 0.0) {
         snprintf(buffer, len, "%s", "reported on top of GenBridge's own");
     } else {
         snprintf(buffer, len, "%s", "for Live's delay compensation");
     }
-    render_text(mainArea, (tRectangle){ { 270.0, extra_y() + 6.0 }, { 0.0, 11.0 } }, buffer);
+    render_text(mainArea, (tRectangle){{270.0, extra_y() + 6.0}, {0.0, 11.0}}, buffer);
 }
 
 void gb_draw_frame(int pixelWidth, int pixelHeight) {
@@ -731,7 +804,6 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
     if ((pixelWidth <= 0) || (pixelHeight <= 0)) {
         return;
     }
-
     render_backend_set_surface(pixelWidth, pixelHeight);
     set_render_width(pixelWidth);
     set_render_height(pixelHeight);
@@ -747,14 +819,13 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
         render_backend_flush();
         return;
     }
-
     // ---- header ----
-    set_rgb_colour((tRgb){ 0.95, 0.95, 0.97 });
-    render_text(mainArea, (tRectangle){ { 20.0, 18.0 }, { 0.0, 20.0 } }, "GenBridge");
+    set_rgb_colour((tRgb){0.95, 0.95, 0.97});
+    render_text(mainArea, (tRectangle){{20.0, 18.0}, {0.0, 20.0}}, "GenBridge");
 
     if (!gInstrument && gAlign.aligning) {
-        set_rgb_colour((gAlign.status.state == eGbAlignAligned) ? (tRgb){ 0.45, 0.75, 0.50 }
-                       : (tRgb){ 0.72, 0.72, 0.74 });
+        set_rgb_colour((gAlign.status.state == eGbAlignAligned) ? (tRgb){0.45, 0.75, 0.50}
+                       : (tRgb){0.72, 0.72, 0.74});
         snprintf(buffer, sizeof(buffer), "%s", "aligning a recording - captures nothing, passes this track through");
     } else if (gSource >= 0.5) {
         // notes §16
@@ -762,14 +833,14 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
             // NOT AN ANSWER, so it does not claim one. Without a status slot the panel knows nothing
             // about what the processor is receiving, and saying "audio from the host" here would be
             // a guess dressed as a report.
-            set_rgb_colour((tRgb){ 0.72, 0.72, 0.74 });
+            set_rgb_colour((tRgb){0.72, 0.72, 0.74});
             snprintf(buffer, sizeof(buffer), "%s", "external instrument - waiting for the processor");
         } else if (atomic_load(&status->hostInputPresent) == 0) {
-            set_rgb_colour((tRgb){ 0.85, 0.60, 0.25 });
+            set_rgb_colour((tRgb){0.85, 0.60, 0.25});
             snprintf(buffer, sizeof(buffer), "%s",
                      "external instrument - NO AUDIO from the host: check the side-chain routing");
         } else {
-            set_rgb_colour((tRgb){ 0.45, 0.75, 0.50 });
+            set_rgb_colour((tRgb){0.45, 0.75, 0.50});
             snprintf(buffer, sizeof(buffer), "%s",
                      "external instrument - audio from the host, latency measured");
         }
@@ -777,28 +848,27 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
         // AHEAD OF "capturing", because during an offline render it is still nominally capturing
         // and that is precisely the misleading thing to show. A bounce faster than realtime drains
         // the ring - the device cannot be hurried - so the render is silent whatever else is true.
-        set_rgb_colour((tRgb){ 0.85, 0.60, 0.25 });
+        set_rgb_colour((tRgb){0.85, 0.60, 0.25});
         snprintf(buffer, sizeof(buffer), "%s", "host is rendering offline - bounce in real time");
     } else if ((status != NULL) && atomic_load(&status->active)) {
-        set_rgb_colour((tRgb){ 0.45, 0.75, 0.50 });
+        set_rgb_colour((tRgb){0.45, 0.75, 0.50});
         snprintf(buffer, sizeof(buffer), "capturing %s", status->deviceName);
     } else if ((status != NULL) && (atomic_load(&status->waitingForDevice) != 0)) {
         // NAMED, not just "no device". The whole point of the wait is that the plug-in knows exactly
         // what it is waiting for, and a user who sees the name knows what to plug in.
-        set_rgb_colour((tRgb){ 0.85, 0.60, 0.25 });
+        set_rgb_colour((tRgb){0.85, 0.60, 0.25});
         snprintf(buffer, sizeof(buffer), "waiting for %s", status->waitingName);
     } else {
         // Amber rather than grey: a plug-in that has failed to open a device looks exactly like one
         // whose device happens to be silent, and the two want very different responses.
-        set_rgb_colour((tRgb){ 0.85, 0.60, 0.25 });
+        set_rgb_colour((tRgb){0.85, 0.60, 0.25});
         snprintf(buffer, sizeof(buffer), "%s",
                  (status == NULL) ? "no device selected"
                  : ((atomic_load(&status->deviceRate) > 0)
                     ? "not capturing - device unavailable"
                     : "no device selected"));
     }
-
-    render_text(mainArea, (tRectangle){ { 20.0, 38.0 }, { 0.0, 11.0 } }, buffer);
+    render_text(mainArea, (tRectangle){{20.0, 38.0}, {0.0, 11.0}}, buffer);
 
     // notes §17
     if (gInstrument) {
@@ -849,7 +919,6 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
     } else {
         snprintf(buffer, sizeof(buffer), "%d - %d", first + 1, first + 2);
     }
-
     stepper_row(eRowFirstChannel, "Input", buffer);
 
     // The instrument's own row, and the measurement it enables.
@@ -865,7 +934,6 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
         } else {
             snprintf(buffer, sizeof(buffer), "%d", channel);
         }
-
         stepper_row(eRowMidiChannel, "Channel", buffer);
     }
 
@@ -873,54 +941,54 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
     if (gInstrument) {
         label(20.0, measure_y() + 4.0, "Latency");
 
-        draw_button(mainArea, measure_button(), MEASURE_LABEL, (tRgb){ 0.30, 0.42, 0.55 });
+        draw_button(mainArea, measure_button(), MEASURE_LABEL, (tRgb){0.30, 0.42, 0.55});
 
         {
-            static const char * const kNoteArrow[4] = { "<<", "<", ">", ">>" };
+            static const char *const kNoteArrow[4] = {"<<", "<", ">", ">>"};
 
-            char       note[8];
-            int        value = (int)((gTestNote * 127.0) + 0.5);
-            tRectangle valueBox = note_value_box();
+            char                     note[8];
+            int                      value         = (int)((gTestNote * 127.0) + 0.5);
+            tRectangle               valueBox      = note_value_box();
 
             for (int slot = 0; slot < 4; slot++) {
-                draw_button(mainArea, note_arrow(slot), kNoteArrow[slot], (tRgb){ 0.30, 0.30, 0.33 });
+                draw_button(mainArea, note_arrow(slot), kNoteArrow[slot], (tRgb){0.30, 0.30, 0.33});
             }
 
             note_name(value, note, sizeof(note));
-            set_rgb_colour((tRgb){ 0.92, 0.92, 0.94 });
+            set_rgb_colour((tRgb){0.92, 0.92, 0.94});
 
             // eNoCache: the width of a formatted buffer, and the cache is keyed on the pointer.
-            double noteW = get_text_width(note, 11.0, eNoCache);
+            double                   noteW         = get_text_width(note, 11.0, eNoCache);
 
             render_text(mainArea,
-                        (tRectangle){ { valueBox.coord.x + ((valueBox.size.w - noteW) / 2.0),
-                                        measure_y() + 5.0 }, { 0.0, 11.0 } }, note);
+                        (tRectangle){{valueBox.coord.x + ((valueBox.size.w - noteW) / 2.0),
+                                      measure_y() + 5.0}, {0.0, 11.0}
+                        }, note);
         }
 
-        int measured = (status != NULL) ? atomic_load(&status->measuredSamples) : 0;
-        int rate     = (status != NULL) ? atomic_load(&status->deviceRate) : 48000;
+        int measured    = (status != NULL) ? atomic_load(&status->measuredSamples) : 0;
+        int rate        = (status != NULL) ? atomic_load(&status->deviceRate) : 48000;
 
         if (rate <= 0) {
             rate = 48000;
         }
-
-        int failed   = (status != NULL) ? atomic_load(&status->measureFailed) : 0;
-        int ranEmpty = (status != NULL) ? atomic_load(&status->measureRanEmpty) : 0;
+        int failed      = (status != NULL) ? atomic_load(&status->measureFailed) : 0;
+        int ranEmpty    = (status != NULL) ? atomic_load(&status->measureRanEmpty) : 0;
 
         int compensated = (status != NULL) ? atomic_load(&status->measureCompensated) : 0;
 
         if (failed) {
             snprintf(buffer, sizeof(buffer), "%s", "measurement failed - try again");
-            set_rgb_colour((tRgb){ 0.85, 0.60, 0.25 });
+            set_rgb_colour((tRgb){0.85, 0.60, 0.25});
         } else if (compensated) {
             // gbMeasure notes §21 - a result, not a failure: the device lines its own audio up
             snprintf(buffer, sizeof(buffer), "%s", "0 ms - device compensates");
-            set_rgb_colour((tRgb){ 0.45, 0.75, 0.50 });
+            set_rgb_colour((tRgb){0.45, 0.75, 0.50});
         } else if (measured > 0) {
             // notes §20
-            int low   = (status != NULL) ? atomic_load(&status->measuredLow) : 0;
-            int high  = (status != NULL) ? atomic_load(&status->measuredHigh) : 0;
-            int trips = (status != NULL) ? atomic_load(&status->measuredTrips) : 0;
+            int    low   = (status != NULL) ? atomic_load(&status->measuredLow) : 0;
+            int    high  = (status != NULL) ? atomic_load(&status->measuredHigh) : 0;
+            int    trips = (status != NULL) ? atomic_load(&status->measuredTrips) : 0;
             double perMs = (double)rate / 1000.0;
 
             if ((trips > 0) && (high > low)) {
@@ -930,47 +998,48 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
                 snprintf(buffer, sizeof(buffer), "%d smp (%.1f ms) measured", measured,
                          (double)measured / perMs);
             }
-            set_rgb_colour((tRgb){ 0.72, 0.72, 0.74 });
+            set_rgb_colour((tRgb){0.72, 0.72, 0.74});
         } else if (ranEmpty) {
             // RAN, AND CAME BACK WITH NOTHING. Indistinguishable from "never measured" until now,
             // which is exactly the wrong thing to show: one is a starting state and the other is a
             // result that needs acting on.
             snprintf(buffer, sizeof(buffer), "%s", "onset too early - see log");
-            set_rgb_colour((tRgb){ 0.85, 0.60, 0.25 });
+            set_rgb_colour((tRgb){0.85, 0.60, 0.25});
         } else {
             snprintf(buffer, sizeof(buffer), "%s", "not measured");
-            set_rgb_colour((tRgb){ 0.72, 0.72, 0.74 });
+            set_rgb_colour((tRgb){0.72, 0.72, 0.74});
         }
-
-        tRectangle bounds = measure_bounds();
+        tRectangle               bounds        = measure_bounds();
 
         render_text(mainArea,
-                    (tRectangle){ { bounds.coord.x + bounds.size.w + 14.0, measure_y() + 5.0 },
-                                  { 0.0, 11.0 } }, buffer);
+                    (tRectangle){{bounds.coord.x + bounds.size.w + 14.0, measure_y() + 5.0},
+                                 {0.0, 11.0}
+                    }, buffer);
 
         // notes §21
         label(20.0, offset_y() + 4.0, "In use");
 
-        static const char * const kArrow[4] = { "<<", "<", ">", ">>" };
+        static const char *const kArrow[4]     = {"<<", "<", ">", ">>"};
 
         for (int slot = 0; slot < 4; slot++) {
-            draw_button(mainArea, offset_arrow(slot), kArrow[slot], (tRgb){ 0.30, 0.30, 0.33 });
+            draw_button(mainArea, offset_arrow(slot), kArrow[slot], (tRgb){0.30, 0.30, 0.33});
         }
 
-        double     offsetMs = GB_OFFSET_MIN_MS + (gOffset * (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS));
-        tRectangle valueBox = offset_value_box();
+        double                   offsetMs      = GB_OFFSET_MIN_MS + (gOffset * (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS));
+        tRectangle               valueBox      = offset_value_box();
 
         snprintf(buffer, sizeof(buffer), "%+.1f ms", offsetMs);
-        set_rgb_colour((tRgb){ 0.92, 0.92, 0.94 });
+        set_rgb_colour((tRgb){0.92, 0.92, 0.94});
 
         // CENTRED, and measured WITHOUT the cache. get_text_width's cache is keyed on the string's
         // POINTER, and this is a reused stack buffer - a cached width would be whatever was last
         // formatted into it. eNoCache is the only correct answer for a formatted string.
-        double textW = get_text_width(buffer, 11.0, eNoCache);
+        double                   textW         = get_text_width(buffer, 11.0, eNoCache);
 
         render_text(mainArea,
-                    (tRectangle){ { valueBox.coord.x + ((valueBox.size.w - textW) / 2.0),
-                                    offset_y() + 6.0 }, { 0.0, 11.0 } }, buffer);
+                    (tRectangle){{valueBox.coord.x + ((valueBox.size.w - textW) / 2.0),
+                                  offset_y() + 6.0}, {0.0, 11.0}
+                    }, buffer);
 
         // WHICH WAY IT MOVES THE RECORDING, spelled out. "+8 ms" tells nobody whether their part
         // will end up earlier or later, and getting it backwards doubles the error instead of
@@ -978,7 +1047,7 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
         set_rgb_colour((tRgb)GB_CAPTION_GREY);
 
         // gbBridge notes §70 - a correction carried over from another buffer size is an estimate
-        int estimatedFrom = ((status != NULL) && (atomic_load(&status->measureEstimated) != 0))
+        int                      estimatedFrom = ((status != NULL) && (atomic_load(&status->measureEstimated) != 0))
                             ? atomic_load(&status->measuredAtFrames) : -1;
 
         if (estimatedFrom >= 0) {
@@ -987,7 +1056,7 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
             } else {
                 snprintf(buffer, sizeof(buffer), "%s", "estimate - re-measure");
             }
-            set_rgb_colour((tRgb){ 0.95, 0.70, 0.25 });
+            set_rgb_colour((tRgb){0.95, 0.70, 0.25});
         } else if (offsetMs > 0.05) {
             snprintf(buffer, sizeof(buffer), "%s", "recording pulled earlier");
         } else if (offsetMs < -0.05) {
@@ -1000,27 +1069,25 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
             // the old "nudge me if takes sound late" advice.
             snprintf(buffer, sizeof(buffer), "%s", "no correction - measure, or set by ear");
         }
-
-        render_text(mainArea, (tRectangle){ { 270.0, offset_y() + 6.0 }, { 0.0, 11.0 } }, buffer);
+        render_text(mainArea, (tRectangle){{270.0, offset_y() + 6.0}, {0.0, 11.0}}, buffer);
     }
 
     if (!gInstrument) {
         draw_effect_latency_row(buffer, sizeof(buffer));
     }
-
     label(20.0, trim_y() + 2.0, "Trim");
 
     tRectangle track = trim_track();
 
-    set_rgb_colour((tRgb){ 0.16, 0.16, 0.18 });
+    set_rgb_colour((tRgb){0.16, 0.16, 0.18});
     render_rectangle(mainArea, track);
 
-    set_rgb_colour((tRgb){ 0.35, 0.62, 0.85 });
-    render_rectangle(mainArea, (tRectangle){ track.coord, { track.size.w * gTrim, track.size.h } });
+    set_rgb_colour((tRgb){0.35, 0.62, 0.85});
+    render_rectangle(mainArea, (tRectangle){track.coord, {track.size.w * gTrim, track.size.h}});
 
-    snprintf(buffer, sizeof(buffer), "%.2fx", gTrim * 2.0);
-    set_rgb_colour((tRgb){ 0.72, 0.72, 0.74 });
-    render_text(mainArea, (tRectangle){ { track.coord.x + track.size.w + 6.0, trim_y() + 2.0 }, { 0.0, 11.0 } }, buffer);
+    trim_text(gTrim, buffer, sizeof(buffer));
+    set_rgb_colour((tRgb){0.72, 0.72, 0.74});
+    render_text(mainArea, (tRectangle){{track.coord.x + track.size.w + 6.0, trim_y() + 2.0}, {0.0, 11.0}}, buffer);
 
     // ---- meters ----
     label(20.0, level_y() + 2.0, "Level");
@@ -1036,33 +1103,31 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
         render_backend_flush();
         return;
     }
-
     // notes §22
-    int rate = (status != NULL) ? atomic_load(&status->deviceRate) : 0;
+    int          rate         = (status != NULL) ? atomic_load(&status->deviceRate) : 0;
 
     if (rate <= 0) {
         rate = 48000;
     }
+    double       perMs        = (double)rate / 1000.0;
 
-    double perMs = (double)rate / 1000.0;
-
-    int ring   = (status != NULL) ? atomic_load(&status->ringSamples) : 0;
-    int device = (status != NULL) ? atomic_load(&status->deviceSamples) : 0;
-    int filter = (status != NULL) ? atomic_load(&status->filterSamples) : 0;
-    int hw     = (status != NULL) ? atomic_load(&status->measuredSamples) : 0;
-    int off    = (status != NULL) ? atomic_load(&status->offsetSamples) : 0;
-    int total  = (status != NULL) ? atomic_load(&status->latencySamples) : 0;
+    int          ring         = (status != NULL) ? atomic_load(&status->ringSamples) : 0;
+    int          device       = (status != NULL) ? atomic_load(&status->deviceSamples) : 0;
+    int          filter       = (status != NULL) ? atomic_load(&status->filterSamples) : 0;
+    int          hw           = (status != NULL) ? atomic_load(&status->measuredSamples) : 0;
+    int          off          = (status != NULL) ? atomic_load(&status->offsetSamples) : 0;
+    int          total        = (status != NULL) ? atomic_load(&status->latencySamples) : 0;
 
     // Four columns across the panel, so a figure that grows a digit does not shove its neighbours.
-    const double kCol[4] = { 20.0, 145.0, 270.0, 395.0 };
+    const double kCol[4]      = {20.0, 145.0, 270.0, 395.0};
 
-    double y = telemetry_y();
+    double       y            = telemetry_y();
 
     snprintf(buffer, sizeof(buffer), "%d", ring);
     stat(kCol[0], y, "ring", buffer);
 
     // notes §30 - the buffer and what the driver adds on top, which does not move with it
-    int deviceBuffer = (status != NULL) ? atomic_load(&status->deviceBufferSamples) : 0;
+    int          deviceBuffer = (status != NULL) ? atomic_load(&status->deviceBufferSamples) : 0;
 
     if ((deviceBuffer > 0) && (deviceBuffer < device)) {
         snprintf(buffer, sizeof(buffer), "%d (%d+%d)", device, deviceBuffer, device - deviceBuffer);
@@ -1084,20 +1149,19 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
         snprintf(buffer, sizeof(buffer), "%+d (%+.1f ms)", off, (double)off / perMs);
         stat(kCol[2], y, "in use", buffer);
     }
-
     y += 20.0;
 
     // Hand-rolled rather than stat(), because its value spans two columns - but it is the same
     // caption, so it takes the same colour.
     set_rgb_colour((tRgb)GB_CAPTION_GREY);
-    render_text(mainArea, (tRectangle){ { kCol[0], y }, { 0.0, 12.0 } }, "reported");
+    render_text(mainArea, (tRectangle){{kCol[0], y}, {0.0, 12.0}}, "reported");
 
-    set_rgb_colour((tRgb){ 0.88, 0.88, 0.91 });
+    set_rgb_colour((tRgb){0.88, 0.88, 0.91});
     snprintf(buffer, sizeof(buffer), "%d smp", total);
-    render_text(mainArea, (tRectangle){ { kCol[0] + STAT_VALUE_DX, y }, { 0.0, 12.0 } }, buffer);
+    render_text(mainArea, (tRectangle){{kCol[0] + STAT_VALUE_DX, y}, {0.0, 12.0}}, buffer);
 
     snprintf(buffer, sizeof(buffer), "%.1f ms", (double)total / perMs);
-    render_text(mainArea, (tRectangle){ { kCol[1] + STAT_VALUE_DX, y }, { 0.0, 12.0 } }, buffer);
+    render_text(mainArea, (tRectangle){{kCol[1] + STAT_VALUE_DX, y}, {0.0, 12.0}}, buffer);
 
     y += 20.0;
 
@@ -1134,7 +1198,6 @@ void gb_draw_frame(int pixelWidth, int pixelHeight) {
                  (status != NULL) ? atomic_load(&status->eventsOut) : 0);
         stat(kCol[0], y, "notes", buffer);
     }
-
     // LAST, so it draws over everything - and the hover update goes here rather than in the click
     // path because the highlight has to follow the pointer while no button is down.
     update_context_menu_hover();
@@ -1149,7 +1212,6 @@ static double step(double normalized, int count, int delta) {
     if (count <= 1) {
         return 0.0;
     }
-
     int index = (int)(normalized * (double)(count - 1) + 0.5) + delta;
 
     if (index < 0) {
@@ -1157,19 +1219,22 @@ static double step(double normalized, int count, int delta) {
     } else if (index > (count - 1)) {
         index = count - 1;
     }
-
     return (double)index / (double)(count - 1);
 }
 
 bool gb_draw_click(double x, double y, tGbEditRequest * request) {
-    struct { tGbEdit which; double * value; int count; } rows[] = {
-        { eGbEditDevice,       &gDevice, 0                     },   // handled separately, see below
-        { eGbEditRate,         &gRate,   gGbRateCount          },
-        { eGbEditFrames,       &gFrames, gGbFrameCount         },
-        { eGbEditMode,         &gMode,   2                     },
-        { eGbEditFirstChannel, &gFirst,  GB_MAX_FIRST_CHANNEL  },
-        { eGbEditMidiDest,     &gMidiDest, GB_MIDI_MAX_DEST     },
-        { eGbEditMidiChannel,  &gMidiChan, GB_CHANNEL_SLOTS     },
+    struct {
+        tGbEdit  which;
+        double * value;
+        int      count;
+    } rows[] = {
+        {eGbEditDevice,       &gDevice,                      0},    // handled separately, see below
+        {eGbEditRate,         &gRate,     gGbRateCount        },
+        {eGbEditFrames,       &gFrames,   gGbFrameCount       },
+        {eGbEditMode,         &gMode,                        2},
+        {eGbEditFirstChannel, &gFirst,    GB_MAX_FIRST_CHANNEL},
+        {eGbEditMidiDest,     &gMidiDest, GB_MIDI_MAX_DEST    },
+        {eGbEditMidiChannel,  &gMidiChan, GB_CHANNEL_SLOTS    },
     };
 
     request->which = eGbEditNone;
@@ -1179,11 +1244,11 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
     // mean dismissing the menu and working a control in the same gesture.
     if (gContextMenu.active) {
         gMenuChoice = -1;
-        handle_context_menu_click((tCoord){ x, y });
+        handle_context_menu_click((tCoord){x, y});
 
         if ((gMenuChoice >= 0) && (gMenuFor != eGbEditNone)) {
-            int    choice = gMenuChoice;
-            tGbEdit which = gMenuFor;
+            int     choice = gMenuChoice;
+            tGbEdit which  = gMenuFor;
 
             gMenuChoice    = -1;
             gMenuFor       = eGbEditNone;
@@ -1227,26 +1292,28 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
                     break;
 
                 default:
-                    request->which = eGbEditNone;
+                    request->which      = eGbEditNone;
                     return false;
             }
             return true;
         }
         return false;
     }
-
     // The VALUE between the arrows opens a menu; the arrows themselves still step. Both reach the
     // same parameter, so nothing is lost either way - see the note on gMouse above for why both.
     {
-        struct { tGbEdit which; tGbRow row; } menus[] = {
-            { gInstrument ? eGbEditSource : eGbEditRole, eRowSource },
-            { eGbEditDevice,       eRowDevice       },
-            { eGbEditRate,         eRowRate         },
-            { eGbEditFrames,       eRowFrames       },
-            { eGbEditMode,         eRowMode         },
-            { eGbEditFirstChannel, eRowFirstChannel },
-            { eGbEditMidiDest,     eRowMidiDest     },
-            { eGbEditMidiChannel,  eRowMidiChannel  },
+        struct {
+            tGbEdit which;
+            tGbRow  row;
+        }   menus[]  = {
+            {gInstrument ? eGbEditSource : eGbEditRole, eRowSource      },
+            {eGbEditDevice,                             eRowDevice      },
+            {eGbEditRate,                               eRowRate        },
+            {eGbEditFrames,                             eRowFrames      },
+            {eGbEditMode,                               eRowMode        },
+            {eGbEditFirstChannel,                       eRowFirstChannel},
+            {eGbEditMidiDest,                           eRowMidiDest    },
+            {eGbEditMidiChannel,                        eRowMidiChannel },
         };
         // notes §26
         int channels = gb_input_device_channels(gb_device_slot(gDevice));
@@ -1255,9 +1322,9 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
             // A ROW THE HOST-INPUT MODE HAS GREYED DOES NOT ANSWER A CLICK. Drawing it dim and then
             // opening its menu anyway would be the worst of both: it says the control is inert and
             // then behaves as though it is not.
-            if (!row_live(menus[m].row) || (row_of(menus[m].row) >= row_count())
-                || (row_of(menus[m].row) < 0)
-                || !hit(row_value(row_of(menus[m].row)), x, y)) {
+            if (  !row_live(menus[m].row) || (row_of(menus[m].row) >= row_count())
+               || (row_of(menus[m].row) < 0)
+               || !hit(row_value(row_of(menus[m].row)), x, y)) {
                 continue;
             }
             int count = 0;
@@ -1282,6 +1349,7 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
                     for (int i = 0; (i < count) && (i < GB_MENU_MAX - 1); i++) {
                         gb_input_device_name(i, gMenuLabels[i], sizeof(gMenuLabels[i]));
                     }
+
                     break;
 
                 case eGbEditRate:
@@ -1290,6 +1358,7 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
                     for (int i = 0; i < count; i++) {
                         snprintf(gMenuLabels[i], sizeof(gMenuLabels[i]), "%.0f Hz", gGbRates[i]);
                     }
+
                     break;
 
                 case eGbEditFrames:
@@ -1298,6 +1367,7 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
                     for (int i = 0; i < count; i++) {
                         snprintf(gMenuLabels[i], sizeof(gMenuLabels[i]), "%d samples", gGbFrames[i]);
                     }
+
                     break;
 
                 case eGbEditMode:
@@ -1310,7 +1380,8 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
                     }
                     break;
 
-                case eGbEditFirstChannel: {
+                case eGbEditFirstChannel:
+                {
                     int width = (gMode < 0.5) ? 1 : 2;
 
                     // notes §27
@@ -1331,6 +1402,7 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
                             snprintf(gMenuLabels[i], sizeof(gMenuLabels[i]), "%d - %d", i + 1, i + 2);
                         }
                     }
+
                     break;
                 }
 
@@ -1344,6 +1416,7 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
                     for (int i = 0; i < count; i++) {
                         gb_midi_destination_name(i, gMenuLabels[i], sizeof(gMenuLabels[i]));
                     }
+
                     break;
 
                 case eGbEditMidiChannel:
@@ -1353,6 +1426,7 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
                     for (int i = 1; i < count; i++) {
                         snprintf(gMenuLabels[i], sizeof(gMenuLabels[i]), "%d", i);
                     }
+
                     break;
 
                 default:
@@ -1382,7 +1456,6 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
         if (delta == 0) {
             continue;
         }
-
         request->which = rows[row].which;
 
         if (rows[row].which == eGbEditDevice) {
@@ -1397,7 +1470,6 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
             } else if (slot > limit) {
                 slot = limit;
             }
-
             request->normalized = gb_device_normalized(slot);
         } else if (rows[row].which == eGbEditMode) {
             // notes §28
@@ -1441,7 +1513,6 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
         } else {
             request->normalized = step(*rows[row].value, rows[row].count, delta);
         }
-
         return true;
     }
 
@@ -1456,15 +1527,14 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
             if (!hit(draw_button_bounds(note_arrow(slot)), x, y)) {
                 continue;
             }
+            static const int kNoteStep[4] = {-12, -1, 1, 12};
 
-            static const int kNoteStep[4] = { -12, -1, 1, 12 };
-
-            int note = (int)((gTestNote * 127.0) + 0.5) + kNoteStep[slot];
+            int              note         = (int)((gTestNote * 127.0) + 0.5) + kNoteStep[slot];
 
             // Clamped rather than wrapped, for the reason every other stepper here is: an arrow
             // that jumps from the top of a range to the bottom reads as a fault. An octave step
             // that would fall off the end lands ON the end, so C-2 is always one click away.
-            note = (note < 0) ? 0 : ((note > 127) ? 127 : note);
+            note                = (note < 0) ? 0 : ((note > 127) ? 127 : note);
 
             request->which      = eGbEditTestNote;
             request->normalized = (double)note / 127.0;
@@ -1476,25 +1546,25 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
             if (!hit(offset_arrow(slot), x, y)) {
                 continue;
             }
+            static const double kStep[4] = {
+                -GB_OFFSET_STEP_COARSE_MS, -GB_OFFSET_STEP_FINE_MS,
+                GB_OFFSET_STEP_FINE_MS,    GB_OFFSET_STEP_COARSE_MS
+            };
 
-            static const double kStep[4] = { -GB_OFFSET_STEP_COARSE_MS, -GB_OFFSET_STEP_FINE_MS,
-                                             GB_OFFSET_STEP_FINE_MS, GB_OFFSET_STEP_COARSE_MS };
+            double              ms       = GB_OFFSET_MIN_MS + (gOffset * (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS));
 
-            double ms = GB_OFFSET_MIN_MS + (gOffset * (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS));
-
-            ms += kStep[slot];
+            ms                 += kStep[slot];
 
             // SNAPPED TO THE FINE GRID, which is what makes a coarse step usable on a measured
             // figure: Measure dials in 11.83 ms, and without this every coarse click would carry
             // that .03 along for ever while the reading claimed a round number.
-            ms = round(ms / GB_OFFSET_STEP_FINE_MS) * GB_OFFSET_STEP_FINE_MS;
+            ms                  = round(ms / GB_OFFSET_STEP_FINE_MS) * GB_OFFSET_STEP_FINE_MS;
 
             if (ms < GB_OFFSET_MIN_MS) {
                 ms = GB_OFFSET_MIN_MS;
             } else if (ms > GB_OFFSET_MAX_MS) {
                 ms = GB_OFFSET_MAX_MS;
             }
-
             request->which      = eGbEditOffset;
             request->normalized = (ms - GB_OFFSET_MIN_MS) / (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS);
             return true;
@@ -1512,20 +1582,20 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
             if (!hit(extra_arrow(slot), x, y)) {
                 continue;
             }
+            static const double kStep[4] = {
+                -GB_EXTRA_STEP_COARSE_MS, -GB_EXTRA_STEP_FINE_MS,
+                GB_EXTRA_STEP_FINE_MS,    GB_EXTRA_STEP_COARSE_MS
+            };
 
-            static const double kStep[4] = { -GB_EXTRA_STEP_COARSE_MS, -GB_EXTRA_STEP_FINE_MS,
-                                             GB_EXTRA_STEP_FINE_MS, GB_EXTRA_STEP_COARSE_MS };
+            double              ms       = round((gAlign.extraLatency * GB_EXTRA_LATENCY_MAX_MS) + kStep[slot]);
 
-            double ms = round((gAlign.extraLatency * GB_EXTRA_LATENCY_MAX_MS) + kStep[slot]);
-
-            ms = (ms < 0.0) ? 0.0 : ((ms > GB_EXTRA_LATENCY_MAX_MS) ? GB_EXTRA_LATENCY_MAX_MS : ms);
+            ms                  = (ms < 0.0) ? 0.0 : ((ms > GB_EXTRA_LATENCY_MAX_MS) ? GB_EXTRA_LATENCY_MAX_MS : ms);
 
             request->which      = eGbEditExtraLatency;
             request->normalized = ms / GB_EXTRA_LATENCY_MAX_MS;
             return true;
         }
     }
-
     tRectangle track = trim_track();
 
     if (hit(track, x, y)) {
@@ -1535,6 +1605,5 @@ bool gb_draw_click(double x, double y, tGbEditRequest * request) {
         request->normalized = (v < 0.0) ? 0.0 : ((v > 1.0) ? 1.0 : v);
         return true;
     }
-
     return false;
 }

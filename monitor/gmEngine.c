@@ -29,6 +29,7 @@
 #include "device.h"
 #include "drift.h"
 #include "gmEngine.h"
+#include "gmInsert.h"
 #include "resampler.h"
 #include "ring.h"
 
@@ -54,9 +55,14 @@ typedef struct {
     float *          pull;               // ring -> resampler staging
     uint32_t         pullCapacity;
     float *          mix;                // resampler -> output mapping staging
+    float *          fxLeft;             // gmInsert notes §2 - the insert's stereo, in place
+    float *          fxRight;
+    bool             insert;
+    bool             insertFailed;
     uint32_t         inFrames;
     uint32_t         outFrames;
     uint32_t         inRestoreFrames;    // notes §4 - nonzero when we changed it and must put it back
+    double           inRestoreRate;      // notes §8 - likewise the input's rate
     uint32_t         outRestoreFrames;
     bool             inShared;
     bool             outShared;
@@ -72,12 +78,12 @@ typedef struct {
     _Atomic double   driftPpm;
 } tGmEngine;
 
-static tGmEngine * gEngine     = NULL;
-static tGmConfig   gConfig;
-static tGmState    gState      = eGmStopped;
-static char        gMessage[160];
+static tGmEngine *  gEngine      = NULL;
+static tGmConfig    gConfig;
+static tGmState     gState       = eGmStopped;
+static char         gMessage[160];
 static _Atomic bool gListChanged = false;
-static bool        gWatching   = false;
+static bool         gWatching    = false;
 
 // ---------------------------------------------------------------------------------------------
 // Real time. No allocation, locks or logging.
@@ -95,7 +101,7 @@ static void hold_peak(_Atomic float * peak, float value) {
 static void input_callback(void * user, const float * input, float * output, uint32_t frames) {
     (void)output;
     tGmEngine * e    = (tGmEngine *)user;
-    float       p[2] = { 0.0f, 0.0f };
+    float       p[2] = {0.0f, 0.0f};
 
     for (uint32_t i = 0; i < frames; i++) {
         for (uint32_t c = 0; c < e->inChannels; c++) {
@@ -106,6 +112,7 @@ static void input_callback(void * user, const float * input, float * output, uin
             }
         }
     }
+
     hold_peak(&e->inPeak[0], p[0]);
     hold_peak(&e->inPeak[1], (e->inChannels > 1) ? p[1] : p[0]);
 
@@ -138,7 +145,6 @@ static void output_callback(void * user, const float * input, float * output, ui
         atomic_store(&e->started, true);
         atomic_store(&e->needResync, false);
     }
-
     double   fill       = (double)ring_fill(&e->ring);
     double   correction = drift_update(&e->drift, fill, (double)frames / e->outRate);
     double   ratio      = e->ratio * (1.0 + correction);
@@ -156,13 +162,23 @@ static void output_callback(void * user, const float * input, float * output, ui
     }
     resampler_process(&e->resampler, e->mix, frames, ratio);
 
+    // gmInsert notes §2 - Helix Native, stereo, after the resampler and before the trim
+    if (e->insert) {
+        for (uint32_t i = 0; i < frames; i++) {
+            e->fxLeft[i]  = e->mix[i * e->inChannels];
+            e->fxRight[i] = (e->inChannels > 1) ? e->mix[(i * e->inChannels) + 1] : e->fxLeft[i];
+        }
+
+        gm_insert_process(e->fxLeft, e->fxRight, frames);
+    }
     // notes §6
     float gain = (float)atomic_load(&e->trim);
-    float p[2] = { 0.0f, 0.0f };
+    float p[2] = {0.0f, 0.0f};
 
     for (uint32_t i = 0; i < frames; i++) {
-        float l = e->mix[i * e->inChannels] * gain;
-        float r = (e->inChannels > 1) ? (e->mix[(i * e->inChannels) + 1] * gain) : l;
+        float l = (e->insert ? e->fxLeft[i] : e->mix[i * e->inChannels]) * gain;
+        float r = e->insert ? (e->fxRight[i] * gain)
+                  : ((e->inChannels > 1) ? (e->mix[(i * e->inChannels) + 1] * gain) : l);
 
         if (e->outChannels == 1) {
             float m = (e->inChannels > 1) ? (0.5f * (l + r)) : l;
@@ -177,6 +193,7 @@ static void output_callback(void * user, const float * input, float * output, ui
             p[1]                = fmaxf(p[1], fabsf(r));
         }
     }
+
     hold_peak(&e->outPeak[0], p[0]);
     hold_peak(&e->outPeak[1], p[1]);
 
@@ -231,8 +248,22 @@ static uint32_t claim_buffer(AudioObjectID id, uint32_t wanted, bool * shared, u
     if (device_set_buffer_frames(id, wanted)) {
         *restore = current;
     }
-
     return device_buffer_frames(id);
+}
+
+// notes §8 - the input's rate, by the buffer's rule: set only where no other client is running the device
+static void claim_rate(AudioObjectID id, double wanted, double * restore) {
+    double current = device_sample_rate(id);
+
+    *restore = 0.0;
+
+    if ((wanted <= 0.0) || (current <= 0.0) || (wanted == current) || device_is_running_somewhere(id)) {
+        return;
+    }
+
+    if (device_set_sample_rate_and_wait(id, wanted)) {
+        *restore = current;
+    }
 }
 
 static void release(void) {
@@ -258,14 +289,20 @@ static void release(void) {
         device_set_buffer_frames(e->inId, e->inRestoreFrames);
     }
 
+    if ((e->inRestoreRate > 0.0) && !device_is_running_somewhere(e->inId)) {
+        device_set_sample_rate_and_wait(e->inId, e->inRestoreRate);
+    }
+
     if ((e->outRestoreFrames > 0) && (e->outId != e->inId) && !device_is_running_somewhere(e->outId)) {
         device_set_buffer_frames(e->outId, e->outRestoreFrames);
     }
-
+    gm_insert_close();    // the devices are stopped, so nothing renders through it now
     ring_free(&e->ring);
     resampler_free(&e->resampler);
     free(e->pull);
     free(e->mix);
+    free(e->fxLeft);
+    free(e->fxRight);
     free(e);
     gEngine = NULL;
 }
@@ -282,8 +319,8 @@ static void open_engine(void) {
 
     release();
 
-    bool haveIn  = find_uid(gConfig.inUid, true, &inInfo);
-    bool haveOut = find_uid(gConfig.outUid, false, &outInfo);
+    bool        haveIn  = find_uid(gConfig.inUid, true, &inInfo);
+    bool        haveOut = find_uid(gConfig.outUid, false, &outInfo);
 
     if ((gConfig.inUid[0] == '\0') || (gConfig.outUid[0] == '\0')) {
         gState = eGmStopped;
@@ -296,9 +333,8 @@ static void open_engine(void) {
         snprintf(gMessage, sizeof(gMessage), "waiting for the %s device", !haveIn ? "input" : "output");
         return;
     }
-
-    uint32_t inCh  = (gConfig.inChannels > 1) ? 2u : 1u;
-    uint32_t outCh = (gConfig.outChannels > 1) ? 2u : 1u;
+    uint32_t    inCh    = (gConfig.inChannels > 1) ? 2u : 1u;
+    uint32_t    outCh   = (gConfig.outChannels > 1) ? 2u : 1u;
 
     if ((gConfig.inFirst + inCh) > inInfo.inputChannels) {
         fail("the input channels are beyond what the device has");
@@ -309,53 +345,62 @@ static void open_engine(void) {
         fail("the output channels are beyond what the device has");
         return;
     }
-
-    tGmEngine * e = (tGmEngine *)calloc(1, sizeof(tGmEngine));
+    tGmEngine * e       = (tGmEngine *)calloc(1, sizeof(tGmEngine));
 
     if (e == NULL) {
         fail("out of memory");
         return;
     }
-    gEngine        = e;
-    e->inId        = inInfo.id;
-    e->outId       = outInfo.id;
-    e->inChannels  = inCh;
-    e->outChannels = outCh;
+    gEngine         = e;
+    e->inId         = inInfo.id;
+    e->outId        = outInfo.id;
+    e->inChannels   = inCh;
+    e->outChannels  = outCh;
+
+    claim_rate(e->inId, gConfig.inRate, &e->inRestoreRate);
 
     // notes §4 - one device in both roles is one buffer setting, so it is claimed once
-    e->inFrames  = claim_buffer(e->inId, gConfig.frames, &e->inShared, &e->inRestoreFrames);
-    e->outFrames = (e->outId == e->inId) ? e->inFrames
+    e->inFrames     = claim_buffer(e->inId, gConfig.frames, &e->inShared, &e->inRestoreFrames);
+    e->outFrames    = (e->outId == e->inId) ? e->inFrames
                    : claim_buffer(e->outId, gConfig.frames, &e->outShared, &e->outRestoreFrames);
 
     if (e->outId == e->inId) {
         e->outShared = e->inShared;
     }
-    e->inRate  = device_sample_rate(e->inId);
-    e->outRate = device_sample_rate(e->outId);
+    e->inRate       = device_sample_rate(e->inId);
+    e->outRate      = device_sample_rate(e->outId);
 
     if ((e->inRate <= 0.0) || (e->outRate <= 0.0) || (e->inFrames == 0) || (e->outFrames == 0)) {
         fail("could not read the devices' rate or buffer");
         return;
     }
-    e->ratio = e->inRate / e->outRate;
+    e->ratio        = e->inRate / e->outRate;
 
     // notes §3
-    double floor = ((double)e->outFrames * e->ratio) + (double)e->inFrames + (2.0 * RESAMPLER_TAPS);
+    double       floor      = ((double)e->outFrames * e->ratio) + (double)e->inFrames + (2.0 * RESAMPLER_TAPS);
 
-    e->setpoint = (floor * GM_MARGIN) + ((gConfig.safetyMs / 1000.0) * e->inRate);
+    e->setpoint     = (floor * GM_MARGIN) + ((gConfig.safetyMs / 1000.0) * e->inRate);
 
-    uint32_t ringFrames = (uint32_t)(e->setpoint * 8.0) + (4u * GM_MAX_CALLBACK);
+    uint32_t     ringFrames = (uint32_t)(e->setpoint * 8.0) + (4u * GM_MAX_CALLBACK);
 
     e->pullCapacity = (uint32_t)((double)GM_MAX_CALLBACK * e->ratio * 1.5) + (4u * RESAMPLER_TAPS);
     e->pull         = (float *)calloc((size_t)e->pullCapacity * inCh, sizeof(float));
     e->mix          = (float *)calloc((size_t)GM_MAX_CALLBACK * inCh, sizeof(float));
 
-    if ((e->pull == NULL) || (e->mix == NULL) || !ring_init(&e->ring, ringFrames, inCh)
-        || !resampler_init(&e->resampler, inCh, e->ratio, GM_MAX_CALLBACK)) {
+    if (  (e->pull == NULL) || (e->mix == NULL) || !ring_init(&e->ring, ringFrames, inCh)
+       || !resampler_init(&e->resampler, inCh, e->ratio, GM_MAX_CALLBACK)) {
         fail("out of memory");
         return;
     }
-    tDriftConfig drift = drift_default_config();
+
+    // gmInsert notes §1 - loaded before the devices start, so the output never races its arrival
+    if (gConfig.insert && gm_insert_available()) {
+        e->fxLeft       = (float *)calloc(GM_MAX_CALLBACK, sizeof(float));
+        e->fxRight      = (float *)calloc(GM_MAX_CALLBACK, sizeof(float));
+        e->insert       = (e->fxLeft != NULL) && (e->fxRight != NULL) && gm_insert_open(e->outRate, GM_MAX_CALLBACK);
+        e->insertFailed = !e->insert;
+    }
+    tDriftConfig drift      = drift_default_config();
 
     drift_init(&e->drift, &drift, e->inRate, e->setpoint);
     atomic_store(&e->trim, gConfig.trim);
@@ -371,19 +416,19 @@ static void open_engine(void) {
         fail("could not open the input");
         return;
     }
-    e->inOpen = true;
+    e->inOpen    = true;
 
     if (!device_open(&e->out, e->outId, false, gConfig.outFirst, outCh, GM_MAX_CALLBACK, output_callback, e)) {
         fail("could not open the output");
         return;
     }
-    e->outOpen = true;
+    e->outOpen   = true;
 
     if (!device_start(&e->in) || !device_start(&e->out)) {
         fail("a device would not start");
         return;
     }
-    gState = eGmRunning;
+    gState       = eGmRunning;
     snprintf(gMessage, sizeof(gMessage), "%s -> %s", inInfo.name, outInfo.name);
 }
 
@@ -418,8 +463,8 @@ void gm_engine_poll(void) {
 
     if (gState == eGmWaiting) {
         open_engine();
-    } else if ((gState == eGmRunning)
-               && (!find_uid(gConfig.inUid, true, &info) || !find_uid(gConfig.outUid, false, &info))) {
+    } else if (  (gState == eGmRunning)
+              && (!find_uid(gConfig.inUid, true, &info) || !find_uid(gConfig.outUid, false, &info))) {
         release();
         gState = eGmWaiting;
         snprintf(gMessage, sizeof(gMessage), "%s", "a device went away - waiting for it");
@@ -428,7 +473,7 @@ void gm_engine_poll(void) {
 
 void gm_engine_status(tGmStatus * out) {
     memset(out, 0, sizeof(*out));
-    out->state = gState;
+    out->state          = gState;
     snprintf(out->message, sizeof(out->message), "%s", gMessage);
 
     tGmEngine * e = gEngine;
@@ -442,6 +487,7 @@ void gm_engine_status(tGmStatus * out) {
         out->inPeak[c]  = atomic_exchange(&e->inPeak[c], 0.0f);
         out->outPeak[c] = atomic_exchange(&e->outPeak[c], 0.0f);
     }
+
     out->latencyMs      = e->latencyMs;
     out->bridgeMs       = e->bridgeMs;
     out->fillFrames     = atomic_load(&e->fill);
@@ -453,6 +499,8 @@ void gm_engine_status(tGmStatus * out) {
     out->outFrames      = e->outFrames;
     out->inShared       = e->inShared;
     out->outShared      = e->outShared;
+    out->insertOpen     = e->insert;
+    out->insertFailed   = e->insertFailed;
     out->inRate         = e->inRate;
     out->outRate        = e->outRate;
 }

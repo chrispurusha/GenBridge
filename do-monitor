@@ -46,6 +46,7 @@ SOURCES=(
     "$HERE/monitor/gmEngine.c"
     "$HERE/monitor/gmDraw.c"
     "$HERE/monitor/gmSettings.c"
+    "$HERE/monitor/gmInsert.c"
     "$HERE/poc/resampler.c"
     "$HERE/poc/drift.c"
     "$SL/audio/device.c"
@@ -81,7 +82,7 @@ INCLUDES=(-I"$HERE/monitor" -I"$HERE/poc" -I"$SL/src" -I"$SL/audio" -I"$SL/plugi
           -I"$SL/ThirdParty/glfw/include" -I"$SL/ThirdParty/freetype/include")
 ARCHS=(-arch arm64 -arch x86_64)
 MIN=-mmacosx-version-min=11.5
-LIBS=(-framework CoreAudio -framework CoreMIDI -framework CoreFoundation -framework Cocoa
+LIBS=(-framework CoreAudio -framework CoreMIDI -framework CoreFoundation -framework Cocoa -framework AudioToolbox
       -framework Metal -framework QuartzCore)
 
 OBJDIR="$(mktemp -d)"

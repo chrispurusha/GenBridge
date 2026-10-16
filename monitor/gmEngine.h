@@ -35,8 +35,10 @@ typedef struct {
     uint32_t outFirst;
     uint32_t outChannels;
     uint32_t frames;         // device buffer to ask for - honoured only where nothing else holds the device
+    double   inRate;         // the input's rate to ask for, 0 to leave it as it is - likewise (gmEngine notes §8)
     double   safetyMs;       // added to the smallest setpoint that clears both blocks
-    double   trim;           // linear gain, 0..2
+    double   trim;           // linear gain - poc/trim.h
+    bool     insert;         // Helix Native in the path - gmInsert notes §1
 } tGmConfig;
 
 typedef enum {
@@ -64,6 +66,8 @@ typedef struct {
     bool     outShared;
     double   inRate;
     double   outRate;
+    bool     insertOpen;     // Helix Native is running in the path
+    bool     insertFailed;   // asked for, but would not load
 } tGmStatus;
 
 // All on the main thread.

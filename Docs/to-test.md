@@ -1,3 +1,15 @@
+- ***MONITOR: HELIX NATIVE IN THE PATH (2026-10-16)*** - gmInsert notes. Helix Native row On: the routing restarts with
+  Helix in it; "Edit Helix" opens its editor; change the preset, Stop, Start - the preset comes back (settings saved
+  as helix-native.plist, like a DAW's project); quit and relaunch - still there. Off: dry again. Loaded and rendered
+  offline only so far - not yet heard through the Helix -> QU-24 route.
+- ***TRIM TO +12 dB, IN DECIBELS (2026-10-16)*** - poc/trim.h, trim.h notes §1. Plug-in and Monitor: the Trim bar reads in
+  dB, -48 to +12 with its bottom "-inf dB", 0 dB at four-fifths of the way; +12 dB is audibly louder than the old top
+  (+6). The host's own Trim parameter shows dB. An existing project and the Monitor's saved trim (1.98) come back at
+  the same level, now reading +5.9 dB.
+- ***MONITOR: DISPLAY ALWAYS STARTS RUNNING; INPUT RATE ROW (2026-10-16)*** - gmDraw notes §7, gmEngine notes §8. Pause the
+  display, quit, reopen: the window draws at once. New Rate row under the input: pick 48000 with the input not used by
+  anything else - the stats line reads it, and Stop puts the device back; with the DAW holding the device it is left
+  alone and the panel says "buffer and rate were left as they are".
 - ***TWO GENBRIDGES ON ONE DEVICE SHARE ITS BUFFER (2026-10-09)*** - gbBridge notes §75; vst3check --shared passes on the
   CalDigit. In Live: two capture instances on the Helix, set one to 16 - both panels should read 16 with no "shared",
   the log "shared device: told 1 other GenBridge(s) it is now 16 frames". Remove one: the other keeps 16. Remove

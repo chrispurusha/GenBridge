@@ -25,7 +25,7 @@
 #include "gmEngine.h"
 
 #define GM_CANVAS_W    (520.0)
-#define GM_CANVAS_H    (540.0)
+#define GM_CANVAS_H    (608.0)
 
 typedef enum {
     eGmEditNone = 0,
@@ -33,12 +33,13 @@ typedef enum {
     eGmEditTrim,         // trim only - applied live
     eGmEditRun,          // Start/Stop pressed
     eGmEditDisplay,      // the display toggle - pause or resume all drawing
+    eGmEditInsertEditor, // open Helix Native's own editor - gmInsert notes §4
 } tGmEdit;
 
-void    gm_draw_init(void);
-void    gm_draw_set_mouse(double x, double y);
-bool    gm_draw_menu_active(void);
-void    gm_draw_frame(const tGmConfig * config, bool running, bool displayPaused, int pixelWidth, int pixelHeight);
+void gm_draw_init(void);
+void gm_draw_set_mouse(double x, double y);
+bool gm_draw_menu_active(void);
+void gm_draw_frame(const tGmConfig * config, bool running, bool displayPaused, int pixelWidth, int pixelHeight);
 // Edits config in place and says what kind of change it was.
 tGmEdit gm_draw_click(tGmConfig * config, bool running, double x, double y);
 

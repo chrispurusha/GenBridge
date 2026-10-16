@@ -6,11 +6,8 @@ Built-but-unchecked work goes in to-test.md.
 
 Shared with the sibling projects
 
-- Bug - application looks like it's not opening if display has been turned off. Maybe we shouldn't save the Display / stop state?
-- If sample rates are the same, can we synch without drift? Might not be able to, so that's fine.
-- Should be able to set input sample rate unless we're sharing?
-- Host a VST3 or AU plugin like Line6 Helix, for live guitar monitoring.
-- Need more than +6dB trim boost. +12dB?
+- Need a pre-trim for going into the plugin.
+- Monitor insert BUILT 2026-10-16 (Helix Native, AU, gmInsert notes) - see to-test.md. Still open: a plug-in selector; its latency in the panel's figure; VST3 hosting (app only)
 - Option to show metering on all inputs on a device, to allow finding the in-use inputs as a stereo pair or mono.
 - Application needs to build as an XCode project, for debugging.
 - Align role BUILT 2026-10-09 (to-test): Extra Latency confirmed in Live by CT, now set automatically by an aligning instance on the recording track (gbAlign notes). Next: the instrument panel has no Extra row yet (generic parameters only)

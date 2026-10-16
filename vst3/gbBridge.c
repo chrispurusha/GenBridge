@@ -85,7 +85,7 @@ static void gb_device_list_changed(void * user) {
 
 // notes §2
 void gb_lock_config_from_host(tGbBridge * self, const char * who) {
-    double began = gb_now_ms();
+    double began  = gb_now_ms();
 
     pthread_mutex_lock(&self->configLock);
 
@@ -93,7 +93,7 @@ void gb_lock_config_from_host(tGbBridge * self, const char * who) {
 
     if (waited >= 20.0) {
         synthlib_log_line("HOST THREAD BLOCKED: %s waited %.0f ms for configLock - a device open was in "
-                 "flight. This is what a spinning cursor looks like from in here", who, waited);
+                          "flight. This is what a spinning cursor looks like from in here", who, waited);
     }
 }
 
@@ -114,7 +114,6 @@ static double gb_snapshot_latency_frames(tGbBridge * self) {
     if (ratio <= 0.0) {
         return 0.0;    // mid-swap, or nothing open: no latency to report rather than inf
     }
-
     // Before a block has run there is nothing measured yet, so the setpoint is the estimate.
     return (atomic_load(&self->snapSetpoint) + resampler_latency_frames() + (double)atomic_load(&self->snapDeviceLatency))
            / ratio;
@@ -140,7 +139,6 @@ static double gb_latency_frames_for_fill(tGbBridge * self, double fillFrames) {
     if (self->nominalRatio <= 0.0) {
         return 0.0;
     }
-
     // Reported in the HOST's frames, and the ring is measured in the device's.
     return inputFrames / self->nominalRatio;
 }
@@ -154,14 +152,12 @@ double gb_latency_frames_measured(tGbBridge * self, double fillFrames, uint64_t 
     if (self->nominalRatio <= 0.0) {
         return 0.0;
     }
-
-    double buffered = (double)self->deviceLatency - (double)self->openDeviceFrames;
+    double buffered   = (double)self->deviceLatency - (double)self->openDeviceFrames;
 
     if (buffered < 0.0) {
         buffered = 0.0;
     }
-
-    double inRing = fillFrames + buffered + resampler_latency_frames();
+    double inRing     = fillFrames + buffered + resampler_latency_frames();
 
     // notes §6
     double sinceWrite = gb_frames_between(self, atomic_load(&self->lastWriteHostTime), at);
@@ -170,7 +166,6 @@ double gb_latency_frames_measured(tGbBridge * self, double fillFrames, uint64_t 
     if ((atomic_load(&self->lastWriteHostTime) == 0) || (sinceWrite > sanest)) {
         sinceWrite = 0.0;
     }
-
     return sinceWrite + (inRing / self->nominalRatio);
 }
 
@@ -206,27 +201,26 @@ uint8_t gb_measure_channel(tGbBridge * self) {
 
 // notes §9
 static uint64_t gb_block_host_time(tGbBridge * self, int32_t frames) {
-    uint64_t now   = AudioGetCurrentHostTime();
+    uint64_t now     = AudioGetCurrentHostTime();
 
     // notes §10
     self->blockActualHostTime = now;
-    uint64_t start = now;
-    double   rate  = atomic_load(&self->eventRate);
+    uint64_t start   = now;
+    double   rate    = atomic_load(&self->eventRate);
 
     // notes §11
-    double gap = gb_frames_between(self, self->lastCallHostTime, now);
+    double   gap     = gb_frames_between(self, self->lastCallHostTime, now);
 
-    self->blockStartsCycle = (self->lastCallHostTime == 0) || (gap > ((double)self->lastCallFrames * 0.5));
-    self->lastCallHostTime = now;
-    self->lastCallFrames   = (uint32_t)frames;
+    self->blockStartsCycle    = (self->lastCallHostTime == 0) || (gap > ((double)self->lastCallFrames * 0.5));
+    self->lastCallHostTime    = now;
+    self->lastCallFrames      = (uint32_t)frames;
 
     // notes §12
     if (self->nextBlockHostTime > now) {
         start = self->nextBlockHostTime;
     }
-
     // notes §13
-    double cycle = (double)self->hostMaxFrames * 8.0;
+    double   cycle   = (double)self->hostMaxFrames * 8.0;
 
     if ((double)self->observedMaxFrames * 2.0 > cycle) {
         cycle = (double)self->observedMaxFrames * 2.0;
@@ -238,15 +232,14 @@ static uint64_t gb_block_host_time(tGbBridge * self, int32_t frames) {
 
     if (rate > 0.0) {
         uint64_t ceiling = now + AudioConvertNanosToHostTime(
-                               (uint64_t)((cycle / rate) * 1.0e9));
+            (uint64_t)((cycle / rate) * 1.0e9));
 
         if (start > ceiling) {
             start = now;
         }
     }
-
     // notes §14
-    double advance = (double)frames;
+    double   advance = (double)frames;
 
     if (rate > 0.0) {
         double ahead = gb_frames_between(self, now, start);
@@ -259,13 +252,12 @@ static uint64_t gb_block_host_time(tGbBridge * self, int32_t frames) {
             advance -= (shave > most) ? most : shave;
         }
     }
-
     self->nextBlockHostTime = (rate > 0.0)
                         ? start + AudioConvertNanosToHostTime(
-                              (uint64_t)((advance / rate) * 1.0e9))
+        (uint64_t)((advance / rate) * 1.0e9))
                         : 0;
 
-    self->blockHostTimeNow = start;
+    self->blockHostTimeNow  = start;
 
     return start;
 }
@@ -288,7 +280,6 @@ double gb_frames_between(tGbBridge * self, uint64_t from, uint64_t to) {
     if ((to <= from) || (rate <= 0.0)) {
         return 0.0;
     }
-
     return ((double)AudioConvertHostTimeToNanos(to - from) / 1.0e9) * rate;
 }
 
@@ -296,12 +287,11 @@ double gb_frames_between(tGbBridge * self, uint64_t from, uint64_t to) {
 // of this block, which is now; anything later is that many frames into the future and CoreMIDI
 // will hold it until then.
 static uint64_t gb_host_time_for(tGbBridge * self, uint64_t blockHostTime, int32_t sampleOffset) {
-    double rate = atomic_load(&self->eventRate);
+    double rate  = atomic_load(&self->eventRate);
 
     if ((sampleOffset <= 0) || (rate <= 0.0)) {
         return blockHostTime;
     }
-
     double nanos = ((double)sampleOffset / rate) * 1.0e9;
 
     return blockHostTime + AudioConvertNanosToHostTime((uint64_t)nanos);
@@ -309,9 +299,9 @@ static uint64_t gb_host_time_for(tGbBridge * self, uint64_t blockHostTime, int32
 
 // notes §15
 static void gb_send_controller(tGbBridge * self, uint32_t id, double value, uint64_t hostTime) {
-    uint32_t index      = (uint32_t)(id - (uint32_t)GB_CC_BASE);
-    uint8_t  channel    = gb_channel_for(self, (int16_t)((index / GB_CC_PER_CHANNEL) & 0x0F));
-    uint32_t controller = index % GB_CC_PER_CHANNEL;
+    uint32_t index       = (uint32_t)(id - (uint32_t)GB_CC_BASE);
+    uint8_t  channel     = gb_channel_for(self, (int16_t)((index / GB_CC_PER_CHANNEL) & 0x0F));
+    uint32_t controller  = index % GB_CC_PER_CHANNEL;
     int      destination = atomic_load(&self->midiDestination);
     uint8_t  message[3];
 
@@ -346,7 +336,6 @@ static void gb_send_controller(tGbBridge * self, uint32_t id, double value, uint
     if (controller > 127) {
         return;
     }
-
     message[0] = (uint8_t)(0xB0 | channel);
     message[1] = (uint8_t)controller;
     message[2] = (uint8_t)((value * 127.0) + 0.5);
@@ -370,7 +359,6 @@ static void gb_observe_burst(tGbBridge * self, int32_t frames) {
         if ((self->burstFrames > self->observedMaxFrames) && (self->burstFrames <= ceiling)) {
             self->observedMaxFrames = self->burstFrames;
         }
-
         self->burstFrames = (uint32_t)frames;
     } else {
         self->burstFrames += (uint32_t)frames;
@@ -392,13 +380,11 @@ static void gb_observe_block(tGbBridge * self, int32_t frames) {
     if (self->retuneState != eRetuneWatching) {
         return;
     }
-
     self->observedFrames += (uint64_t)frames;
 
     if ((double)self->observedFrames < (GB_SETTLE_SECONDS * self->hostRate)) {
         return;
     }
-
     double candidate = gb_minimum_setpoint_for_host(self, self->observedMaxFrames) * GB_AUTO_MARGIN;
 
     // Nothing to gain if the host is using what it declared.
@@ -418,12 +404,12 @@ static void gb_observe_block(tGbBridge * self, int32_t frames) {
 // Peak-hold with a slow decay, which is what makes a meter readable: a true instantaneous peak
 // on a 30 Hz repaint shows almost nothing of a transient.
 static void gb_publish_status(tGbBridge * self, float ** out, int32_t frames, double fill) {
-    tGbStatus * status = gb_status(self->statusSlot);
+    tGbStatus * status            = gb_status(self->statusSlot);
 
     if (status == NULL) {
         return;
     }
-    float       peak[GB_CHANNELS] = { 0.0f, 0.0f };
+    float       peak[GB_CHANNELS] = {0.0f, 0.0f};
 
     for (int c = 0; c < GB_CHANNELS; c++) {
         for (int32_t i = 0; i < frames; i++) {
@@ -435,8 +421,8 @@ static void gb_publish_status(tGbBridge * self, float ** out, int32_t frames, do
         }
     }
 
-    float heldLeft  = atomic_load(&status->peakLeft) * 0.85f;
-    float heldRight = atomic_load(&status->peakRight) * 0.85f;
+    float       heldLeft          = atomic_load(&status->peakLeft) * 0.85f;
+    float       heldRight         = atomic_load(&status->peakRight) * 0.85f;
 
     atomic_store(&status->peakLeft, (peak[0] > heldLeft) ? peak[0] : heldLeft);
     atomic_store(&status->peakRight, (peak[1] > heldRight) ? peak[1] : heldRight);
@@ -475,8 +461,8 @@ static void gb_silence(float ** out, int32_t frames) {
 static void gb_capture_callback(void * user, const float * input, float * output, uint32_t frames) {
     (void)output;
 
-    tGbBridge * self = (tGbBridge *)user;
-    const float *     source = input;
+    tGbBridge *   self   = (tGbBridge *)user;
+    const float * source = input;
 
     if (self->captureChannels == 1) {
         for (uint32_t i = 0; i < frames; i++) {
@@ -486,7 +472,6 @@ static void gb_capture_callback(void * user, const float * input, float * output
 
         source = self->widen;
     }
-
     // WHEN THE NEWEST FRAME IN THE RING GOT HERE. Without it the ring's occupancy cannot be
     // turned into an age: see gb_latency_frames_measured(self).
     atomic_store(&self->lastWriteHostTime, AudioGetCurrentHostTime());
@@ -502,7 +487,6 @@ static void gb_start_worker(tGbBridge * self) {
     if (self->workerActive) {
         return;
     }
-
     atomic_store(&self->workerQuit, false);
     self->workerActive = (pthread_create(&self->worker, NULL, gb_worker_entry, self) == 0);
 }
@@ -511,7 +495,6 @@ static void gb_stop_worker(tGbBridge * self) {
     if (!self->workerActive) {
         return;
     }
-
     atomic_store(&self->workerQuit, true);
     gb_wake_worker(self);
     pthread_join(self->worker, NULL);
@@ -566,13 +549,13 @@ static void gb_worker_loop(tGbBridge * self) {
 
         while (!self->wakeFlag && !atomic_load(&self->workerQuit)) {
             // notes §71 - asleep until woken, or until a pending buffer retry falls due
-            double retryAt = atomic_load(&self->framesRetryAtMs);
+            double          retryAt = atomic_load(&self->framesRetryAtMs);
 
             if (retryAt <= 0.0) {
                 pthread_cond_wait(&self->wakeCond, &self->wakeMutex);
                 continue;
             }
-            double wait = retryAt - gb_now_ms();
+            double          wait    = retryAt - gb_now_ms();
 
             if (wait <= 0.0) {
                 break;
@@ -581,7 +564,7 @@ static void gb_worker_loop(tGbBridge * self) {
             struct timespec until;
 
             gettimeofday(&now, NULL);
-            double          whole = (double)now.tv_sec + ((double)now.tv_usec / 1.0e6) + (wait / 1000.0);
+            double          whole   = (double)now.tv_sec + ((double)now.tv_usec / 1.0e6) + (wait / 1000.0);
 
             until.tv_sec  = (time_t)whole;
             until.tv_nsec = (long)((whole - (double)until.tv_sec) * 1.0e9);
@@ -590,7 +573,6 @@ static void gb_worker_loop(tGbBridge * self) {
                 break;
             }
         }
-
         self->wakeFlag = false;
         pthread_mutex_unlock(&self->wakeMutex);
 
@@ -611,7 +593,6 @@ static void gb_worker_loop(tGbBridge * self) {
         if (!atomic_load(&self->workerQuit) && atomic_exchange(&self->deviceDirty, false)) {
             gb_reconfigure(self);
         }
-
         // notes §71 - the device's size, looked at without disturbing it: reconfigured once it has
         // taken the size, left alone if a whole wait passes
         {
@@ -681,10 +662,10 @@ static void gb_worker_loop(tGbBridge * self) {
             double offPart  = (atomic_load(&self->offsetMs) / 1000.0) * atomic_load(&self->snapHostRate);
 
             synthlib_log_line("latency %u smp (%.1f ms) = pipeline %.0f (setpoint would say %.0f: ring "
-                     "%.0f + device %.0f + filter %.0f) + measured %.0f (%.1f ms)",
-                     atomic_load(&self->reportedLatency), (double)atomic_load(&self->reportedLatency) / perMs,
-                     atomic_load(&self->pipelineAvg), ringPart + devPart + filtPart,
-                     ringPart, devPart, filtPart, offPart, offPart / perMs);
+                              "%.0f + device %.0f + filter %.0f) + measured %.0f (%.1f ms)",
+                              atomic_load(&self->reportedLatency), (double)atomic_load(&self->reportedLatency) / perMs,
+                              atomic_load(&self->pipelineAvg), ringPart + devPart + filtPart,
+                              ringPart, devPart, filtPart, offPart, offPart / perMs);
         }
 
         if (atomic_exchange(&self->latencyDirty, false)) {
@@ -711,7 +692,7 @@ static void gb_reconfigure_serialised(tGbBridge * self) {
     tDeviceInfo chosen;
     bool        found = false;
 
-    int index = atomic_load(&self->wantedDevice);
+    int         index = atomic_load(&self->wantedDevice);
 
     // HOST INPUT OPENS NOTHING, and closes whatever was open. Holding a capture device while the
     // audio is coming from the host would keep hardware nobody is listening to - and on a device
@@ -723,17 +704,16 @@ static void gb_reconfigure_serialised(tGbBridge * self) {
 
         gb_publish_waiting(self, false, NULL);
 
-        tGbStatus * status = gb_status(atomic_load(&self->statusSlot));
+        tGbStatus * status     = gb_status(atomic_load(&self->statusSlot));
 
         if (status != NULL) {
             snprintf(status->deviceName, sizeof(status->deviceName), "%s", "Host input");
             atomic_store(&status->active, true);
         }
-
         // WHAT THE HOST IS TOLD IS THE CORRECTION AND NOTHING ELSE. gb_report_latency() adds the
         // pipeline term to it, and with nothing open that term is already zero - nominalRatio is 0,
         // so gb_internal_latency_frames() returns 0 rather than dividing by it.
-        uint32_t nowLatency = gb_report_latency(self);
+        uint32_t    nowLatency = gb_report_latency(self);
 
         if (nowLatency != atomic_load(&self->reportedLatency)) {
             atomic_store(&self->reportedLatency, nowLatency);
@@ -753,12 +733,11 @@ static void gb_reconfigure_serialised(tGbBridge * self) {
         synthlib_log_line("role: ALIGN - no device opened (slot %d kept for a return to Capture)", index);
         return;
     }
-
     synthlib_log_line("reconfigure: slot %d, saved uid '%s'", index, self->deviceSelector);
 
     // notes §74 - the list changed under us, which is not a choice: follow the device, not its slot
-    if (atomic_exchange(&self->deviceListChanged, false) && (self->deviceSelector[0] != '\0')
-        && (index == self->appliedDevice) && !atomic_load(&self->savedDevicePending)) {
+    if (  atomic_exchange(&self->deviceListChanged, false) && (self->deviceSelector[0] != '\0')
+       && (index == self->appliedDevice) && !atomic_load(&self->savedDevicePending)) {
         int slot = gb_slot_for_uid(self->deviceSelector);
 
         if (slot < 0) {
@@ -795,7 +774,7 @@ static void gb_reconfigure_serialised(tGbBridge * self) {
             // gb_publish_waiting(self, true, (savedDeviceName[0] == '\0') ? deviceSelector
             //                                               : savedDeviceName);
             synthlib_log_line("saved device '%s' not present - waiting (not modifying deviceSelector)",
-                     (self->savedDeviceName[0] == '\0') ? self->deviceSelector : self->savedDeviceName);
+                              (self->savedDeviceName[0] == '\0') ? self->deviceSelector : self->savedDeviceName);
         }
     } else if (index >= 0) {
         gb_publish_waiting(self, false, NULL);
@@ -820,14 +799,13 @@ static void gb_reconfigure_serialised(tGbBridge * self) {
     } else {
         synthlib_log_line("slot %d -> '%s'", index, chosen.name);
     }
-
     // What gb_close_capture_locked(self) must NOT hand back, because we are about to reopen it. Zero
     // when the reconfigure is a genuine device change or a close, where the restore is right.
     self->keepSettingsFor = found ? chosen.id : 0;
 
-    double heldFrom = gb_now_ms();
+    double   heldFrom   = gb_now_ms();
 
-    self->openUnlockedMs = 0.0;
+    self->openUnlockedMs  = 0.0;
     pthread_mutex_lock(&self->configLock);
     gb_close_capture_locked(self);
     self->keepSettingsFor = 0;
@@ -837,15 +815,14 @@ static void gb_reconfigure_serialised(tGbBridge * self) {
         // open still became the thing the project saved and reopened with.
         if (gb_open_capture_locked(self, &chosen)) {
             snprintf(self->deviceSelector, sizeof(self->deviceSelector), "%s", chosen.uid);
-            self->appliedDevice  = index;
+            self->appliedDevice = index;
         } else {
             self->running = false;
             synthlib_log_line("open failed - selection unchanged, staying closed");
         }
     }
-
     uint32_t nowLatency = self->running ? gb_report_latency(self) : 0;
-    double held       = gb_now_ms() - heldFrom - self->openUnlockedMs;   // notes §73 - the time the host could wait
+    double   held       = gb_now_ms() - heldFrom - self->openUnlockedMs; // notes §73 - the time the host could wait
 
     pthread_mutex_unlock(&self->configLock);
 
@@ -856,11 +833,11 @@ static void gb_reconfigure_serialised(tGbBridge * self) {
         // BROKEN DOWN, because "it held the lock for 1441 ms" says a refactor is needed and not
         // WHICH of the three things inside it to move first.
         synthlib_log_line("reconfigure held configLock for %.0f ms (close+probe %.0f, rate+buffer %.0f, "
-                 "open %.0f, of which %.0f with it released) - anything the host asked of this plug-in on its "
-                 "own thread waited behind it", held,
-                 (self->gPhaseIdle > heldFrom) ? (self->gPhaseIdle - heldFrom) : 0.0,
-                 (self->gPhaseOpen > self->gPhaseProps) ? (self->gPhaseOpen - self->gPhaseProps) : 0.0,
-                 (self->gPhaseOpen > 0.0) ? (gb_now_ms() - self->gPhaseOpen) : 0.0, self->openUnlockedMs);
+                          "open %.0f, of which %.0f with it released) - anything the host asked of this plug-in on its "
+                          "own thread waited behind it", held,
+                          (self->gPhaseIdle > heldFrom) ? (self->gPhaseIdle - heldFrom) : 0.0,
+                          (self->gPhaseOpen > self->gPhaseProps) ? (self->gPhaseOpen - self->gPhaseProps) : 0.0,
+                          (self->gPhaseOpen > 0.0) ? (gb_now_ms() - self->gPhaseOpen) : 0.0, self->openUnlockedMs);
     }
 
     // Told OUTSIDE the lock: restartComponent re-enters the plug-in, and a host is entitled to
@@ -889,7 +866,6 @@ static bool gb_resolve_slot(const tDeviceInfo * list, uint32_t count, int slot, 
             *out = list[i];
             return true;
         }
-
         seen++;
     }
 
@@ -906,8 +882,7 @@ static void gb_retune(tGbBridge * self) {
         atomic_store(&self->retuneState, eRetuneSettled);
         return;
     }
-
-    double before = self->setpointFrames;
+    double      before     = self->setpointFrames;
 
     self->setpointFrames = gb_minimum_setpoint_for_host(self, self->observedMaxFrames) * GB_AUTO_MARGIN;
 
@@ -919,13 +894,12 @@ static void gb_retune(tGbBridge * self) {
     // the loop to drain it at a few hundred ppm - which would take minutes.
     atomic_store(&self->needResync, true);
 
-    tGbStatus * status = gb_status(self->statusSlot);
+    tGbStatus * status     = gb_status(self->statusSlot);
 
     if (status != NULL) {
         atomic_store(&status->setpointFrames, self->setpointFrames);
     }
-
-    uint32_t nowLatency = gb_report_latency(self);
+    uint32_t    nowLatency = gb_report_latency(self);
 
     pthread_mutex_unlock(&self->configLock);
 
@@ -934,10 +908,10 @@ static void gb_retune(tGbBridge * self) {
     // Reads both ways now: reclaiming frames when the host uses less than it declared, and
     // CLAIMING them when it hands over more per callback than either number suggested.
     synthlib_log_line("retuned %s: host declares %u and takes %u per callback - setpoint %.0f -> %.0f, "
-             "latency %u -> %u",
-             (self->setpointFrames > before) ? "UP - the ring was smaller than one callback" : "down",
-             self->hostMaxFrames, self->observedMaxFrames, before, self->setpointFrames, atomic_load(&self->reportedLatency),
-             nowLatency);
+                      "latency %u -> %u",
+                      (self->setpointFrames > before) ? "UP - the ring was smaller than one callback" : "down",
+                      self->hostMaxFrames, self->observedMaxFrames, before, self->setpointFrames, atomic_load(&self->reportedLatency),
+                      nowLatency);
 
     if (nowLatency != self->reportedLatency) {
         self->reportedLatency = nowLatency;
@@ -945,7 +919,6 @@ static void gb_retune(tGbBridge * self) {
         if (status != NULL) {
             atomic_store(&status->latencySamples, (int)nowLatency);
         }
-
         gb_send_latency_changed(self);
     }
 }
@@ -957,9 +930,9 @@ static void gb_retune(tGbBridge * self) {
 // fits any buffer, as it always did.
 tMeasured * gb_measured_for(tGbBridge * self, const char * audioUid, const char * midiDest, uint32_t frames, bool create) {
     for (uint32_t i = 0; i < self->measuredCount; i++) {
-        if ((strncmp(self->measured[i].audioUid, audioUid, DEVICE_UID_LEN) == 0)
-            && (strncmp(self->measured[i].midiDest, midiDest, GB_MIDI_NAME_LEN) == 0)
-            && ((self->measured[i].frames == frames) || (self->measured[i].frames == 0u))) {
+        if (  (strncmp(self->measured[i].audioUid, audioUid, DEVICE_UID_LEN) == 0)
+           && (strncmp(self->measured[i].midiDest, midiDest, GB_MIDI_NAME_LEN) == 0)
+           && ((self->measured[i].frames == frames) || (self->measured[i].frames == 0u))) {
             return &self->measured[i];
         }
     }
@@ -967,7 +940,6 @@ tMeasured * gb_measured_for(tGbBridge * self, const char * audioUid, const char 
     if (!create) {
         return NULL;
     }
-
     uint32_t slot = self->measuredCount;
 
     if (self->measuredCount < GB_MAX_MEASURED) {
@@ -976,7 +948,6 @@ tMeasured * gb_measured_for(tGbBridge * self, const char * audioUid, const char 
         memmove(&self->measured[0], &self->measured[1], sizeof(tMeasured) * (GB_MAX_MEASURED - 1));
         slot = GB_MAX_MEASURED - 1;
     }
-
     memset(&self->measured[slot], 0, sizeof(self->measured[slot]));
     strncpy(self->measured[slot].audioUid, audioUid, DEVICE_UID_LEN - 1);
     strncpy(self->measured[slot].midiDest, midiDest, GB_MIDI_NAME_LEN - 1);
@@ -1024,8 +995,7 @@ void gb_sync_offset_to_pair(tGbBridge * self) {
     if (!self->instrument || (gb_audio_key(self)[0] == '\0')) {
         return;
     }
-
-    char destination[GB_MIDI_NAME_LEN];
+    char        destination[GB_MIDI_NAME_LEN];
 
     gb_current_midi_name(self, destination, sizeof(destination));
 
@@ -1038,7 +1008,6 @@ void gb_sync_offset_to_pair(tGbBridge * self) {
         }
         entry->offsetMs = atomic_load(&self->offsetMs);
     }
-
     gb_remember_offset_pair(self, destination);
 }
 
@@ -1050,22 +1019,20 @@ void gb_publish_measurement(tGbBridge * self) {
 // Every component of the reported figure, so the panel can show where the time actually goes
 // rather than one number nobody can argue with.
 static void gb_publish_latency_breakdown(tGbBridge * self) {
-    tGbStatus * status = gb_status(self->statusSlot);
+    tGbStatus * status   = gb_status(self->statusSlot);
 
     if (status == NULL) {
         return;
     }
-
     // FROM THE SNAPSHOT, not the fields. This is called both with configLock held (from the
     // open and from retune) and without it (from the worker's idle publish), so it cannot take
     // the lock and must not read anything the lock protects.
-    double setpoint = atomic_load(&self->snapSetpoint);
-    double ratio    = atomic_load(&self->snapRatio);
+    double      setpoint = atomic_load(&self->snapSetpoint);
+    double      ratio    = atomic_load(&self->snapRatio);
 
     if (ratio <= 0.0) {
         ratio = 1.0;
     }
-
     atomic_store(&status->ringSamples, (int)(setpoint / ratio));
     atomic_store(&status->deviceSamples, (int)((double)atomic_load(&self->snapDeviceLatency) / ratio));
     atomic_store(&status->deviceBufferSamples, (int)((double)self->openDeviceFrames / ratio));
@@ -1092,21 +1059,19 @@ static void gb_revert_retune(tGbBridge * self) {
         pthread_mutex_unlock(&self->configLock);
         return;
     }
-
-    double before = self->setpointFrames;
+    double      before     = self->setpointFrames;
 
     self->setpointFrames = gb_minimum_setpoint(self, self->openDeviceFrames) * GB_AUTO_MARGIN;
 
     drift_set_setpoint(&self->drift, self->setpointFrames);
     atomic_store(&self->needResync, true);
 
-    tGbStatus * status = gb_status(self->statusSlot);
+    tGbStatus * status     = gb_status(self->statusSlot);
 
     if (status != NULL) {
         atomic_store(&status->setpointFrames, self->setpointFrames);
     }
-
-    uint32_t nowLatency = gb_report_latency(self);
+    uint32_t    nowLatency = gb_report_latency(self);
 
     pthread_mutex_unlock(&self->configLock);
 
@@ -1118,7 +1083,6 @@ static void gb_revert_retune(tGbBridge * self) {
         if (status != NULL) {
             atomic_store(&status->latencySamples, (int)nowLatency);
         }
-
         gb_send_latency_changed(self);
     }
 }
@@ -1262,7 +1226,6 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
     if (atomic_load(&self->wantedFirstChannel) >= 0) {
         settings->firstChannel = (uint32_t)atomic_exchange(&self->wantedFirstChannel, -1);
     }
-
     // notes §32
     uint32_t available = info->inputChannels;
     uint32_t first     = settings->firstChannel;
@@ -1281,7 +1244,7 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
     if ((first + wantCount) > available) {
         wantCount = available - first;      // at least 1, since first < available
         synthlib_log_line("only %u channel(s) available from %u - capturing %u",
-                 available - first, first + 1, wantCount);
+                          available - first, first + 1, wantCount);
     }
 
     // notes §33
@@ -1303,25 +1266,25 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
     // this copy of the settings and the bridge's own capture fields, which process() does not touch while
     // running is false (it was closed under the lock just before) - so the host's thread, which takes this
     // lock for getState() and the rest, no longer waits the second and a half Overbridge takes to start.
-    tDeviceSettings chosenSettings = *settings;
+    tDeviceSettings   chosenSettings = *settings;
 
-    settings = &chosenSettings;
-    double unlockedAt = gb_now_ms();
+    settings              = &chosenSettings;
+    double            unlockedAt     = gb_now_ms();
 
     pthread_mutex_unlock(&self->configLock);
 
     // notes §34
     device_wait_until_idle(info->id, 120);
 
-    self->gPhaseIdle = gb_now_ms();
+    self->gPhaseIdle      = gb_now_ms();
 
     // notes §75 - only something OUTSIDE GenBridge stops us setting the device; another GenBridge shares it
     pthread_mutex_lock(&gSharedLock);
 
-    tGbSharedDevice * shared = gb_shared_find(info->id, true);
+    tGbSharedDevice * shared         = gb_shared_find(info->id, true);
     bool              deviceIsShared;
-    uint32_t          setFrames = 0;
-    double            setRate   = 0.0;
+    uint32_t          setFrames      = 0;
+    double            setRate        = 0.0;
 
     if (shared != NULL) {
         if (shared->holderCount == 0) {
@@ -1339,11 +1302,10 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
 
     if (deviceIsShared && ((settings->rate > 0.0) || (settings->frames > 0))) {
         synthlib_log_line("device '%s' is already running for another client - leaving its rate and"
-                 " buffer size alone (asked for %.0f Hz, %u frames). Its buffer is whatever that"
-                 " client set, and the ring and reported latency follow it",
-                 info->name, settings->rate, settings->frames);
+                          " buffer size alone (asked for %.0f Hz, %u frames). Its buffer is whatever that"
+                          " client set, and the ring and reported latency follow it",
+                          info->name, settings->rate, settings->frames);
     }
-
     {
         tGbStatus * status = gb_status(self->statusSlot);
 
@@ -1382,14 +1344,13 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
         if (device_buffer_frame_range(info->id, &lowest, &highest)) {
             if (wanted < lowest) {
                 synthlib_log_line("device '%s' will not go below %u frames; %u requested",
-                         info->name, lowest, settings->frames);
+                                  info->name, lowest, settings->frames);
                 wanted = lowest;
             } else if ((highest > 0) && (wanted > highest)) {
                 wanted = highest;
             }
         }
-
-        uint32_t was = device_buffer_frames(info->id);
+        uint32_t was     = device_buffer_frames(info->id);
 
         // notes §35
         if ((was != wanted) && device_set_buffer_frames(info->id, wanted)) {
@@ -1405,23 +1366,22 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
     }
     pthread_mutex_unlock(&gSharedLock);
 
-    double deviceRate = device_sample_rate(info->id);
+    double   deviceRate   = device_sample_rate(info->id);
 
     if ((deviceRate <= 0.0) || (self->hostRate <= 0.0)) {
         goto failed_unlocked;
     }
-
     uint32_t deviceFrames = device_buffer_frames(info->id);
 
     // notes §36
     if ((settings->frames > 0) && (deviceFrames != settings->frames)) {
-        uint32_t canDo   = 0;
-        uint32_t canDoTo = 0;
-        bool     ranged  = device_buffer_frame_range(info->id, &canDo, &canDoTo);
+        uint32_t     canDo   = 0;
+        uint32_t     canDoTo = 0;
+        bool         ranged  = device_buffer_frame_range(info->id, &canDo, &canDoTo);
 
         // notes §37
-        bool inRange = ranged && (settings->frames >= canDo)
-                       && ((canDoTo == 0) || (settings->frames <= canDoTo));
+        bool         inRange = ranged && (settings->frames >= canDo)
+                               && ((canDoTo == 0) || (settings->frames <= canDoTo));
 
         // notes §38
         const char * culprit = NULL;
@@ -1429,8 +1389,8 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
         for (uint32_t slot = 0; slot < GB_STATUS_SLOTS; slot++) {
             tGbStatus * other = gb_status(slot);
 
-            if ((other == NULL) || (slot == (uint32_t)self->statusSlot)
-                || !atomic_load(&other->active)) {
+            if (  (other == NULL) || (slot == (uint32_t)self->statusSlot)
+               || !atomic_load(&other->active)) {
                 continue;
             }
 
@@ -1441,24 +1401,24 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
         }
 
         synthlib_log_line("asked %s for %u frames and it gave %u - %s. Its range is %u..%u. The ring and "
-                 "the reported latency follow the %u, which is why they look large against the "
-                 "setting on the panel",
-                 info->name, settings->frames, deviceFrames,
-                 (culprit != NULL)
+                          "the reported latency follow the %u, which is why they look large against the "
+                          "setting on the panel",
+                          info->name, settings->frames, deviceFrames,
+                          (culprit != NULL)
                  ? "ANOTHER GenBridge IN THIS HOST ALREADY HAS THIS DEVICE OPEN, and the buffer "
-                   "belongs to whoever opened it first - set them both the same, or point them "
-                   "at different devices"
+                          "belongs to whoever opened it first - set them both the same, or point them "
+                          "at different devices"
                  : (inRange ? "the size is one it says it supports, so something outside this "
                     "host already has the device open and the buffer belongs to whoever opened "
                     "it first"
                     : "outside what its driver will do"),
-                 ranged ? canDo : 0, ranged ? canDoTo : 0, deviceFrames);
+                          ranged ? canDo : 0, ranged ? canDoTo : 0, deviceFrames);
 
         // notes §71 - a size the device supports, and not held by one of us: it may simply be slow to
         // change (the Analog Keys takes almost 10 s). Watch for it rather than ask again.
         if (inRange && (culprit == NULL)) {
-            if ((self->framesWaitDevice != info->id) || (self->framesWaitFor != settings->frames)
-                || (atomic_load(&self->framesRetryAtMs) <= 0.0)) {
+            if (  (self->framesWaitDevice != info->id) || (self->framesWaitFor != settings->frames)
+               || (atomic_load(&self->framesRetryAtMs) <= 0.0)) {
                 self->framesWaitDevice  = info->id;
                 self->framesWaitFor     = settings->frames;
                 self->framesWaitSinceMs = gb_now_ms();
@@ -1472,23 +1432,22 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
     } else {
         atomic_store(&self->framesRetryAtMs, 0.0);
     }
-
-    self->nominalRatio   = deviceRate / self->hostRate;
-    self->deviceLatency  = device_latency_frames(info->id, true);
-    self->manualSetpoint = (settings->targetMs > 0.0);
-    self->setpointFrames = self->manualSetpoint
+    self->nominalRatio        = deviceRate / self->hostRate;
+    self->deviceLatency       = device_latency_frames(info->id, true);
+    self->manualSetpoint      = (settings->targetMs > 0.0);
+    self->setpointFrames      = self->manualSetpoint
                      ? ((settings->targetMs / 1000.0) * deviceRate)
                      : 0.0;
     atomic_store(&self->trimGain, settings->trim);
 
     // notes §39
-    bool trustObserved = (atomic_load(&self->retuneState) != eRetuneWatching) && (self->observedMaxFrames > 0);
+    bool         trustObserved       = (atomic_load(&self->retuneState) != eRetuneWatching) && (self->observedMaxFrames > 0);
 
-    uint32_t effectiveHostFrames = trustObserved
+    uint32_t     effectiveHostFrames = trustObserved
                                    ? self->observedMaxFrames
                                    : ((self->observedMaxFrames > self->hostMaxFrames) ? self->observedMaxFrames
                                       : self->hostMaxFrames);
-    double   minimum              = gb_minimum_setpoint_for(self, effectiveHostFrames, deviceFrames);
+    double       minimum             = gb_minimum_setpoint_for(self, effectiveHostFrames, deviceFrames);
 
     // notes §40
     self->recommendedSetpoint = minimum * GB_AUTO_MARGIN;
@@ -1497,18 +1456,17 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
         self->setpointFrames = self->recommendedSetpoint;           // auto
     } else if (self->setpointFrames < minimum) {
         synthlib_log_line("setpoint %.0f is below the %.0f frame floor (recommended %.0f) — honouring it;"
-                 " watch the underrun count", self->setpointFrames, minimum, self->recommendedSetpoint);
+                          " watch the underrun count", self->setpointFrames, minimum, self->recommendedSetpoint);
     }
-
     synthlib_log_line("open %s rate %.0f frames %u ratio %.6f floor %.0f setpoint %.0f devlat %u"
-             " -> reported latency %u",
-             info->name, deviceRate, deviceFrames, self->nominalRatio, minimum, self->setpointFrames,
-             self->deviceLatency,
-             (unsigned)((self->setpointFrames + resampler_latency_frames() + (double)self->deviceLatency)
-                        / self->nominalRatio));
+                      " -> reported latency %u",
+                      info->name, deviceRate, deviceFrames, self->nominalRatio, minimum, self->setpointFrames,
+                      self->deviceLatency,
+                      (unsigned)((self->setpointFrames + resampler_latency_frames() + (double)self->deviceLatency)
+                                 / self->nominalRatio));
 
-    uint32_t ringFrames = (uint32_t)(self->setpointFrames * 8.0)
-                          + (4 * (deviceFrames + self->hostMaxFrames));
+    uint32_t     ringFrames          = (uint32_t)(self->setpointFrames * 8.0)
+                                       + (4 * (deviceFrames + self->hostMaxFrames));
 
     if (!ring_init(&self->ring, ringFrames, GB_CHANNELS)) {
         goto failed_unlocked;
@@ -1517,44 +1475,41 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
     if (!resampler_init(&self->resampler, GB_CHANNELS, self->nominalRatio, self->hostMaxFrames)) {
         goto failed_unlocked;
     }
-
-    self->pullCapacity = (uint32_t)((double)self->hostMaxFrames * self->nominalRatio * 1.5) + (4 * RESAMPLER_TAPS);
-    self->pullBuffer   = (float *)calloc((size_t)self->pullCapacity * GB_CHANNELS, sizeof(float));
-    self->interleaved  = (float *)calloc((size_t)self->hostMaxFrames * GB_CHANNELS, sizeof(float));
-    self->widen        = (float *)calloc((size_t)deviceFrames * 4 * GB_CHANNELS, sizeof(float));
+    self->pullCapacity        = (uint32_t)((double)self->hostMaxFrames * self->nominalRatio * 1.5) + (4 * RESAMPLER_TAPS);
+    self->pullBuffer          = (float *)calloc((size_t)self->pullCapacity * GB_CHANNELS, sizeof(float));
+    self->interleaved         = (float *)calloc((size_t)self->hostMaxFrames * GB_CHANNELS, sizeof(float));
+    self->widen               = (float *)calloc((size_t)deviceFrames * 4 * GB_CHANNELS, sizeof(float));
 
     if ((self->pullBuffer == NULL) || (self->interleaved == NULL) || (self->widen == NULL)) {
         goto failed_unlocked;
     }
-
-    tDriftConfig config = drift_default_config();
+    tDriftConfig config              = drift_default_config();
 
     drift_init(&self->drift, &config, deviceRate, self->setpointFrames);
 
-    self->gPhaseOpen = gb_now_ms();
+    self->gPhaseOpen          = gb_now_ms();
 
     if (!device_open(&self->capture, info->id, true, first, self->captureChannels,
                      deviceFrames * 4, gb_capture_callback, self)) {
         synthlib_log_line("device_open failed for '%s' (%u ch from %u)", info->name, atomic_load(&self->captureChannels),
-                 first + 1);
+                          first + 1);
         goto failed_unlocked;
     }
 
     if (!device_start(&self->capture)) {
         goto failed_unlocked;
     }
-
     pthread_mutex_lock(&self->configLock);   // notes §73 - the rest is quick, and is what the host reads
-    self->openUnlockedMs = gb_now_ms() - unlockedAt;
+    self->openUnlockedMs      = gb_now_ms() - unlockedAt;
 
     // notes §41
     atomic_store(&self->ring.underflows, 0);
     atomic_store(&self->ring.overflows, 0);
     atomic_store(&self->resyncs, 0);
-    self->primed = false;
+    self->primed              = false;
 
     atomic_store(&self->needResync, true);
-    self->running = true;
+    self->running             = true;
 
     // What is now genuinely in force. The parameter handlers compare against these, so a
     // re-sent value that changes nothing costs nothing.
@@ -1566,7 +1521,7 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
 
     // Whatever was measured for this device and destination before.
     {
-        char destination[GB_MIDI_NAME_LEN];
+        char              destination[GB_MIDI_NAME_LEN];
 
         gb_current_midi_name(self, destination, sizeof(destination));
 
@@ -1580,13 +1535,13 @@ static bool gb_open_capture_locked(tGbBridge * self, const tDeviceInfo * info) {
         }
         self->hardwareSamples    = (previous != NULL) ? previous->hardwareSamples : 0;
         self->measureCompensated = (previous != NULL) && previous->compensated;
-        self->measuredAtFrames = (previous != NULL) ? previous->frames : 0;
-        self->measureEstimated = estimate;
+        self->measuredAtFrames   = (previous != NULL) ? previous->frames : 0;
+        self->measureEstimated   = estimate;
 
         // notes §42
-        if ((strncmp(self->offsetUid, info->uid, DEVICE_UID_LEN) != 0)
-            || (strncmp(self->offsetDest, destination, GB_MIDI_NAME_LEN) != 0)
-            || (self->offsetFrames != deviceFrames)) {
+        if (  (strncmp(self->offsetUid, info->uid, DEVICE_UID_LEN) != 0)
+           || (strncmp(self->offsetDest, destination, GB_MIDI_NAME_LEN) != 0)
+           || (self->offsetFrames != deviceFrames)) {
             atomic_store(&self->offsetMs, (previous != NULL) ? previous->offsetMs : 0.0);
             gb_remember_offset_pair(self, destination);
             self->offsetFrames = deviceFrames;
@@ -1639,7 +1594,6 @@ static void gb_close_capture_locked(tGbBridge * self) {
         resampler_free(&self->resampler);
         self->running = false;
     }
-
     // notes §45
     self->nominalRatio   = 0.0;
     self->setpointFrames = 0.0;
@@ -1656,9 +1610,9 @@ static void gb_close_capture_locked(tGbBridge * self) {
     free(self->pullBuffer);
     free(self->interleaved);
     free(self->widen);
-    self->pullBuffer  = NULL;
-    self->interleaved = NULL;
-    self->widen       = NULL;
+    self->pullBuffer     = NULL;
+    self->interleaved    = NULL;
+    self->widen          = NULL;
 }
 
 // notes §48
@@ -1694,11 +1648,10 @@ tGbBridge * gb_bridge_create(bool instrument) {
     if (self == NULL) {
         return NULL;
     }
-
     // WHAT IS NOT ZERO. calloc has done the rest, which is what a C++ member initialiser list was
     // doing one field at a time - and the few below are the ones where zero would be a lie: no
     // status slot yet, a ratio that is a DIVISOR, and the "nothing chosen" that -1 means.
-    self->instrument = instrument;
+    self->instrument       = instrument;
     atomic_store(&self->statusSlot, gb_status_claim());
     atomic_store(&self->snapRatio, 1.0);
     atomic_store(&self->retuneState, eRetuneSettled);
@@ -1717,7 +1670,6 @@ tGbBridge * gb_bridge_create(bool instrument) {
     if (instrument) {
         gb_midi_init();
     }
-
     pthread_mutex_init(&self->configLock, NULL);
     pthread_mutex_init(&self->reconfigLock, NULL);
     pthread_mutex_init(&self->wakeMutex, NULL);
@@ -1753,7 +1705,7 @@ void gb_bridge_connect(tGbBridge * self, const tGbHostOps * ops) {
 }
 
 void gb_bridge_disconnect(tGbBridge * self) {
-    tGbHostOps none = { NULL, NULL };
+    tGbHostOps none = {NULL, NULL};
 
     self->hostOps = none;
 }
@@ -1786,7 +1738,7 @@ void gb_bridge_setup_processing(tGbBridge * self, double sampleRate, int32_t max
     // notes §52
     gb_lock_config_from_host(self, "setupProcessing");
 
-    self->hostRate = sampleRate;
+    self->hostRate      = sampleRate;
     atomic_store(&self->eventRate, sampleRate);
 
     // notes §53
@@ -1801,10 +1753,9 @@ void gb_bridge_setup_processing(tGbBridge * self, double sampleRate, int32_t max
 
     if (offline != atomic_load(&self->offlineRender)) {
         synthlib_log_line("host set process mode %s%s", offline ? "OFFLINE" : "realtime",
-                    offline ? " - a bounce in this mode captures nothing, the device runs in real"
-                              " time" : "");
+                          offline ? " - a bounce in this mode captures nothing, the device runs in real"
+                          " time" : "");
     }
-
     atomic_store(&self->offlineRender, offline);
 
     tGbStatus * status = gb_status(atomic_load(&self->statusSlot));
@@ -1834,7 +1785,6 @@ uint64_t gb_bridge_block_begin(tGbBridge * self, int32_t frames) {
     if (gb_capturing(self)) {
         gb_observe_burst(self, frames);
     }
-
     return blockHostTime;
 }
 
@@ -1849,12 +1799,11 @@ void gb_bridge_parameter(tGbBridge * self, uint32_t id, double value, int32_t sa
             // inside a block belongs where the host put it.
             gb_send_controller(self, id, value, gb_host_time_for(self, blockHostTime, sampleOffset));
         }
-
         return;
     }
 
     if (id == kParamTrim) {
-        atomic_store(&self->trimGain, (float)(value * 2.0));
+        atomic_store(&self->trimGain, trim_gain(value));   // trim.h
     } else if (id == kParamDevice) {
         int wanted = gb_device_slot(value);
 
@@ -1949,7 +1898,6 @@ void gb_bridge_measure_trigger(tGbBridge * self, bool sawPress, bool held) {
         // notes §62
         gb_start_measurement(self);
     }
-
     self->measureArmed = held;
 }
 
@@ -1986,7 +1934,6 @@ void gb_bridge_note(tGbBridge * self, tGbNoteKind kind, int16_t channel, int16_t
         message[1] = (uint8_t)(pitch & 0x7F);
         message[2] = (uint8_t)((value * 127.0f) + 0.5f);
     }
-
     // notes §64
     atomic_fetch_add(&self->eventsIn, 1);
 
@@ -1997,7 +1944,7 @@ void gb_bridge_note(tGbBridge * self, tGbNoteKind kind, int16_t channel, int16_t
 }
 
 // notes §65
-static void gb_render_from_host(tGbBridge * self, float ** out, const float * const * in,
+static void gb_render_from_host(tGbBridge * self, float ** out, const float *const * in,
                                 int32_t inChannels, int32_t frames, uint64_t blockHostTime) {
     float trim = atomic_load(&self->trimGain);
 
@@ -2036,7 +1983,6 @@ static void gb_render_from_host(tGbBridge * self, float ** out, const float * co
     } else {
         self->hostSilentFrames += (uint64_t)frames;
     }
-
     // THE MEASUREMENT IS UNCHANGED, AND THAT IS THE POINT. It reads the OUTPUT buffer, which now
     // holds the host's input, so it times exactly the same round trip - note out, synth, interface,
     // host, here - without knowing the capture path underneath it has gone.
@@ -2061,7 +2007,7 @@ static void gb_render_from_host(tGbBridge * self, float ** out, const float * co
     gb_publish_status(self, out, frames, 0.0);
 }
 
-void gb_bridge_render(tGbBridge * self, float ** out, const float * const * in, int32_t inChannels,
+void gb_bridge_render(tGbBridge * self, float ** out, const float *const * in, int32_t inChannels,
                       int32_t frames, uint64_t blockHostTime) {
     // THE HOST-INPUT MODE TAKES NO LOCK AND NEEDS NONE. It touches no ring, no resampler and no
     // device - nothing the worker can be rebuilding underneath it - so the trylock below, and the
@@ -2091,7 +2037,6 @@ void gb_bridge_render(tGbBridge * self, float ** out, const float * const * in, 
             pthread_mutex_unlock(&self->configLock);
             return;
         }
-
         ring_resync(&self->ring, (uint32_t)self->setpointFrames);
         resampler_reset(&self->resampler);
         drift_reset(&self->drift);
@@ -2102,18 +2047,16 @@ void gb_bridge_render(tGbBridge * self, float ** out, const float * const * in, 
         if (self->primed) {
             atomic_fetch_add(&self->resyncs, 1);
         }
-
         self->primed = true;
     }
-
     gb_observe_block(self, frames);
 
-    double fill       = (double)ring_fill(&self->ring);
-    double interval   = (double)frames / self->hostRate;
-    double correction = drift_update(&self->drift, fill, interval);
-    double ratio      = self->nominalRatio * (1.0 + correction);
+    double   fill       = (double)ring_fill(&self->ring);
+    double   interval   = (double)frames / self->hostRate;
+    double   correction = drift_update(&self->drift, fill, interval);
+    double   ratio      = self->nominalRatio * (1.0 + correction);
 
-    uint32_t needed = resampler_needed(&self->resampler, (uint32_t)frames, ratio);
+    uint32_t needed     = resampler_needed(&self->resampler, (uint32_t)frames, ratio);
 
     if (needed > self->pullCapacity) {
         needed = self->pullCapacity;
@@ -2123,13 +2066,11 @@ void gb_bridge_render(tGbBridge * self, float ** out, const float * const * in, 
         if (!ring_read(&self->ring, self->pullBuffer, needed)) {
             atomic_store(&self->needResync, true);
         }
-
         resampler_push(&self->resampler, self->pullBuffer, needed);
     }
-
     resampler_process(&self->resampler, self->interleaved, (uint32_t)frames, ratio);
 
-    float trim = atomic_load(&self->trimGain);
+    float    trim       = atomic_load(&self->trimGain);
 
     for (int32_t i = 0; i < frames; i++) {
         for (int c = 0; c < GB_CHANNELS; c++) {
@@ -2144,20 +2085,19 @@ void gb_bridge_render(tGbBridge * self, float ** out, const float * const * in, 
 
         if (status != NULL) {
             // notes §67
-            double actual = gb_latency_frames_measured(self, fill, self->blockActualHostTime)
-                            + (double)self->burstBefore;
+            double actual   = gb_latency_frames_measured(self, fill, self->blockActualHostTime)
+                              + (double)self->burstBefore;
 
             if (self->instrument) {
                 actual += (atomic_load(&self->offsetMs) / 1000.0) * self->hostRate;
             }
-
             atomic_store(&status->actualSamples, (int)actual);
 
             // THE SAME NUMBER THE HOST WILL BE TOLD, averaged. Seeded rather than eased in from
             // zero: a fresh device would otherwise report a latency climbing out of nothing for
             // its first second, and every step of that is a compensation pass.
-            double instant = actual - ((atomic_load(&self->offsetMs) / 1000.0) * self->hostRate);
-            double prior   = atomic_load(&self->pipelineAvg);
+            double instant  = actual - ((atomic_load(&self->offsetMs) / 1000.0) * self->hostRate);
+            double prior    = atomic_load(&self->pipelineAvg);
 
             // notes §68
             double estimate = gb_latency_frames_for_fill(self, self->setpointFrames);
@@ -2169,7 +2109,6 @@ void gb_bridge_render(tGbBridge * self, float ** out, const float * const * in, 
             } else if (instant < (estimate - allow)) {
                 instant = (estimate > allow) ? (estimate - allow) : estimate;
             }
-
             atomic_store(&self->pipelineAvg, (prior > 0.0)
                               ? (prior + ((instant - prior) * GB_PIPELINE_SMOOTH))
                               : instant);

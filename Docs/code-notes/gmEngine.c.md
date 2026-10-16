@@ -59,3 +59,13 @@ What the devices report (each one's latency and safety offset, `device_latency_f
 each end, plus the bridge: the setpoint and the resampler's group delay. It is an estimate from reported
 figures, not a measurement - a driver that under-reports shows a figure that is too good. The panel splits it
 into "devices" and "bridge", because only the bridge part is the app's to reduce.
+
+## 8. the input's rate (`claim_rate()`, the Rate row)
+
+CT (2026-10-16): "Should be able to set input sample rate unless we're sharing". The Rate row asks for one of
+44.1, 48, 88.2 or 96 kHz, or "As the device is" - the default, and what every setting file from before has. It
+follows the buffer's rule (§4) exactly: set only when no other client is running the input device, through
+`device_set_sample_rate_and_wait()` since a nominal rate change is asynchronous, and put back on stop only if
+nothing else has started it since. A device that refuses the rate stays where it was; the stats line shows the
+rate actually in force either way. The output is not given a row: it is usually the mixer or interface the DAW
+also plays through, which is exactly the device whose rate must not move.

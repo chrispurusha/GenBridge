@@ -26,6 +26,7 @@
 
 #include "device.h"
 #include "gbMidi.h"
+#include "trim.h"      // the output trim's law, shared with the Monitor
 
 #ifdef __cplusplus
 extern "C" {
@@ -64,44 +65,44 @@ enum {
 #define GB_ROLE_CAPTURE              (0)
 #define GB_ROLE_ALIGN                (1)
 
-#define GB_CHANNELS           (2)
+#define GB_CHANNELS                  (2)
 
 // How many devices the device parameter can address. A stepped parameter needs a fixed step count
 // at registration time, and the host caches it, so this cannot follow the machine's actual device
 // count as it changes.
-#define GB_DEVICE_SLOTS       (DEVICE_MAX)
-#define GB_MIDI_SLOTS         (GB_MIDI_MAX_DEST)
+#define GB_DEVICE_SLOTS    (DEVICE_MAX)
+#define GB_MIDI_SLOTS      (GB_MIDI_MAX_DEST)
 
 // 0 means "whatever channel the note arrived on"; 1..16 force it. Source is the default so that
 // adding the control changed nothing for a session that already worked.
-#define GB_CHANNEL_SLOTS      (17)
+#define GB_CHANNEL_SLOTS    (17)
 
 // A 32 input interface is common - the TD-50X here is one - so the first-channel list has to reach
 // that far even though most devices are stereo. Slots past the device's real channel count simply
 // fail to open, which the panel shows.
-#define GB_MAX_FIRST_CHANNEL  (32)
+#define GB_MAX_FIRST_CHANNEL    (32)
 
 // notes §3
-#define GB_SOURCE_DEVICE      (0)
-#define GB_SOURCE_HOST        (1)
+#define GB_SOURCE_DEVICE        (0)
+#define GB_SOURCE_HOST          (1)
 
 // The manual correction, in milliseconds, mapped onto a normalised parameter. A measurement cannot
 // separate the synth's response from its patch's attack, so the number always wants a human able to
 // say "that pad is not really 90 ms late".
-#define GB_OFFSET_MIN_MS      (-100.0)
-#define GB_OFFSET_MAX_MS      (100.0)
+#define GB_OFFSET_MIN_MS    (-100.0)
+#define GB_OFFSET_MAX_MS    (100.0)
 
 // The default only. Which note Measure plays is settable - a drum machine may have nothing at all
 // on middle C, and an Analog Rytm wants the lowest note there is.
-#define GB_MEASURE_NOTE       (60)
+#define GB_MEASURE_NOTE      (60)
 
 // notes §4
-#define GB_CC_AFTERTOUCH      (128)
-#define GB_CC_PITCHBEND       (129)
-#define GB_CC_PER_CHANNEL     (130)      // 128 controllers, plus aftertouch and bend
-#define GB_CC_BASE            (1000)
-#define GB_CC_CHANNELS        (16)
-#define GB_CC_COUNT           (GB_CC_PER_CHANNEL * GB_CC_CHANNELS)
+#define GB_CC_AFTERTOUCH     (128)
+#define GB_CC_PITCHBEND      (129)
+#define GB_CC_PER_CHANNEL    (130)       // 128 controllers, plus aftertouch and bend
+#define GB_CC_BASE           (1000)
+#define GB_CC_CHANNELS       (16)
+#define GB_CC_COUNT          (GB_CC_PER_CHANNEL * GB_CC_CHANNELS)
 
 // The stepper lists, shared by the panel, the wrapper and the processor so the three cannot
 // disagree about what index 2 means.

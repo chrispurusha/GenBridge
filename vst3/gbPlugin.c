@@ -56,7 +56,7 @@ _Static_assert(GB_CC_PER_CHANNEL == SYNTHLIB_MIDI_CONTROLS, "controller count dr
 // 0xMMMMmmbb, from the same version by do-plugin, so the Audio Unit's number and the plist's cannot
 // disagree.
 #ifndef GB_AU_VERSION
-#define GB_AU_VERSION        (0x00000100)
+#define GB_AU_VERSION    (0x00000100)
 #endif
 
 // ------------------------------------------------------------------------------------------------
@@ -64,13 +64,13 @@ _Static_assert(GB_CC_PER_CHANNEL == SYNTHLIB_MIDI_CONTROLS, "controller count dr
 // ------------------------------------------------------------------------------------------------
 
 // notes §2
-static const uint8_t gEffectProcessorUid[16] = {
+static const uint8_t gEffectProcessorUid[16]      = {
     0x4A, 0x1C, 0x8E, 0x52, 0x9D, 0x3B, 0x4F, 0x07, 0xA6, 0xE2, 0x1B, 0x84, 0x53, 0xF0, 0xC9, 0x7D
 };
-static const uint8_t gEffectControllerUid[16] = {
+static const uint8_t gEffectControllerUid[16]     = {
     0x8B, 0x70, 0xD6, 0xA1, 0x2F, 0x59, 0x4C, 0x38, 0xE1, 0xA7, 0x60, 0x25, 0x9C, 0x4D, 0x3B, 0x8F
 };
-static const uint8_t gInstrumentProcessorUid[16] = {
+static const uint8_t gInstrumentProcessorUid[16]  = {
     0x6E, 0x2D, 0x4B, 0x91, 0xA0, 0x7C, 0x3F, 0x58, 0x24, 0xB9, 0xE1, 0xD6, 0x8F, 0x53, 0x07, 0xCA
 };
 static const uint8_t gInstrumentControllerUid[16] = {
@@ -83,15 +83,15 @@ static const uint8_t gInstrumentControllerUid[16] = {
 // THE AUDIO UNIT'S CODES, new with this file and under the same rule as the class ids above. The
 // manufacturer is the one G2 Alike registered, since it is the same vendor. do-plugin writes the same
 // codes into the .component's Info.plist, which is where macOS actually finds them.
-#define GB_AU_EFFECT_TYPE        FOUR_CC('a', 'u', 'f', 'x')     // kAudioUnitType_Effect
-#define GB_AU_EFFECT_SUBTYPE     FOUR_CC('G', 'B', 'f', 'x')
-#define GB_AU_INSTRUMENT_TYPE    FOUR_CC('a', 'u', 'm', 'u')     // kAudioUnitType_MusicDevice
-#define GB_AU_INSTRUMENT_SUBTYPE FOUR_CC('G', 'B', 'i', 'n')
-#define GB_AU_MANUFACTURER       FOUR_CC('C', 'P', 'u', 'r')
+#define GB_AU_EFFECT_TYPE           FOUR_CC('a', 'u', 'f', 'x')  // kAudioUnitType_Effect
+#define GB_AU_EFFECT_SUBTYPE        FOUR_CC('G', 'B', 'f', 'x')
+#define GB_AU_INSTRUMENT_TYPE       FOUR_CC('a', 'u', 'm', 'u')  // kAudioUnitType_MusicDevice
+#define GB_AU_INSTRUMENT_SUBTYPE    FOUR_CC('G', 'B', 'i', 'n')
+#define GB_AU_MANUFACTURER          FOUR_CC('C', 'P', 'u', 'r')
 
 // MUST MATCH CFBundleIdentifier IN THE .component's Info.plist - the wrapper finds its own bundle by
 // it to tell a host where the editor's view class is, and a mismatch is a plug-in with no editor.
-#define GB_AU_BUNDLE_ID          "com.chrispurusha.genbridge.au"
+#define GB_AU_BUNDLE_ID    "com.chrispurusha.genbridge.au"
 
 // ------------------------------------------------------------------------------------------------
 // The instance
@@ -99,8 +99,8 @@ static const uint8_t gInstrumentControllerUid[16] = {
 
 typedef struct {
     const tSynthLibPluginDesc * desc;
-    tGbBridge *    bridge;
-    bool           instrument;
+    tGbBridge *                 bridge;
+    bool                        instrument;
 
     // WHICH STATUS SLOT THE BRIDGE CLAIMED, announced by it once at connect time. The editor reads the
     // meters and drift figures straight out of that slot, so this is how a panel knows whose figures
@@ -113,15 +113,15 @@ typedef struct {
     // A MEASURE PRESS THAT ARRIVED OFF THE AUDIO THREAD - an Audio Unit host sets parameters from
     // wherever it likes. The measurement's state belongs to the audio thread, so the press waits here
     // for the next block rather than reaching into a measurement in progress.
-    _Atomic bool   measurePending;
+    _Atomic bool measurePending;
 
     // Where this block sits in wall-clock time - see gb_bridge_block_begin(). Audio thread only.
-    uint64_t       blockHostTime;
+    uint64_t     blockHostTime;
 
     // The blob gb_bridge_state() made for the SIZING call, handed back unchanged for the filling one:
     // made twice, it could come back a different length the second time. Owned by the bridge.
-    const char *   stateCache;
-    size_t         stateLength;
+    const char *       stateCache;
+    size_t             stateLength;
 
     // notes §9 - every instance sends what it outputs; an effect in the Align role receives
     tGbAlignSender *   alignSender;
@@ -129,9 +129,9 @@ typedef struct {
     _Atomic double     hostRate;
 
     // The side-chain probe's last report - see gb_probe_host_input(). Audio thread only.
-    bool           probed;
-    uint32_t       probeChannels;
-    bool           probeAudible;
+    bool               probed;
+    uint32_t           probeChannels;
+    bool               probeAudible;
 } tGbPlugin;
 
 static double clamp01(double v) {
@@ -276,9 +276,9 @@ static bool gb_param_info_cb(const tSynthLibPluginDesc * desc, void * inst, uint
         out->plainMin = 0.0;
         out->plainMax = GB_EXTRA_LATENCY_MAX_MS;
     } else if (info.id == (uint32_t)kParamTrim) {
-        out->unit     = eSynthLibUnitGeneric;       // a gain multiplier, 0..2
-        out->plainMin = 0.0;
-        out->plainMax = 2.0;
+        out->unit     = eSynthLibUnitDecibels;      // trim.h - its plain value is decibels
+        out->plainMin = TRIM_MIN_DB;
+        out->plainMax = TRIM_MAX_DB;
     } else if (info.id == (uint32_t)kParamMeasure) {
         out->unit     = eSynthLibUnitBoolean;
         out->plainMin = 0.0;
@@ -314,8 +314,8 @@ static bool gb_midi_mapping_cb(const tSynthLibPluginDesc * desc, void * inst, ui
                                int16_t control, uint32_t * idOut) {
     (void)inst;
 
-    if ((desc->isInstrument == false) || (channel >= GB_CC_CHANNELS) || (control < 0) ||
-        (control >= GB_CC_PER_CHANNEL)) {
+    if (  (desc->isInstrument == false) || (channel >= GB_CC_CHANNELS) || (control < 0)
+       || (control >= GB_CC_PER_CHANNEL)) {
         return false;
     }
     *idOut = (uint32_t)GB_CC_BASE + ((uint32_t)channel * (uint32_t)GB_CC_PER_CHANNEL) + (uint32_t)control;
@@ -360,6 +360,7 @@ static void gb_param_points(void * inst, uint32_t id, const tSynthLibParamPoint 
                 break;
             }
         }
+
         atomic_store(&g->values[kParamMeasure], points[count - 1].value);
         gb_bridge_measure_trigger(g->bridge, sawPress, points[count - 1].value >= 0.5);
         return;
@@ -373,9 +374,9 @@ static void gb_param_points(void * inst, uint32_t id, const tSynthLibParamPoint 
             gb_bridge_parameter(g->bridge, id, points[i].value, (int32_t)points[i].sampleOffset,
                                 g->blockHostTime);
         }
+
         return;
     }
-
     // Everything else is a level, and a level is where it settles.
     bool before = aligning(g);
 
@@ -451,7 +452,6 @@ static uint32_t gb_state_params(const tSynthLibPluginDesc * desc, const void * d
         put_value(out, capacity, &count, kParamOffsetMs,
                   (ms - GB_OFFSET_MIN_MS) / (GB_OFFSET_MAX_MS - GB_OFFSET_MIN_MS));
     }
-
     put_value(out, capacity, &count, kParamExtraLatency, active.extraLatencyMs / GB_EXTRA_LATENCY_MAX_MS);
     put_value(out, capacity, &count, kParamRole, (active.role == GB_ROLE_ALIGN) ? 1.0 : 0.0);
 
@@ -477,17 +477,18 @@ static uint32_t gb_state_params(const tSynthLibPluginDesc * desc, const void * d
             put_value(out, capacity, &count, kParamFrames, (double)i / (double)(gGbFrameCount - 1));
         }
     }
+
     put_value(out, capacity, &count, kParamMode, (active.channels == 1u) ? 0.0 : 1.0);
     put_value(out, capacity, &count, kParamFirstChannel,
               (double)active.firstChannel / (double)(GB_MAX_FIRST_CHANNEL - 1));
-    put_value(out, capacity, &count, kParamTrim, (double)active.trim / 2.0);
+    put_value(out, capacity, &count, kParamTrim, trim_normalized((double)active.trim));
     return count;
 }
 
 // THE BYTES, AND THAT IS ALL. What they mean - the versioned line format, the per-device table, the
 // measured pairs - is gbState.c's.
 static size_t gb_get_state(void * inst, void * out, size_t len) {
-    tGbPlugin * g = (tGbPlugin *)inst;
+    tGbPlugin * g    = (tGbPlugin *)inst;
 
     if ((out == NULL) || (g->stateCache == NULL)) {
         g->stateCache = gb_bridge_state(g->bridge, &g->stateLength);
@@ -496,7 +497,7 @@ static size_t gb_get_state(void * inst, void * out, size_t len) {
     if (out == NULL) {
         return g->stateLength;
     }
-    size_t take = (g->stateLength < len) ? g->stateLength : len;
+    size_t      take = (g->stateLength < len) ? g->stateLength : len;
 
     memcpy(out, g->stateCache, take);
     g->stateCache = NULL;
@@ -504,24 +505,25 @@ static size_t gb_get_state(void * inst, void * out, size_t len) {
 }
 
 static void gb_set_state(void * inst, const void * data, size_t len) {
-    tGbPlugin *         g = (tGbPlugin *)inst;
+    tGbPlugin *         g      = (tGbPlugin *)inst;
     tSynthLibParamValue values[kParamCount];
 
     if ((data == NULL) || (len == 0u)) {
         return;
     }
-    bool before = aligning(g);
+    bool                before = aligning(g);
 
     gb_bridge_set_state(g->bridge, (const char *)data, len);
 
     // And what the parameters are now, for getParam() - the wrapper reads them back after this.
-    uint32_t count = gb_state_params(g->desc, data, len, values, kParamCount);
+    uint32_t            count  = gb_state_params(g->desc, data, len, values, kParamCount);
 
     for (uint32_t i = 0; i < count; i++) {
         if (values[i].id < (uint32_t)kParamCount) {
             atomic_store(&g->values[values[i].id], values[i].value);
         }
     }
+
     role_changed(g, before);
 }
 
@@ -535,8 +537,8 @@ static void * gb_create(const tSynthLibPluginDesc * desc) {
     if (g == NULL) {
         return NULL;
     }
-    g->desc       = desc;
-    g->instrument = desc->isInstrument;
+    g->desc        = desc;
+    g->instrument  = desc->isInstrument;
     atomic_init(&g->statusSlot, -1);
     atomic_init(&g->measurePending, false);
 
@@ -552,17 +554,17 @@ static void * gb_create(const tSynthLibPluginDesc * desc) {
             atomic_store(&g->values[info.id], info.defaultNormalized);
         }
     }
-    g->bridge = gb_bridge_create(g->instrument);
+
+    g->bridge      = gb_bridge_create(g->instrument);
 
     if (g->bridge == NULL) {
         free(g);
         return NULL;
     }
-
     // CONNECTED AT ONCE. This used to wait for the host to join processor and controller, because the
     // bridge's messages had to cross between them; they are said to the wrapper now, which knows where
     // each one goes. Connecting also announces the status slot.
-    tGbHostOps ops = { g, gb_on_bridge_message };
+    tGbHostOps ops = {g, gb_on_bridge_message};
 
     gb_bridge_connect(g->bridge, &ops);
 
@@ -643,7 +645,7 @@ static void gb_block_begin(void * inst, uint32_t frames, const tSynthLibTranspor
 }
 
 // notes §7
-static void gb_probe_host_input(tGbPlugin * g, const float * const * in, uint32_t numIn, uint32_t frames) {
+static void gb_probe_host_input(tGbPlugin * g, const float *const * in, uint32_t numIn, uint32_t frames) {
     bool buffers = (in != NULL) && (numIn > 0u) && (in[0] != NULL);
     bool audible = false;
 
@@ -661,13 +663,13 @@ static void gb_probe_host_input(tGbPlugin * g, const float * const * in, uint32_
     g->probeChannels = numIn;
     g->probeAudible  = audible;
     synthlib_log_line("HOST INPUT: channels %u, buffers %s, signal %s", numIn, buffers ? "yes" : "NO",
-                audible ? "PRESENT" : "none");
+                      audible ? "PRESENT" : "none");
 }
 
 // THE HOST'S OWN INPUT, HANDED STRAIGHT ON. Which of the two sources the bridge uses is its decision
 // (Capture Source); this only makes sure both are available to it. A NULL input is the host having
 // routed nothing, which the bridge treats as silence rather than as an error.
-static void gb_process(void * inst, const float * const * in, uint32_t numIn, float ** out,
+static void gb_process(void * inst, const float *const * in, uint32_t numIn, float ** out,
                        uint32_t numOut, uint32_t frames, const tSynthLibTransport * transport) {
     tGbPlugin * g    = (tGbPlugin *)inst;
     double      rate = atomic_load(&g->hostRate);
@@ -691,6 +693,7 @@ static void gb_process(void * inst, const float * const * in, uint32_t numIn, fl
                 memmove(out[c], from, (size_t)frames * sizeof(float));
             }
         }
+
         bool recording = (transport != NULL) && transport->valid && transport->recording;
 
         gb_align_receiver_write(g->alignReceiver, in, numIn, frames, rate, recording);
@@ -745,22 +748,35 @@ static void gb_on_edit(void * user, const tGbEditRequest * request) {
     uint32_t    id = 0;
 
     switch (request->which) {
-        case eGbEditDevice:       id = kParamDevice;       break;
-        case eGbEditRate:         id = kParamRate;         break;
-        case eGbEditFrames:       id = kParamFrames;       break;
-        case eGbEditTrim:         id = kParamTrim;         break;
-        case eGbEditMode:         id = kParamMode;         break;
-        case eGbEditFirstChannel: id = kParamFirstChannel; break;
-        case eGbEditMidiDest:     id = kParamMidiDest;     break;
-        case eGbEditMidiChannel:  id = kParamMidiChannel;  break;
-        case eGbEditTestNote:     id = kParamTestNote;     break;
-        case eGbEditMeasure:      id = kParamMeasure;      break;
-        case eGbEditOffset:       id = kParamOffsetMs;     break;
-        case eGbEditSource:       id = kParamSource;       break;
-        case eGbEditRole:         id = kParamRole;         break;
+        case eGbEditDevice:       id = kParamDevice;
+            break;
+        case eGbEditRate:         id = kParamRate;
+            break;
+        case eGbEditFrames:       id = kParamFrames;
+            break;
+        case eGbEditTrim:         id = kParamTrim;
+            break;
+        case eGbEditMode:         id = kParamMode;
+            break;
+        case eGbEditFirstChannel: id = kParamFirstChannel;
+            break;
+        case eGbEditMidiDest:     id = kParamMidiDest;
+            break;
+        case eGbEditMidiChannel:  id = kParamMidiChannel;
+            break;
+        case eGbEditTestNote:     id = kParamTestNote;
+            break;
+        case eGbEditMeasure:      id = kParamMeasure;
+            break;
+        case eGbEditOffset:       id = kParamOffsetMs;
+            break;
+        case eGbEditSource:       id = kParamSource;
+            break;
+        case eGbEditRole:         id = kParamRole;
+            break;
 
         case eGbEditExtraLatency:
-            id = kParamExtraLatency;
+            id                       = kParamExtraLatency;
             gb_align_sender_manual(g->alignSender);
             break;
 
@@ -781,7 +797,7 @@ static void gb_on_edit(void * user, const tGbEditRequest * request) {
 
 // notes §8
 static void gb_sync(void * user, bool instrument) {
-    tGbPlugin * g = (tGbPlugin *)user;
+    tGbPlugin *  g = (tGbPlugin *)user;
 
     gb_draw_set_status_slot((g != NULL) ? atomic_load(&g->statusSlot) : -1);
     gb_draw_set_instrument(instrument);
@@ -834,7 +850,7 @@ static bool gb_panel_click(void * user, double x, double y) {
     return true;
 }
 
-static const tSynthLibPanel gPanelEffect = {
+static const tSynthLibPanel gPanelEffect     = {
     .canvasWidth = GB_CANVAS_W,
     .init        = gb_draw_init,
     .sync        = gb_sync_effect,
@@ -894,48 +910,48 @@ static void gb_editor_width_save(long width) {
 
 // THE EFFECT DECLARES AN INPUT AND IGNORES IT, which is what an effect must do - and what sidesteps
 // the whole class of host rejection G2 Alike ran into for having none.
-static const tSynthLibBus gEffectInputs[1] = {
-    { "Unused In", GB_CHANNELS, false, true }
+static const tSynthLibBus gEffectInputs[1]     = {
+    {"Unused In", GB_CHANNELS, false, true}
 };
 
 // THE INSTRUMENT'S INPUT IS A SIDE-CHAIN, AUX AND NOT ACTIVE BY DEFAULT: the host's own interface
 // input, for the External-Instrument mode. A MAIN input on an instrument is the shape that makes a
 // host go looking for a source and complain when there is none.
 static const tSynthLibBus gInstrumentInputs[1] = {
-    { "Host Input", GB_CHANNELS, true, false }
+    {"Host Input", GB_CHANNELS, true, false}
 };
 
-static const tSynthLibBus gOutputs[1] = {
-    { "Device Out", GB_CHANNELS, false, true }
+static const tSynthLibBus gOutputs[1]          = {
+    {"Device Out", GB_CHANNELS, false, true}
 };
 
-#define GB_CALLBACKS                            \
-    {                                           \
-        .create         = gb_create,            \
-        .destroy        = gb_destroy,           \
-        .initialize     = gb_initialize,        \
-        .terminate      = gb_terminate,         \
-        .prepare        = gb_prepare,           \
-        .setActive      = gb_set_active,        \
-        .setProcessing  = gb_set_processing,    \
-        .latencySamples = gb_latency_samples,   \
-        .blockBegin     = gb_block_begin,       \
-        .process        = gb_process,           \
-        .noteOn         = gb_note_on,           \
-        .noteOff        = gb_note_off,          \
-        .polyPressure   = gb_poly_pressure,     \
-        .paramCount     = gb_param_count_cb,    \
-        .paramInfo      = gb_param_info_cb,     \
-        .midiMapping    = gb_midi_mapping_cb,   \
-        .setParam       = gb_set_param,         \
-        .getParam       = gb_get_param,         \
-        .paramPoints    = gb_param_points,      \
-        .paramText      = gb_param_text_cb,     \
-        .getState       = gb_get_state,         \
-        .setState       = gb_set_state,         \
-        .stateParams    = gb_state_params,      \
-        .createView     = gb_create_view        \
-    }
+#define GB_CALLBACKS                         \
+   {                                         \
+       .create         = gb_create,          \
+       .destroy        = gb_destroy,         \
+       .initialize     = gb_initialize,      \
+       .terminate      = gb_terminate,       \
+       .prepare        = gb_prepare,         \
+       .setActive      = gb_set_active,      \
+       .setProcessing  = gb_set_processing,  \
+       .latencySamples = gb_latency_samples, \
+       .blockBegin     = gb_block_begin,     \
+       .process        = gb_process,         \
+       .noteOn         = gb_note_on,         \
+       .noteOff        = gb_note_off,        \
+       .polyPressure   = gb_poly_pressure,   \
+       .paramCount     = gb_param_count_cb,  \
+       .paramInfo      = gb_param_info_cb,   \
+       .midiMapping    = gb_midi_mapping_cb, \
+       .setParam       = gb_set_param,       \
+       .getParam       = gb_get_param,       \
+       .paramPoints    = gb_param_points,    \
+       .paramText      = gb_param_text_cb,   \
+       .getState       = gb_get_state,       \
+       .setState       = gb_set_state,       \
+       .stateParams    = gb_state_params,    \
+       .createView     = gb_create_view      \
+   }
 
 // THE PANEL IS A FIXED CANVAS THAT SIMPLY SCALES, so any size works as long as the aspect is kept;
 // three quarters to twice the canvas are the bounds the old editor enforced.
@@ -1012,7 +1028,7 @@ static const tSynthLibPluginDesc gVariants[2] = {
     }
 };
 
-static const tSynthLibPluginSet gSet = {
+static const tSynthLibPluginSet  gSet = {
     .variants = gVariants,
     .count    = 2
 };

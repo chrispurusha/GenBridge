@@ -21,9 +21,11 @@
 // notes §1
 
 #import <Cocoa/Cocoa.h>
+#import <AudioToolbox/AUCocoaUIView.h>
 
 #include "gmDraw.h"
 #include "gmEngine.h"
+#include "gmInsert.h"
 #include "gmSettings.h"
 #include "synthlibPanelView.h"
 
@@ -34,6 +36,66 @@
 static tGmConfig gConfig;
 static bool      gRunning       = false;
 static bool      gDisplayPaused = false;
+
+// gmInsert notes §4 - Helix Native's own editor, in a window of its own
+static NSWindow * gInsertWindow = nil;
+
+static void close_insert_editor(void) {
+    if (gInsertWindow != nil) {
+        gInsertWindow.contentView = nil;   // the view goes before the unit it draws
+        [gInsertWindow orderOut:nil];
+        gInsertWindow = nil;
+    }
+}
+
+static void show_insert_editor(void) {
+    AudioUnit unit = gm_insert_unit();
+    UInt32    size = 0;
+    Boolean   writable;
+
+    if (gInsertWindow != nil) {
+        [gInsertWindow makeKeyAndOrderFront:nil];
+        return;
+    }
+
+    if (  (unit == NULL)
+       || (AudioUnitGetPropertyInfo(unit, kAudioUnitProperty_CocoaUI, kAudioUnitScope_Global, 0, &size, &writable) != noErr)
+       || (size < sizeof(AudioUnitCocoaViewInfo))) {
+        return;
+    }
+    AudioUnitCocoaViewInfo * info = (AudioUnitCocoaViewInfo *)malloc(size);
+
+    if ((info == NULL) || (AudioUnitGetProperty(unit, kAudioUnitProperty_CocoaUI, kAudioUnitScope_Global, 0, info, &size) != noErr)) {
+        free(info);
+        return;
+    }
+    NSURL *    bundleUrl = (__bridge_transfer NSURL *)info->mCocoaAUViewBundleLocation;
+    NSString * className = (__bridge_transfer NSString *)info->mCocoaAUViewClass[0];
+
+    free(info);
+
+    Class      factoryClass = [[NSBundle bundleWithURL:bundleUrl] classNamed:className];
+    id         factory      = [[factoryClass alloc] init];
+
+    if (![factory conformsToProtocol:@protocol(AUCocoaUIBase)]) {
+        return;
+    }
+    NSView *   view = [factory uiViewForAudioUnit:unit withSize:NSZeroSize];
+
+    if (view == nil) {
+        return;
+    }
+    gInsertWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, view.frame.size.width, view.frame.size.height)
+                                                styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                                                           | NSWindowStyleMaskMiniaturizable)
+                                                  backing:NSBackingStoreBuffered
+                                                    defer:NO];
+    gInsertWindow.title                = @"Helix Native - GenBridge Monitor";
+    gInsertWindow.releasedWhenClosed   = NO;
+    gInsertWindow.contentView          = view;
+    [gInsertWindow setFrameAutosaveName:@"GenBridgeMonitorHelix"];
+    [gInsertWindow makeKeyAndOrderFront:nil];
+}
 
 static void apply_running(void) {
     if (gRunning) {
@@ -72,9 +134,12 @@ static bool panel_click(void * user, double x, double y) {
             apply_running();
             return true;
 
+        case eGmEditInsertEditor:
+            show_insert_editor();
+            return true;
+
         case eGmEditDisplay:
-            gDisplayPaused = !gDisplayPaused;    // the view stops or restarts its timer after this click
-            gm_settings_save_display(gDisplayPaused);
+            gDisplayPaused = !gDisplayPaused;    // the view stops or restarts its timer after this click; not saved - gmDraw notes §7
             return true;
 
         default:
@@ -103,7 +168,7 @@ static const tSynthLibPanel gPanel = {
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
     gm_settings_load(&gConfig, &gRunning);
-    gDisplayPaused = gm_settings_load_display();
+    gm_insert_on_close(close_insert_editor);
 
     NSRect rect = NSMakeRect(0, 0, GM_CANVAS_W, GM_CANVAS_H);
 
