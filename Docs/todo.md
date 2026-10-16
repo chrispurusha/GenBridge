@@ -6,6 +6,7 @@ Built-but-unchecked work goes in to-test.md.
 
 Shared with the sibling projects
 
+- Host a VST3 or AU plugin like Line6 Helix, for live guitar monitoring.
 - Align role BUILT 2026-10-09 (to-test): Extra Latency confirmed in Live by CT, now set automatically by an aligning instance on the recording track (gbAlign notes). Next: the instrument panel has no Extra row yet (generic parameters only)
 - Need to be able to host multiple instances of this plugin on a DAW. Can we make sure we're OK on that? I've had the Kronos stop sending audio 'til I rebooted it, which happened after I added a track for TB03.
 - I'm not sure we're defaulting to stereo audio connection? We should be, if not.
