@@ -6,7 +6,7 @@ Built-but-unchecked work goes in to-test.md.
 
 Shared with the sibling projects
 
-- Bug - application looks like it's not opening if display has been turned off. Should at least display window contents to start off, even with Display disabled.
+- Bug - application looks like it's not opening if display has been turned off. Maybe we shouldn't save the Display / stop state?
 - If sample rates are the same, can we synch without drift? Might not be able to, so that's fine.
 - Should be able to set input sample rate unless we're sharing?
 - Host a VST3 or AU plugin like Line6 Helix, for live guitar monitoring.
