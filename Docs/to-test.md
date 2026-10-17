@@ -2,6 +2,11 @@
   Helix in it; "Edit Helix" opens its editor; change the preset, Stop, Start - the preset comes back (settings saved
   as helix-native.plist, like a DAW's project); quit and relaunch - still there. Off: dry again. Loaded and rendered
   offline only so far - not yet heard through the Helix -> QU-24 route.
+- ***MONITOR: HELIX EDITOR REOPENS DRAWN (2026-10-17)*** - gmInsert notes §4. Edit Helix, close its window, Edit Helix
+  again - several times, and after a Stop/Start: it opens drawn every time (it could open blank until a restart).
+- ***MONITOR: INPUT TRIM BEFORE HELIX (2026-10-16)*** - gmEngine notes §9. Two bars, Input trim and Output trim. With
+  Helix Native on, raising the input trim drives Helix harder (more gain on a drive patch) while the output trim
+  only changes the level; with Helix off the two act as one gain. Both saved and restored.
 - ***TRIM TO +12 dB, IN DECIBELS (2026-10-16)*** - poc/trim.h, trim.h notes §1. Plug-in and Monitor: the Trim bar reads in
   dB, -48 to +12 with its bottom "-inf dB", 0 dB at four-fifths of the way; +12 dB is audibly louder than the old top
   (+6). The host's own Trim parameter shows dB. An existing project and the Monitor's saved trim (1.98) come back at

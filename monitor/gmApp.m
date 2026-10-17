@@ -37,14 +37,35 @@ static tGmConfig gConfig;
 static bool      gRunning       = false;
 static bool      gDisplayPaused = false;
 
-// gmInsert notes §4 - Helix Native's own editor, in a window of its own
+// gmInsert notes §4 - Helix Native's own editor, in a window of its own, made afresh on every open
 static NSWindow * gInsertWindow = nil;
+
+@interface GmInsertWindowDelegate : NSObject <NSWindowDelegate>
+@end
+
+@implementation GmInsertWindowDelegate
+- (void)windowWillClose:(NSNotification *)notification {
+    NSWindow * window = notification.object;
+
+    window.contentView = nil;     // the editor view goes with its window; the next open asks the unit for a new one
+    window.delegate    = nil;
+
+    if (window == gInsertWindow) {
+        gInsertWindow = nil;
+    }
+}
+@end
+
+static GmInsertWindowDelegate * gInsertDelegate = nil;
 
 static void close_insert_editor(void) {
     if (gInsertWindow != nil) {
-        gInsertWindow.contentView = nil;   // the view goes before the unit it draws
-        [gInsertWindow orderOut:nil];
-        gInsertWindow = nil;
+        NSWindow * window = gInsertWindow;
+
+        gInsertWindow      = nil;
+        window.delegate    = nil;
+        window.contentView = nil;   // the view goes before the unit it draws
+        [window orderOut:nil];
     }
 }
 
@@ -92,6 +113,11 @@ static void show_insert_editor(void) {
                                                     defer:NO];
     gInsertWindow.title                = @"Helix Native - GenBridge Monitor";
     gInsertWindow.releasedWhenClosed   = NO;
+
+    if (gInsertDelegate == nil) {
+        gInsertDelegate = [[GmInsertWindowDelegate alloc] init];
+    }
+    gInsertWindow.delegate             = gInsertDelegate;
     gInsertWindow.contentView          = view;
     [gInsertWindow setFrameAutosaveName:@"GenBridgeMonitorHelix"];
     [gInsertWindow makeKeyAndOrderFront:nil];
@@ -126,6 +152,7 @@ static bool panel_click(void * user, double x, double y) {
 
         case eGmEditTrim:
             gm_engine_set_trim(gConfig.trim);
+            gm_engine_set_input_trim(gConfig.inTrim);
             gm_settings_save(&gConfig, gRunning);
             return true;
 

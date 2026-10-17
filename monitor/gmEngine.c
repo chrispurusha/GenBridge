@@ -69,6 +69,7 @@ typedef struct {
     double           latencyMs;
     double           bridgeMs;
     _Atomic double   trim;
+    _Atomic double   inTrim;             // notes §9
     _Atomic bool     needResync;
     _Atomic bool     started;
     _Atomic uint32_t resyncs;
@@ -162,18 +163,21 @@ static void output_callback(void * user, const float * input, float * output, ui
     }
     resampler_process(&e->resampler, e->mix, frames, ratio);
 
-    // gmInsert notes §2 - Helix Native, stereo, after the resampler and before the trim
+    // notes §9 - the input trim sets the level Helix Native sees; with no insert it folds into the output gain
+    float    inGain     = (float)atomic_load(&e->inTrim);
+
+    // gmInsert notes §2 - Helix Native, stereo, after the resampler and before the output trim
     if (e->insert) {
         for (uint32_t i = 0; i < frames; i++) {
-            e->fxLeft[i]  = e->mix[i * e->inChannels];
-            e->fxRight[i] = (e->inChannels > 1) ? e->mix[(i * e->inChannels) + 1] : e->fxLeft[i];
+            e->fxLeft[i]  = e->mix[i * e->inChannels] * inGain;
+            e->fxRight[i] = ((e->inChannels > 1) ? e->mix[(i * e->inChannels) + 1] : e->mix[i * e->inChannels]) * inGain;
         }
 
         gm_insert_process(e->fxLeft, e->fxRight, frames);
     }
     // notes §6
-    float gain = (float)atomic_load(&e->trim);
-    float p[2] = {0.0f, 0.0f};
+    float    gain       = (float)atomic_load(&e->trim) * (e->insert ? 1.0f : inGain);
+    float    p[2]       = {0.0f, 0.0f};
 
     for (uint32_t i = 0; i < frames; i++) {
         float l = (e->insert ? e->fxLeft[i] : e->mix[i * e->inChannels]) * gain;
@@ -404,6 +408,7 @@ static void open_engine(void) {
 
     drift_init(&e->drift, &drift, e->inRate, e->setpoint);
     atomic_store(&e->trim, gConfig.trim);
+    atomic_store(&e->inTrim, gConfig.inTrim);
     atomic_store(&e->needResync, true);
 
     // notes §7
@@ -452,6 +457,14 @@ void gm_engine_set_trim(double trim) {
 
     if (gEngine != NULL) {
         atomic_store(&gEngine->trim, trim);
+    }
+}
+
+void gm_engine_set_input_trim(double trim) {
+    gConfig.inTrim = trim;
+
+    if (gEngine != NULL) {
+        atomic_store(&gEngine->inTrim, trim);
     }
 }
 

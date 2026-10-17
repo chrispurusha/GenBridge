@@ -69,3 +69,11 @@ follows the buffer's rule (§4) exactly: set only when no other client is runnin
 nothing else has started it since. A device that refuses the rate stays where it was; the stats line shows the
 rate actually in force either way. The output is not given a row: it is usually the mixer or interface the DAW
 also plays through, which is exactly the device whose rate must not move.
+
+## 9. the input trim (`inTrim`)
+
+CT (2026-10-16): a trim BEFORE the plug-in, to set the level Helix Native sees - the existing trim comes after it
+and sets only what reaches the output. Same scale as the output trim (poc/trim.h), saved as `intrim=`, applied
+live. With Helix Native in the path it scales what is handed to it; without, there is nothing between the two
+trims, so it simply multiplies into the output gain. The In meter shows the device's level before either trim.
+

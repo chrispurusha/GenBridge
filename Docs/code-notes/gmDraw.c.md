@@ -46,3 +46,10 @@ NOT SAVED (2026-10-16). It used to be kept in the settings file, so an app quit 
 reopened with it paused - and a paused panel draws nothing until clicked, so the window came up empty and the
 app looked as if it had not opened (CT). Every launch now starts with the display running. Run/Stop is still
 saved: a monitor that comes back routing is the point of it.
+
+## 8. the two trim bars (`draw_trim()`, `click_trim()`)
+
+Input trim above Output trim, the same bar and readout for both, each snapping to 0 dB near unity (§6). Adding
+the bar, the Rate row and the Helix Native row grew the canvas from 540 to 650: with both warning lines showing
+(Helix would not load; a device in use elsewhere) the last ends about 9 points above the bottom.
+

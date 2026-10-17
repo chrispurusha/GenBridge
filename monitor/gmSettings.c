@@ -48,6 +48,7 @@ void gm_settings_defaults(tGmConfig * config, bool * running) {
     config->frames      = 64;
     config->safetyMs    = 0.0;
     config->trim        = 1.0;
+    config->inTrim      = 1.0;
     *running            = false;
 }
 
@@ -92,6 +93,8 @@ void gm_settings_load(tGmConfig * config, bool * running) {
             config->frames = (uint32_t)atoi(value);
         } else if (strcmp(line, "safetyms") == 0) {
             config->safetyMs = atof(value);
+        } else if (strcmp(line, "intrim") == 0) {
+            config->inTrim = atof(value);
         } else if (strcmp(line, "helix") == 0) {
             config->insert = (atoi(value) != 0);
         } else if (strcmp(line, "inrate") == 0) {
@@ -107,6 +110,10 @@ void gm_settings_load(tGmConfig * config, bool * running) {
     if ((config->trim < 0.0) || (config->trim > (double)trim_gain(1.0))) {
         config->trim = 1.0;
     }
+
+    if ((config->inTrim < 0.0) || (config->inTrim > (double)trim_gain(1.0))) {
+        config->inTrim = 1.0;
+    }
 }
 
 void gm_settings_save(const tGmConfig * config, bool running) {
@@ -119,8 +126,8 @@ void gm_settings_save(const tGmConfig * config, bool running) {
     if (f == NULL) {
         return;
     }
-    fprintf(f, "in=%s\nout=%s\ninfirst=%u\ninch=%u\noutfirst=%u\noutch=%u\nframes=%u\nsafetyms=%.1f\ninrate=%.0f\nhelix=%d\ntrim=%.3f\nrunning=%d\n",
+    fprintf(f, "in=%s\nout=%s\ninfirst=%u\ninch=%u\noutfirst=%u\noutch=%u\nframes=%u\nsafetyms=%.1f\ninrate=%.0f\nhelix=%d\nintrim=%.3f\ntrim=%.3f\nrunning=%d\n",
             config->inUid, config->outUid, config->inFirst, config->inChannels, config->outFirst,
-            config->outChannels, config->frames, config->safetyMs, config->inRate, config->insert ? 1 : 0, config->trim, running ? 1 : 0);
+            config->outChannels, config->frames, config->safetyMs, config->inRate, config->insert ? 1 : 0, config->inTrim, config->trim, running ? 1 : 0);
     fclose(f);
 }

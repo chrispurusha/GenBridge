@@ -25,7 +25,7 @@
 #include "gmEngine.h"
 
 #define GM_CANVAS_W    (520.0)
-#define GM_CANVAS_H    (608.0)
+#define GM_CANVAS_H    (650.0)
 
 typedef enum {
     eGmEditNone = 0,

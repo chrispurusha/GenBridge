@@ -37,7 +37,8 @@ typedef struct {
     uint32_t frames;         // device buffer to ask for - honoured only where nothing else holds the device
     double   inRate;         // the input's rate to ask for, 0 to leave it as it is - likewise (gmEngine notes §8)
     double   safetyMs;       // added to the smallest setpoint that clears both blocks
-    double   trim;           // linear gain - poc/trim.h
+    double   trim;           // output gain, after the insert - poc/trim.h
+    double   inTrim;         // input gain, before the insert - gmEngine notes §9
     bool     insert;         // Helix Native in the path - gmInsert notes §1
 } tGmConfig;
 
@@ -74,6 +75,7 @@ typedef struct {
 void gm_engine_start(const tGmConfig * config);
 void gm_engine_stop(void);
 void gm_engine_set_trim(double trim);
+void gm_engine_set_input_trim(double trim);
 // notes §1 - call a few times a second: follows devices going and coming back
 void gm_engine_poll(void);
 void gm_engine_status(tGmStatus * out);

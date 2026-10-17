@@ -197,17 +197,22 @@ static double trim_y(void) {
     return ROW_TOP + (ROW_STEP * eRowCount) + 6.0;
 }
 
+// notes §8 - the input trim's bar, then the output's below it
+static double out_trim_y(void) {
+    return trim_y() + 28.0;
+}
+
 static double meter_y(void) {
-    return trim_y() + 30.0;
+    return out_trim_y() + 30.0;
 }
 
 static double stats_y(void) {
     return meter_y() + 66.0;
 }
 
-static tRectangle trim_track(void) {
+static tRectangle trim_track_at(double y) {
     return (tRectangle){{
-                            VALUE_X, trim_y()
+                            VALUE_X, y
                         }, {
                             VALUE_RIGHT - VALUE_X - 54.0, 14.0
                         }
@@ -266,6 +271,33 @@ void gm_draw_init(void) {
 static void text(double x, double y, double h, tRgb colour, const char * s) {
     set_rgb_colour(colour);
     render_text(mainArea, (tRectangle){{x, y}, {0.0, h}}, s);
+}
+
+static void draw_trim(double y, const char * name, double gain) {
+    char       buffer[32];
+    tRectangle track = trim_track_at(y);
+
+    text(LABEL_X, y + 1.0, TEXT_H, (tRgb){0.72, 0.72, 0.74}, name);
+    set_rgb_colour((tRgb){0.16, 0.16, 0.18});
+    render_rectangle(mainArea, track);
+    set_rgb_colour((tRgb){0.35, 0.62, 0.85});
+    render_rectangle(mainArea, (tRectangle){track.coord, {track.size.w * trim_normalized(gain), track.size.h}});
+    trim_text(trim_normalized(gain), buffer, sizeof(buffer));
+    text(track.coord.x + track.size.w + 8.0, y + 1.0, 11.0, (tRgb){0.72, 0.72, 0.74}, buffer);
+}
+
+// notes §6 - a click on a trim's bar, snapping to unity near 0 dB so it is easy to get back to
+static bool click_trim(double y, double px, double py, double * gain) {
+    tRectangle track = trim_track_at(y);
+
+    if (!hit((tRectangle){{track.coord.x, track.coord.y - 4.0}, {track.size.w, track.size.h + 8.0}}, px, py)) {
+        return false;
+    }
+    double     frac  = (px - track.coord.x) / track.size.w;
+
+    frac  = (frac < 0.0) ? 0.0 : ((frac > 1.0) ? 1.0 : frac);
+    *gain = (fabs(frac - trim_unity()) < 0.02) ? 1.0 : (double)trim_gain(frac);
+    return true;
 }
 
 static void row(tRow which, const char * label, const char * value) {
@@ -380,16 +412,9 @@ void gm_draw_frame(const tGmConfig * config, bool running, bool displayPaused, i
     row(eRowSafety, "Safety", buffer);
     row(eRowInsert, "Helix Native", !gm_insert_available() ? "Not installed" : (config->insert ? "On" : "Off"));
 
-    // ---- trim ----
-    tRectangle track = trim_track();
-
-    text(LABEL_X, trim_y() + 1.0, TEXT_H, (tRgb){0.72, 0.72, 0.74}, "Trim");
-    set_rgb_colour((tRgb){0.16, 0.16, 0.18});
-    render_rectangle(mainArea, track);
-    set_rgb_colour((tRgb){0.35, 0.62, 0.85});
-    render_rectangle(mainArea, (tRectangle){track.coord, {track.size.w * trim_normalized(config->trim), track.size.h}});
-    trim_text(trim_normalized(config->trim), buffer, sizeof(buffer));
-    text(track.coord.x + track.size.w + 8.0, trim_y() + 1.0, 11.0, (tRgb){0.72, 0.72, 0.74}, buffer);
+    // ---- trims ----
+    draw_trim(trim_y(), "Input trim", config->inTrim);
+    draw_trim(out_trim_y(), "Output trim", config->trim);
 
     // ---- meters ----
     text(LABEL_X, meter_y(), TEXT_H, (tRgb){0.72, 0.72, 0.74}, "In");
@@ -400,7 +425,7 @@ void gm_draw_frame(const tGmConfig * config, bool running, bool displayPaused, i
     meter(meter_y() + 42.0, status.outPeak[1]);
 
     // ---- figures ----
-    double     y     = stats_y();
+    double y = stats_y();
 
     if (displayPaused) {
         text(LABEL_X, y, 11.0, AMBER, "display paused - routing carries on; click Display to resume");
@@ -541,15 +566,8 @@ tGmEdit gm_draw_click(tGmConfig * config, bool running, double x, double y) {
     if (hit(draw_button_bounds(display_button()), x, y)) {
         return eGmEditDisplay;
     }
-    tRectangle track = trim_track();
 
-    if (hit((tRectangle){{track.coord.x, track.coord.y - 4.0}, {track.size.w, track.size.h + 8.0}}, x, y)) {
-        double frac = (x - track.coord.x) / track.size.w;
-
-        frac         = (frac < 0.0) ? 0.0 : ((frac > 1.0) ? 1.0 : frac);
-        // notes §6 - snaps to unity near 0 dB, so it is easy to get back to
-        config->trim = (fabs(frac - trim_unity()) < 0.02) ? 1.0 : (double)trim_gain(frac);
-
+    if (click_trim(trim_y(), x, y, &config->inTrim) || click_trim(out_trim_y(), x, y, &config->trim)) {
         return eGmEditTrim;
     }
 

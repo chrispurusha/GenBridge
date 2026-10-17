@@ -28,3 +28,9 @@ or quit, and handed back to it when it next loads. Checked offline: 94 KB writte
 
 "Edit Helix" appears while the unit is loaded and opens the unit's own Cocoa view in a window. The window is
 closed before the unit unloads (`gm_insert_on_close()`), since the view must not outlive what it draws.
+
+A NEW VIEW ON EVERY OPEN (2026-10-17). The first version kept the window and its view when the user closed it,
+and showed the same view again on the next Edit. CT then saw a blank Helix window, the plug-in still running and
+sounding, until a restart: an editor view may stop drawing when its window closes and does not start again. Now
+closing the window releases the view and the window (`GmInsertWindowDelegate`), and every Edit asks the unit's view
+factory for a new one - what a DAW does.
