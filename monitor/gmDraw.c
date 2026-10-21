@@ -194,7 +194,7 @@ static int device_choices(bool input) {
 // ---- layout ---------------------------------------------------------------------------------
 
 static double trim_y(void) {
-    return ROW_TOP + (ROW_STEP * eRowCount) + 6.0;
+    return ROW_TOP + (ROW_STEP * (double)eRowCount) + 6.0;
 }
 
 // notes §8 - the input trim's bar, then the output's below it
