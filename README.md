@@ -13,15 +13,9 @@ still here and still useful: it holds the command line program that proved the o
 you for free, the clock drift loop, and it remains the place to measure that loop without a DAW in
 the way.
 
-Binary beta releases: https://github.com/chrispurusha/GenBridge/releases
+## Working with LLMs
 
-If anyone is interested in helping, please drop me a line.
-
-Since I'm now incurring costs (I recently started using LLMs) which would be good to at least cover, I now have a Buy Me a Coffee page:
-
-https://buymeacoffee.com/chrispurusha
-
-Thanks for any donations!
+Development started as a solo project. As the project has evolved, I've recently incorporated LLM-assisted development into the workflow, using it as a tool for research, coding, debugging, and experimentation.
 
 ---
 
