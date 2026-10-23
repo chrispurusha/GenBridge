@@ -95,7 +95,7 @@ AU_BUNDLE_ID="com.chrispurusha.genbridge.au"
 VST3_BUNDLE_ID="com.chrispurusha.genbridge.vst3"
 
 # THE OBJECTIVE-C CLASS THE AUDIO UNIT PUBLISHES ITS EDITOR UNDER. Class names are global to the
-# process, so this has to be GenBridge's own and not G2 Alike's - see synthlibPluginAuView.m.
+# process, so this has to be GenBridge's own and not G2Alike's - see synthlibPluginAuView.m.
 AU_VIEW_CLASS="GenBridgeAUView"
 
 VST3_INSTALL_DIR="${GENBRIDGE_VST3_INSTALL:-/Library/Audio/Plug-Ins/VST3}"
@@ -393,7 +393,7 @@ build_au() {
     #
     # `name` is "Manufacturer: Plug-in", split on the colon, and a host's menus group by the halves.
     #
-    # sandboxSafe IS FALSE, deliberately and unlike G2 Alike: GenBridge opens audio devices and MIDI
+    # sandboxSafe IS FALSE, deliberately and unlike G2Alike: GenBridge opens audio devices and MIDI
     # ports of its own, which a sandboxed host's process is not entitled to. A host that sandboxes then
     # runs it in a separate helper process rather than loading it into one it would break in.
     cat > "$out/Contents/Info.plist" <<PLIST

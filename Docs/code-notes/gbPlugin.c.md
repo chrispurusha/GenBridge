@@ -10,7 +10,7 @@ This is what gbVst3.cpp and gbEditor.mm used to be, less every line that was VST
 (gbBridge.h) was already the plug-in with no VST3 in it; this file describes it to SynthLib's
 wrappers, and `./do-plugin` builds GenBridge.vst3 and GenBridge.component from the same objects.
 The COM plumbing, the controller, the factory and the IPlugView all live in SynthLib/plugin/ now,
-shared with G2 Alike.
+shared with G2Alike.
 
 TWO VARIANTS, ONE BINARY: the effect and the instrument, exactly as the VST3 registered them -
 same class ids, so a project saved against the old wrapper finds the same plug-in.

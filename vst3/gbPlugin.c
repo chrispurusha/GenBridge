@@ -81,7 +81,7 @@ static const uint8_t gInstrumentControllerUid[16] = {
                                 ((uint32_t)(c) << 8) | (uint32_t)(d))
 
 // THE AUDIO UNIT'S CODES, new with this file and under the same rule as the class ids above. The
-// manufacturer is the one G2 Alike registered, since it is the same vendor. do-plugin writes the same
+// manufacturer is the one G2Alike registered, since it is the same vendor. do-plugin writes the same
 // codes into the .component's Info.plist, which is where macOS actually finds them.
 #define GB_AU_EFFECT_TYPE           FOUR_CC('a', 'u', 'f', 'x')  // kAudioUnitType_Effect
 #define GB_AU_EFFECT_SUBTYPE        FOUR_CC('G', 'B', 'f', 'x')
@@ -909,7 +909,7 @@ static void gb_editor_width_save(long width) {
 // ------------------------------------------------------------------------------------------------
 
 // THE EFFECT DECLARES AN INPUT AND IGNORES IT, which is what an effect must do - and what sidesteps
-// the whole class of host rejection G2 Alike ran into for having none.
+// the whole class of host rejection G2Alike ran into for having none.
 static const tSynthLibBus gEffectInputs[1]     = {
     {"Unused In", GB_CHANNELS, false, true}
 };
