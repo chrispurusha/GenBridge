@@ -39,7 +39,6 @@
 #include "synthlibPanelView.h"
 
 // Names the log - touch /tmp/genbridge-log, read /tmp/genbridge.log. See SynthLib's plugin/synthlibLog.h.
-const char gSynthLibLogName[] = "genbridge";
 
 // THE CONTROLLER PASS-THROUGHS ARE NUMBERED THE WAY SYNTHLIB NUMBERS MIDI CONTROLS, which is VST3's
 // numbering - and SynthLib asserts that against the SDK itself, so these three keep all three agreeing.
@@ -1033,6 +1032,8 @@ static const tSynthLibPluginSet  gSet = {
     .count    = 2
 };
 
-const tSynthLibPluginSet * synthlib_plugin_variants(void) {
+static const tSynthLibPluginSet * plugin_variants(void) {
     return &gSet;
 }
+
+SYNTHLIB_PLUGIN_REGISTER(plugin_variants, "genbridge")

@@ -270,7 +270,7 @@ cd SynthLib && git submodule update --init ThirdParty/glfw ThirdParty/freetype
 ```
 
 `libusb` is deliberately left out: it is G2-Edit's USB transport and GenBridge has no use for it.
-Only freetype needs building, and it must be built at the same 11.5 deployment target as everything
+Only freetype needs building, and it must be built at the same 12.0 deployment target as everything
 else or the linker warns that the object file was built for a newer macOS. The cmake invocation is
 in `G2-Edit/Docs/Third Party build notes.md`; the build directory must be deleted before re-running
 cmake, because the value is cached. glfw is needed for its **headers only** - SynthLib's key and

@@ -32,7 +32,7 @@ set -e
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SDK="${VST3_SDK:-$HOME/Documents/vst3sdk}"
-SL="${SYNTHLIB_DIR:-$HERE/SynthLib}"
+SL="${SYNTHLIB_DIR:-$HERE/../SynthLib}"
 
 FORMATS=()
 INSTALL=1
@@ -126,7 +126,8 @@ SOURCES=(
     # SHARED, in SynthLib but NOT in SynthLib/src - see the header of audio/device.c.
     "$SL/audio/device.c"
     "$SL/audio/ring.c"
-    "$SL/plugin/pluginStubs.c"
+    "$SL/plugin/synthlibPluginRegistry.c"
+    "$SL/src/synthlibGlobals.c"
 
     # The parameter store, the saved-state blob and the parameter formatting, used by BOTH wrappers -
     # so a project saved from the Audio Unit and one saved from the VST3 hold the same bytes.
@@ -209,7 +210,7 @@ WARNFLAGS=(-Wall -Wextra)
 #
 # AN ARRAY, not a string: the version define carries its own quotes through to clang, which survives a
 # string only until the first word split.
-DEFS=(-DSYNTHLIB_PLUGIN_BUILD=1 -DGB_VERSION_STRING="\"$GENBRIDGE_VERSION\"" -DGB_AU_VERSION=$AU_VERSION -DSYNTHLIB_PANEL_VIEW_CLASS=GenBridgePanelView)
+DEFS=(-DSYNTHLIB_PLUGIN_BUILD=1 -DGB_VERSION_STRING="\"$GENBRIDGE_VERSION\"" -DGB_AU_VERSION=$AU_VERSION)
 
 # glfw is here for its HEADERS ONLY - SynthLib's key and mouse constants come from them - so the library
 # is never linked. freetype is a real dependency, taken static so each bundle stays self-contained.
@@ -219,7 +220,7 @@ INCLUDES=(-I"$HERE/poc" -I"$HERE/vst3" -I"$SL/src" -I"$SL/audio" -I"$SL/plugin"
 VST3_INCLUDES=(-I"$SDK")
 
 ARCHS=(-arch arm64 -arch x86_64)
-MIN=-mmacosx-version-min=11.5
+MIN=-mmacosx-version-min=12.0
 
 COMMON_LIBS=(-framework CoreAudio -framework CoreMIDI -framework CoreFoundation -framework Cocoa
              -framework Metal -framework QuartzCore)
@@ -351,7 +352,7 @@ build_vst3() {
     <key>CFBundleShortVersionString</key><string>$GENBRIDGE_VERSION</string>
     <key>CFBundleVersion</key><string>$GENBRIDGE_VERSION</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-    <key>LSMinimumSystemVersion</key><string>11.5</string>
+    <key>LSMinimumSystemVersion</key><string>12.0</string>
 </dict>
 </plist>
 PLIST
@@ -379,9 +380,16 @@ build_au() {
     for src in "${AU_OBJC_SOURCES[@]}"; do
         local obj="$OBJDIR/au_$(basename "${src%.*}").om"
         clang $ARCHS $MIN -O2 -std=gnu11 -fobjc-arc "${WARNFLAGS[@]}" "${DEFS[@]}" "${INCLUDES[@]}" \
-              -DSYNTHLIB_AU_VIEW_CLASS=$AU_VIEW_CLASS -x objective-c -c "$src" -o "$obj"
+              -x objective-c -c "$src" -o "$obj"
         objects+=("$obj")
     done
+
+    # The one class that must be compiled into the product - see synthlibAuViewFactory.h
+    local factory="$OBJDIR/auViewFactory.m"
+    print "#import \"synthlibAuViewFactory.h\"\nSYNTHLIB_AU_VIEW_FACTORY($AU_VIEW_CLASS)" > "$factory"
+    clang $ARCHS $MIN -O2 -std=gnu11 -fobjc-arc "${WARNFLAGS[@]}" "${DEFS[@]}" "${INCLUDES[@]}" \
+              -x objective-c -c "$factory" -o "$OBJDIR/au_auViewFactory.om"
+    objects+=("$OBJDIR/au_auViewFactory.om")
 
     rm -rf "$out"
     mkdir -p "$out/Contents/MacOS"
@@ -409,7 +417,7 @@ build_au() {
     <key>CFBundleShortVersionString</key><string>$GENBRIDGE_VERSION</string>
     <key>CFBundleVersion</key><string>$GENBRIDGE_VERSION</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-    <key>LSMinimumSystemVersion</key><string>11.5</string>
+    <key>LSMinimumSystemVersion</key><string>12.0</string>
     <key>AudioComponents</key>
     <array>
         <dict>

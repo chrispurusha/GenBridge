@@ -16,7 +16,7 @@
 		1D62FECD16B522E2F987A78F /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FC89C909FFDC5CA74C66AB69 /* QuartzCore.framework */; };
 		2FD385F07A42097C5F28E1A8 /* device.c in Sources */ = {isa = PBXBuildFile; fileRef = 86A6F23992A0D5FDC9951978 /* device.c */; };
 		3787B674E14ADDE7E6EEF041 /* ring.c in Sources */ = {isa = PBXBuildFile; fileRef = 1590614B372DA0B8E478D800 /* ring.c */; };
-		8C48534C8B11BB19B3442E2D /* pluginStubs.c in Sources */ = {isa = PBXBuildFile; fileRef = 41FDAF5E44245D366AAA6ED2 /* pluginStubs.c */; };
+		8C48534C8B11BB19B3442E2D /* synthlibGlobals.c in Sources */ = {isa = PBXBuildFile; fileRef = 41FDAF5E44245D366AAA6ED2 /* synthlibGlobals.c */; };
 		61C1DF9B887A7C96ACC5F68A /* synthlibPanelView.m in Sources */ = {isa = PBXBuildFile; fileRef = E951C950C7F40F848DA8AFA8 /* synthlibPanelView.m */; };
 		BD2BE506E713A3FC6890EA46 /* utilsGraphics.c in Sources */ = {isa = PBXBuildFile; fileRef = 59634BA534EFC4E8F340E1DE /* utilsGraphics.c */; };
 		6F83563967A60602FC5EBA25 /* renderBackend.c in Sources */ = {isa = PBXBuildFile; fileRef = 59524A04FAC0D3637A6826BF /* renderBackend.c */; };
@@ -44,22 +44,22 @@
 		2DE252590E181677C5CB9EA2 /* CoreMIDI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMIDI.framework; path = System/Library/Frameworks/CoreMIDI.framework; sourceTree = SDKROOT; };
 		1AC5BF5BAEF083067CA94960 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
 		FC89C909FFDC5CA74C66AB69 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
-		86A6F23992A0D5FDC9951978 /* device.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = device.c; path = SynthLib/audio/device.c; sourceTree = "<group>"; };
-		1590614B372DA0B8E478D800 /* ring.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = ring.c; path = SynthLib/audio/ring.c; sourceTree = "<group>"; };
-		41FDAF5E44245D366AAA6ED2 /* pluginStubs.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = pluginStubs.c; path = SynthLib/plugin/pluginStubs.c; sourceTree = "<group>"; };
-		E951C950C7F40F848DA8AFA8 /* synthlibPanelView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = synthlibPanelView.m; path = SynthLib/plugin/synthlibPanelView.m; sourceTree = "<group>"; };
-		54F1F00234A984E94AFFC064 /* clickRegion.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = clickRegion.c; path = SynthLib/src/clickRegion.c; sourceTree = "<group>"; };
-		2523F59FEF664D4ABE7639F5 /* contextMenu.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = contextMenu.c; path = SynthLib/src/contextMenu.c; sourceTree = "<group>"; };
-		A4ADEB2BDCFC2A988C3D67C8 /* geometry.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = geometry.c; path = SynthLib/src/geometry.c; sourceTree = "<group>"; };
-		118BBBF7CFB5ACDB304CF8CC /* inputState.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = inputState.c; path = SynthLib/src/inputState.c; sourceTree = "<group>"; };
-		59524A04FAC0D3637A6826BF /* renderBackend.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = renderBackend.c; path = SynthLib/src/renderBackend.c; sourceTree = "<group>"; };
-		402908D99E358E26EE2A6DE4 /* renderBackendGL.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = renderBackendGL.c; path = SynthLib/src/renderBackendGL.c; sourceTree = "<group>"; };
-		45103D6D261860A428A60021 /* renderBackendMetal.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = renderBackendMetal.m; path = SynthLib/src/renderBackendMetal.m; sourceTree = "<group>"; };
-		66FA16AD411B38D3303CCA17 /* synthlibHost.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = synthlibHost.c; path = SynthLib/src/synthlibHost.c; sourceTree = "<group>"; };
-		6E8881080098634FAE657CB2 /* synthlibMidi.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = synthlibMidi.c; path = SynthLib/src/synthlibMidi.c; sourceTree = "<group>"; };
-		525EE69E189E0EE7EB1FE7B4 /* synthlibVersion.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = synthlibVersion.c; path = SynthLib/src/synthlibVersion.c; sourceTree = "<group>"; };
-		A3436F19FBA8C3B11C6AB071 /* utils.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = utils.c; path = SynthLib/src/utils.c; sourceTree = "<group>"; };
-		59634BA534EFC4E8F340E1DE /* utilsGraphics.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = utilsGraphics.c; path = SynthLib/src/utilsGraphics.c; sourceTree = "<group>"; };
+		86A6F23992A0D5FDC9951978 /* device.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = device.c; path = ../SynthLib/audio/device.c; sourceTree = "<group>"; };
+		1590614B372DA0B8E478D800 /* ring.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = ring.c; path = ../SynthLib/audio/ring.c; sourceTree = "<group>"; };
+		41FDAF5E44245D366AAA6ED2 /* synthlibGlobals.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = synthlibGlobals.c; path = ../SynthLib/src/synthlibGlobals.c; sourceTree = "<group>"; };
+		E951C950C7F40F848DA8AFA8 /* synthlibPanelView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = synthlibPanelView.m; path = ../SynthLib/plugin/synthlibPanelView.m; sourceTree = "<group>"; };
+		54F1F00234A984E94AFFC064 /* clickRegion.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = clickRegion.c; path = ../SynthLib/src/clickRegion.c; sourceTree = "<group>"; };
+		2523F59FEF664D4ABE7639F5 /* contextMenu.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = contextMenu.c; path = ../SynthLib/src/contextMenu.c; sourceTree = "<group>"; };
+		A4ADEB2BDCFC2A988C3D67C8 /* geometry.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = geometry.c; path = ../SynthLib/src/geometry.c; sourceTree = "<group>"; };
+		118BBBF7CFB5ACDB304CF8CC /* inputState.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = inputState.c; path = ../SynthLib/src/inputState.c; sourceTree = "<group>"; };
+		59524A04FAC0D3637A6826BF /* renderBackend.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = renderBackend.c; path = ../SynthLib/src/renderBackend.c; sourceTree = "<group>"; };
+		402908D99E358E26EE2A6DE4 /* renderBackendGL.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = renderBackendGL.c; path = ../SynthLib/src/renderBackendGL.c; sourceTree = "<group>"; };
+		45103D6D261860A428A60021 /* renderBackendMetal.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = renderBackendMetal.m; path = ../SynthLib/src/renderBackendMetal.m; sourceTree = "<group>"; };
+		66FA16AD411B38D3303CCA17 /* synthlibHost.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = synthlibHost.c; path = ../SynthLib/src/synthlibHost.c; sourceTree = "<group>"; };
+		6E8881080098634FAE657CB2 /* synthlibMidi.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = synthlibMidi.c; path = ../SynthLib/src/synthlibMidi.c; sourceTree = "<group>"; };
+		525EE69E189E0EE7EB1FE7B4 /* synthlibVersion.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = synthlibVersion.c; path = ../SynthLib/src/synthlibVersion.c; sourceTree = "<group>"; };
+		A3436F19FBA8C3B11C6AB071 /* utils.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = utils.c; path = ../SynthLib/src/utils.c; sourceTree = "<group>"; };
+		59634BA534EFC4E8F340E1DE /* utilsGraphics.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = utilsGraphics.c; path = ../SynthLib/src/utilsGraphics.c; sourceTree = "<group>"; };
 		0FFBE03031D007F12E65A00F /* GenBridge Monitor.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "GenBridge Monitor.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		49C58AAAB5E9380EC3F274B5 /* genbridge */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = genbridge; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -174,7 +174,7 @@
 			children = (
 				86A6F23992A0D5FDC9951978 /* device.c */,
 				1590614B372DA0B8E478D800 /* ring.c */,
-				41FDAF5E44245D366AAA6ED2 /* pluginStubs.c */,
+				41FDAF5E44245D366AAA6ED2 /* synthlibGlobals.c */,
 				E951C950C7F40F848DA8AFA8 /* synthlibPanelView.m */,
 				54F1F00234A984E94AFFC064 /* clickRegion.c */,
 				2523F59FEF664D4ABE7639F5 /* contextMenu.c */,
@@ -294,7 +294,7 @@
 			files = (
 				2FD385F07A42097C5F28E1A8 /* device.c in Sources */,
 				3787B674E14ADDE7E6EEF041 /* ring.c in Sources */,
-				8C48534C8B11BB19B3442E2D /* pluginStubs.c in Sources */,
+				8C48534C8B11BB19B3442E2D /* synthlibGlobals.c in Sources */,
 				61C1DF9B887A7C96ACC5F68A /* synthlibPanelView.m in Sources */,
 				BD2BE506E713A3FC6890EA46 /* utilsGraphics.c in Sources */,
 				6F83563967A60602FC5EBA25 /* renderBackend.c in Sources */,
@@ -344,9 +344,9 @@
 				HEADER_SEARCH_PATHS = (
 					"$(PROJECT_DIR)/monitor",
 					"$(PROJECT_DIR)/poc",
-					"$(PROJECT_DIR)/SynthLib/src",
-					"$(PROJECT_DIR)/SynthLib/audio",
-					"$(PROJECT_DIR)/SynthLib/plugin",
+					"$(PROJECT_DIR)/../SynthLib/src",
+					"$(PROJECT_DIR)/../SynthLib/audio",
+					"$(PROJECT_DIR)/../SynthLib/plugin",
 				);
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -358,7 +358,7 @@
 				);
 				MARKETING_VERSION = 0.1.0;
 				ONLY_ACTIVE_ARCH = YES;
-				OTHER_LDFLAGS = "$(PROJECT_DIR)/SynthLib/ThirdParty/freetype/build/libfreetype.a";
+				OTHER_LDFLAGS = "$(PROJECT_DIR)/../SynthLib/ThirdParty/freetype/build/libfreetype.a";
 				PRODUCT_BUNDLE_IDENTIFIER = com.chrispurusha.genbridge.monitor;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = YES;
@@ -386,9 +386,9 @@
 				HEADER_SEARCH_PATHS = (
 					"$(PROJECT_DIR)/monitor",
 					"$(PROJECT_DIR)/poc",
-					"$(PROJECT_DIR)/SynthLib/src",
-					"$(PROJECT_DIR)/SynthLib/audio",
-					"$(PROJECT_DIR)/SynthLib/plugin",
+					"$(PROJECT_DIR)/../SynthLib/src",
+					"$(PROJECT_DIR)/../SynthLib/audio",
+					"$(PROJECT_DIR)/../SynthLib/plugin",
 				);
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -399,7 +399,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
-				OTHER_LDFLAGS = "$(PROJECT_DIR)/SynthLib/ThirdParty/freetype/build/libfreetype.a";
+				OTHER_LDFLAGS = "$(PROJECT_DIR)/../SynthLib/ThirdParty/freetype/build/libfreetype.a";
 				PRODUCT_BUNDLE_IDENTIFIER = com.chrispurusha.genbridge.monitor;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = YES;
@@ -416,7 +416,7 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(PROJECT_DIR)/poc",
-					"$(PROJECT_DIR)/SynthLib/audio",
+					"$(PROJECT_DIR)/../SynthLib/audio",
 				);
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -433,7 +433,7 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(PROJECT_DIR)/poc",
-					"$(PROJECT_DIR)/SynthLib/audio",
+					"$(PROJECT_DIR)/../SynthLib/audio",
 				);
 				PRODUCT_NAME = "$(TARGET_NAME)";
 			};
@@ -503,11 +503,11 @@
 				OTHER_CFLAGS = (
 					"-Werror=uninitialized",
 					"-isystem",
-					"$(PROJECT_DIR)/SynthLib/ThirdParty/libusb/libusb",
+					"$(PROJECT_DIR)/../SynthLib/ThirdParty/libusb/libusb",
 					"-isystem",
-					"$(PROJECT_DIR)/SynthLib/ThirdParty/glfw/include",
+					"$(PROJECT_DIR)/../SynthLib/ThirdParty/glfw/include",
 					"-isystem",
-					"$(PROJECT_DIR)/SynthLib/ThirdParty/freetype/include",
+					"$(PROJECT_DIR)/../SynthLib/ThirdParty/freetype/include",
 				);
 				RUN_CLANG_STATIC_ANALYZER = YES;
 				SDKROOT = macosx;
@@ -573,11 +573,11 @@
 				OTHER_CFLAGS = (
 					"-Werror=uninitialized",
 					"-isystem",
-					"$(PROJECT_DIR)/SynthLib/ThirdParty/libusb/libusb",
+					"$(PROJECT_DIR)/../SynthLib/ThirdParty/libusb/libusb",
 					"-isystem",
-					"$(PROJECT_DIR)/SynthLib/ThirdParty/glfw/include",
+					"$(PROJECT_DIR)/../SynthLib/ThirdParty/glfw/include",
 					"-isystem",
-					"$(PROJECT_DIR)/SynthLib/ThirdParty/freetype/include",
+					"$(PROJECT_DIR)/../SynthLib/ThirdParty/freetype/include",
 				);
 				RUN_CLANG_STATIC_ANALYZER = YES;
 				SDKROOT = macosx;

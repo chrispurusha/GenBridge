@@ -24,6 +24,7 @@
 #import <AudioToolbox/AUCocoaUIView.h>
 
 #include "gmDraw.h"
+#include "synthlibVersion.h"
 #include "gmEngine.h"
 #include "gmInsert.h"
 #include "gmSettings.h"
@@ -265,6 +266,7 @@ static void build_menu(void) {
 }
 
 int main(int argc, const char * argv[]) {
+    SYNTHLIB_LOG_INIT();
     (void)argc;
     (void)argv;
 

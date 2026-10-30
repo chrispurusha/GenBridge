@@ -13,7 +13,7 @@
 set -e
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SL="${SYNTHLIB_DIR:-$HERE/SynthLib}"
+SL="${SYNTHLIB_DIR:-$HERE/../SynthLib}"
 
 INSTALL=1
 
@@ -53,7 +53,7 @@ SOURCES=(
     "$SL/audio/ring.c"
     # The entry points an application provides and a panel needs - this app has no render loop of its own,
     # the panel view repaints itself, so the plug-in's stubs are exactly right.
-    "$SL/plugin/pluginStubs.c"
+    "$SL/src/synthlibGlobals.c"
     # SynthLib, the parts a panel needs - the same list as do-plugin's.
     "$SL/src/utilsGraphics.c"
     "$SL/src/renderBackend.c"
@@ -77,11 +77,11 @@ OBJC_SOURCES=(
 WARNFLAGS=(-Wall -Wextra)
 # SYNTHLIB_PLUGIN_BUILD: no GLFW window - the panel view owns the drawing surface. The view's class name is
 # this app's own, as each plug-in names its own.
-DEFS=(-DSYNTHLIB_PLUGIN_BUILD=1 -DGM_VERSION_STRING="\"$GENBRIDGE_VERSION\"" -DSYNTHLIB_PANEL_VIEW_CLASS=GenBridgeMonitorPanelView)
+DEFS=(-DSYNTHLIB_PLUGIN_BUILD=1 -DGM_VERSION_STRING="\"$GENBRIDGE_VERSION\"")
 INCLUDES=(-I"$HERE/monitor" -I"$HERE/poc" -I"$SL/src" -I"$SL/audio" -I"$SL/plugin"
           -I"$SL/ThirdParty/glfw/include" -I"$SL/ThirdParty/freetype/include")
 ARCHS=(-arch arm64 -arch x86_64)
-MIN=-mmacosx-version-min=11.5
+MIN=-mmacosx-version-min=12.0
 LIBS=(-framework CoreAudio -framework CoreMIDI -framework CoreFoundation -framework Cocoa -framework AudioToolbox
       -framework Metal -framework QuartzCore)
 
@@ -136,7 +136,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key>        <string>APPL</string>
     <key>CFBundleShortVersionString</key> <string>$GENBRIDGE_VERSION</string>
     <key>CFBundleVersion</key>            <string>$GENBRIDGE_VERSION</string>
-    <key>LSMinimumSystemVersion</key>     <string>11.5</string>
+    <key>LSMinimumSystemVersion</key>     <string>12.0</string>
     <key>NSHighResolutionCapable</key>    <true/>
     <key>NSPrincipalClass</key>           <string>NSApplication</string>
     <key>NSMicrophoneUsageDescription</key>

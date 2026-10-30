@@ -340,7 +340,7 @@ cp -R "$MONITOR_BUNDLE" "$STAGE/"
 LICENCE_DIR="$STAGE/Licences"
 mkdir -p "$LICENCE_DIR"
 
-FTL="SynthLib/ThirdParty/freetype/docs/FTL.TXT"
+FTL="../SynthLib/ThirdParty/freetype/docs/FTL.TXT"
 SDK_LICENCE="${VST3_SDK:-$HOME/Documents/vst3sdk}/LICENSE.txt"
 
 # A function rather than a list of "source:destination" strings: these paths carry dots, spaces and
