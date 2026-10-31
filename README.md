@@ -262,19 +262,8 @@ their own rather than a copy per repository.
 
 ### Building the dependencies
 
-`SynthLib/ThirdParty/{glfw,freetype,libusb}` are **nested submodules**, not directories - which is
-why files must never be copied into them, as a copy collides with the next `submodule update`.
-
-```
-cd SynthLib && git submodule update --init ThirdParty/glfw ThirdParty/freetype
-```
-
-`libusb` is deliberately left out: it is G2-Edit's USB transport and GenBridge has no use for it.
-Only freetype needs building, and it must be built at the same 12.0 deployment target as everything
-else or the linker warns that the object file was built for a newer macOS. The cmake invocation is
-in `G2-Edit/Docs/Third Party build notes.md`; the build directory must be deleted before re-running
-cmake, because the value is cached. glfw is needed for its **headers only** - SynthLib's key and
-mouse constants come from them - so it is not built at all.
+SynthLib is a shared checkout beside this project. `do-plugin` runs its `do-build` first, which builds the library
+and its third-party libraries when they are out of date - see `SynthLib/Docs/build.md`.
 
 **It registers as two devices from one bundle** - four factory classes, a processor and a
 controller each:

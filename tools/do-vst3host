@@ -33,7 +33,7 @@ clang++ -O2 -std=gnu++17 -fobjc-arc -Wall \
 # check that carries its own copy of a number cannot notice the number changing, which is exactly the
 # fault the editor-size check exists to catch.
 clang++ -O2 -std=gnu++17 -Wall \
-    -I "$SDK" -I "$HERE/../vst3" -I "$HERE/../../SynthLib/audio" -I "$HERE/../../SynthLib/src" \
+    -I "$SDK" -I "$HERE/../vst3" -I "$HERE/../poc" -I "$HERE/../../SynthLib/audio" -I "$HERE/../../SynthLib/src" \
     -o "$HERE/vst3check" \
     "$HERE/vst3check.cpp" \
     "$SDK/public.sdk/source/vst/vstinitiids.cpp" \

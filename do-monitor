@@ -34,13 +34,9 @@ GENBRIDGE_VERSION="${GENBRIDGE_VERSION:-0.1.0}"
 OUT_DIR="${GENBRIDGE_PLUGIN_OUT_DIR:-$HERE/build}"
 INSTALL_DIR="${GENBRIDGE_MONITOR_INSTALL:-/Applications}"
 
-FREETYPE_LIB="$SL/ThirdParty/freetype/build/libfreetype.a"
-
-if [[ ! -f "$FREETYPE_LIB" ]]; then
-    print -u2 "error: freetype not built at $FREETYPE_LIB"
-    print -u2 "       see the build notes in G2-Edit/Docs/Third Party build notes.md"
-    exit 1
-fi
+"$SL/do-build"
+SYNTHLIB_LIB="$SL/build/libSynthLib.a"
+FREETYPE_LIB="$SL/build/libfreetype.a"
 
 SOURCES=(
     "$HERE/monitor/gmEngine.c"
@@ -49,35 +45,14 @@ SOURCES=(
     "$HERE/monitor/gmInsert.c"
     "$HERE/poc/resampler.c"
     "$HERE/poc/drift.c"
-    "$SL/audio/device.c"
-    "$SL/audio/ring.c"
-    # The entry points an application provides and a panel needs - this app has no render loop of its own,
-    # the panel view repaints itself, so the plug-in's stubs are exactly right.
-    "$SL/src/synthlibGlobals.c"
-    # SynthLib, the parts a panel needs - the same list as do-plugin's.
-    "$SL/src/utilsGraphics.c"
-    "$SL/src/renderBackend.c"
-    "$SL/src/renderBackendGL.c"
-    "$SL/src/geometry.c"
-    "$SL/src/utils.c"
-    "$SL/src/synthlibHost.c"
-    "$SL/src/synthlibMidi.c"
-    "$SL/src/contextMenu.c"
-    "$SL/src/clickRegion.c"
-    "$SL/src/inputState.c"
-    "$SL/src/synthlibVersion.c"
 )
 
 OBJC_SOURCES=(
     "$HERE/monitor/gmApp.m"
-    "$SL/plugin/synthlibPanelView.m"
-    "$SL/src/renderBackendMetal.m"
 )
 
 WARNFLAGS=(-Wall -Wextra)
-# SYNTHLIB_PLUGIN_BUILD: no GLFW window - the panel view owns the drawing surface. The view's class name is
-# this app's own, as each plug-in names its own.
-DEFS=(-DSYNTHLIB_PLUGIN_BUILD=1 -DGM_VERSION_STRING="\"$GENBRIDGE_VERSION\"")
+DEFS=(-DGM_VERSION_STRING="\"$GENBRIDGE_VERSION\"")
 INCLUDES=(-I"$HERE/monitor" -I"$HERE/poc" -I"$SL/src" -I"$SL/audio" -I"$SL/plugin"
           -I"$SL/ThirdParty/glfw/include" -I"$SL/ThirdParty/freetype/include")
 ARCHS=(-arch arm64 -arch x86_64)
@@ -109,7 +84,7 @@ app="$OUT_DIR/$APP_NAME.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
-clang $ARCHS $MIN "${objects[@]}" "$FREETYPE_LIB" "${LIBS[@]}" -o "$app/Contents/MacOS/$EXE_NAME"
+clang++ $ARCHS $MIN -Wl,-dead_strip "${objects[@]}" "$SYNTHLIB_LIB" "$FREETYPE_LIB" "${LIBS[@]}" -o "$app/Contents/MacOS/$EXE_NAME"
 
 # The icon, from the one 1024-pixel artwork (monitor/icon/make_icon.py draws it), at every size macOS asks for.
 ICON_SRC="$HERE/monitor/icon/AppIcon-1024.png"

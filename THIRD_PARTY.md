@@ -69,8 +69,8 @@ CoreFoundation, Cocoa/AppKit, Metal, QuartzCore, OpenGL, libc++, libobjc, libSys
 
 ## SynthLib
 
-`SynthLib/` is a submodule of first-party code under GPLv3 (`SynthLib/LICENSE`), with the licence
-header on every source file. It is compiled into the plug-in as source, so it raises no separate
+`SynthLib`, beside this project, is first-party code under GPLv3 (`SynthLib/LICENSE`), with the licence
+header on every source file. It is linked statically, so it raises no separate
 distribution obligation beyond GenBridge's own.
 
 Its `THIRD_PARTY.md` describes the libraries SynthLib *can* bundle across all four projects, which

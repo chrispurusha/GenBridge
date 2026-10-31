@@ -14,26 +14,8 @@
 		D4C6D48B9E7ACEFC5D6FEFB4 /* CoreFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 29C10A537C4A90E71BD3BE13 /* CoreFoundation.framework */; };
 		3CEDE6C95B0AF31B63466D6A /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1AC5BF5BAEF083067CA94960 /* Metal.framework */; };
 		1D62FECD16B522E2F987A78F /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FC89C909FFDC5CA74C66AB69 /* QuartzCore.framework */; };
-		2FD385F07A42097C5F28E1A8 /* device.c in Sources */ = {isa = PBXBuildFile; fileRef = 86A6F23992A0D5FDC9951978 /* device.c */; };
-		3787B674E14ADDE7E6EEF041 /* ring.c in Sources */ = {isa = PBXBuildFile; fileRef = 1590614B372DA0B8E478D800 /* ring.c */; };
-		8C48534C8B11BB19B3442E2D /* synthlibGlobals.c in Sources */ = {isa = PBXBuildFile; fileRef = 41FDAF5E44245D366AAA6ED2 /* synthlibGlobals.c */; };
-		61C1DF9B887A7C96ACC5F68A /* synthlibPanelView.m in Sources */ = {isa = PBXBuildFile; fileRef = E951C950C7F40F848DA8AFA8 /* synthlibPanelView.m */; };
-		BD2BE506E713A3FC6890EA46 /* utilsGraphics.c in Sources */ = {isa = PBXBuildFile; fileRef = 59634BA534EFC4E8F340E1DE /* utilsGraphics.c */; };
-		6F83563967A60602FC5EBA25 /* renderBackend.c in Sources */ = {isa = PBXBuildFile; fileRef = 59524A04FAC0D3637A6826BF /* renderBackend.c */; };
-		946C3868F168D945524AE59E /* renderBackendGL.c in Sources */ = {isa = PBXBuildFile; fileRef = 402908D99E358E26EE2A6DE4 /* renderBackendGL.c */; };
-		1DD9136AEC2C8F04A9170698 /* renderBackendMetal.m in Sources */ = {isa = PBXBuildFile; fileRef = 45103D6D261860A428A60021 /* renderBackendMetal.m */; };
-		1458F1A22F516CB35AE8F7E3 /* geometry.c in Sources */ = {isa = PBXBuildFile; fileRef = A4ADEB2BDCFC2A988C3D67C8 /* geometry.c */; };
-		0C1DAB0CFBDC52BD17490767 /* utils.c in Sources */ = {isa = PBXBuildFile; fileRef = A3436F19FBA8C3B11C6AB071 /* utils.c */; };
-		CFA2F53EDDA98DC3B1328CCD /* synthlibHost.c in Sources */ = {isa = PBXBuildFile; fileRef = 66FA16AD411B38D3303CCA17 /* synthlibHost.c */; };
-		A5DF98BB91412C13FC2AF075 /* synthlibMidi.c in Sources */ = {isa = PBXBuildFile; fileRef = 6E8881080098634FAE657CB2 /* synthlibMidi.c */; };
-		3CCF022B7F29F58072B7FC2C /* contextMenu.c in Sources */ = {isa = PBXBuildFile; fileRef = 2523F59FEF664D4ABE7639F5 /* contextMenu.c */; };
-		DF7321C31A097563DB68A34B /* clickRegion.c in Sources */ = {isa = PBXBuildFile; fileRef = 54F1F00234A984E94AFFC064 /* clickRegion.c */; };
-		D199954F1151499C745948FD /* inputState.c in Sources */ = {isa = PBXBuildFile; fileRef = 118BBBF7CFB5ACDB304CF8CC /* inputState.c */; };
-		708FC3C72EB71EE86DE1C8CD /* synthlibVersion.c in Sources */ = {isa = PBXBuildFile; fileRef = 525EE69E189E0EE7EB1FE7B4 /* synthlibVersion.c */; };
 		FD9E94F1C7EB51F60B862528 /* CoreAudio.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 7D1DEADE9BD9482F3E3C1CE5 /* CoreAudio.framework */; };
 		6A62F1B37E2E5D24709B2B2C /* CoreFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 29C10A537C4A90E71BD3BE13 /* CoreFoundation.framework */; };
-		FDED6F092FB53C01CFC25807 /* device.c in Sources */ = {isa = PBXBuildFile; fileRef = 86A6F23992A0D5FDC9951978 /* device.c */; };
-		BEF0920AA1924B33BF8E433B /* ring.c in Sources */ = {isa = PBXBuildFile; fileRef = 1590614B372DA0B8E478D800 /* ring.c */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -199,6 +181,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 2DF7B0A386D7EF949A1E5FEB /* Build configuration list for PBXNativeTarget "GenBridge Monitor" */;
 			buildPhases = (
+				F6C5C18CE5013A7092E0DF64 /* Build SynthLib */,
 				E27E8270F6ECEC17DDC818BB /* Sources */,
 				045E31CA4A20C70ACFF2EF23 /* Frameworks */,
 				E59786C20F469471ACCE5BC0 /* Resources */,
@@ -223,6 +206,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 852A1ABB6940A8CEDC1C53FF /* Build configuration list for PBXNativeTarget "genbridge" */;
 			buildPhases = (
+				E34967590BDF560F591BE1C2 /* Build SynthLib */,
 				1A97B944BCA4479EDD9730C8 /* Sources */,
 				B8BF797187BB97C62A3EF02E /* Frameworks */,
 			);
@@ -287,27 +271,56 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		F6C5C18CE5013A7092E0DF64 /* Build SynthLib */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build SynthLib";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(PROJECT_DIR)/../SynthLib/build/libSynthLib.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/zsh;
+			shellScript = "\"$PROJECT_DIR/../SynthLib/do-build\"\n";
+			showEnvVarsInLog = 0;
+		};
+		E34967590BDF560F591BE1C2 /* Build SynthLib */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build SynthLib";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(PROJECT_DIR)/../SynthLib/build/libSynthLib.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/zsh;
+			shellScript = "\"$PROJECT_DIR/../SynthLib/do-build\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		E27E8270F6ECEC17DDC818BB /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				2FD385F07A42097C5F28E1A8 /* device.c in Sources */,
-				3787B674E14ADDE7E6EEF041 /* ring.c in Sources */,
-				8C48534C8B11BB19B3442E2D /* synthlibGlobals.c in Sources */,
-				61C1DF9B887A7C96ACC5F68A /* synthlibPanelView.m in Sources */,
-				BD2BE506E713A3FC6890EA46 /* utilsGraphics.c in Sources */,
-				6F83563967A60602FC5EBA25 /* renderBackend.c in Sources */,
-				946C3868F168D945524AE59E /* renderBackendGL.c in Sources */,
-				1DD9136AEC2C8F04A9170698 /* renderBackendMetal.m in Sources */,
-				1458F1A22F516CB35AE8F7E3 /* geometry.c in Sources */,
-				0C1DAB0CFBDC52BD17490767 /* utils.c in Sources */,
-				CFA2F53EDDA98DC3B1328CCD /* synthlibHost.c in Sources */,
-				A5DF98BB91412C13FC2AF075 /* synthlibMidi.c in Sources */,
-				3CCF022B7F29F58072B7FC2C /* contextMenu.c in Sources */,
-				DF7321C31A097563DB68A34B /* clickRegion.c in Sources */,
-				D199954F1151499C745948FD /* inputState.c in Sources */,
-				708FC3C72EB71EE86DE1C8CD /* synthlibVersion.c in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -315,8 +328,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				FDED6F092FB53C01CFC25807 /* device.c in Sources */,
-				BEF0920AA1924B33BF8E433B /* ring.c in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -358,7 +369,10 @@
 				);
 				MARKETING_VERSION = 0.1.0;
 				ONLY_ACTIVE_ARCH = YES;
-				OTHER_LDFLAGS = "$(PROJECT_DIR)/../SynthLib/ThirdParty/freetype/build/libfreetype.a";
+				OTHER_LDFLAGS = (
+					"$(PROJECT_DIR)/../SynthLib/build/libSynthLib.a",
+					"$(PROJECT_DIR)/../SynthLib/build/libfreetype.a",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.chrispurusha.genbridge.monitor;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = YES;
@@ -399,7 +413,10 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
-				OTHER_LDFLAGS = "$(PROJECT_DIR)/../SynthLib/ThirdParty/freetype/build/libfreetype.a";
+				OTHER_LDFLAGS = (
+					"$(PROJECT_DIR)/../SynthLib/build/libSynthLib.a",
+					"$(PROJECT_DIR)/../SynthLib/build/libfreetype.a",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.chrispurusha.genbridge.monitor;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = YES;
@@ -419,6 +436,7 @@
 					"$(PROJECT_DIR)/../SynthLib/audio",
 				);
 				ONLY_ACTIVE_ARCH = YES;
+				OTHER_LDFLAGS = "$(PROJECT_DIR)/../SynthLib/build/libSynthLib.a";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 			};
 			name = Debug;
@@ -435,6 +453,7 @@
 					"$(PROJECT_DIR)/poc",
 					"$(PROJECT_DIR)/../SynthLib/audio",
 				);
+				OTHER_LDFLAGS = "$(PROJECT_DIR)/../SynthLib/build/libSynthLib.a";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 			};
 			name = Release;
@@ -477,7 +496,7 @@
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -552,7 +571,7 @@
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
